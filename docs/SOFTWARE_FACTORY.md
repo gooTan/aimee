@@ -253,6 +253,7 @@ or `POST /v1/workflow/items/{id}/gate` with `{"decision":"approve","gate":"human
 | `oracle adapter: exit N with no answer output` | browser automation failed mid-run | check `oracle status`, re-login if needed; the run parks and resumes cleanly |
 | oracle reviews park `runner_unavailable` when aimee runs in a container | the container has no browser | run `oracle serve` (or `oracle bridge` from Windows) next to the browser and point `cli_cmd` at the remote engine flags |
 | oracle runs GPT-5.5 instead of the current Pro tier | oracle's `gpt-5-pro` alias mis-normalizes (steipete/oracle#373) | pin `"model": "gpt-5.6"` plus `--browser-thinking-time pro` in `cli_cmd`; switch to the `gpt-5-pro` alias once the upstream fix ships |
+| oracle runs an unexpected effort tier (for example Pro when you wanted fast) | ChatGPT's Effort picker is sticky account state; oracle pins and verifies the model but leaves effort wherever the last run set it unless told | always pass an explicit `--browser-thinking-time` on every oracle seat: `pro` for the review ladder, `standard` for cheap consultations (valid: light, standard, extended, extra-high, pro, heavy) |
 | codex dispatch runs the wrong model | the agent entry has no `model` pin | set the exact id from your plan's model list |
 | everything parks `runner_unavailable` | delegate CLI missing from PATH of aimee-server | install the CLI for the service user |
 

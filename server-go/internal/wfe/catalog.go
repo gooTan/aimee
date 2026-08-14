@@ -43,7 +43,10 @@ type customBlockFile struct {
 var BuiltinBlocks = []BlockDefinition{
 	{Name: "author.proposal", Produces: "proposal", Accepts: []string{"proposal"}, InputPorts: []string{"proposal"}},
 	{Name: "trigger.watch-dir", Produces: "proposal"},
-	{Name: "author.plan", Produces: "plan", Accepts: []string{"proposal"}, InputPorts: []string{"proposal"}, RequiredPorts: []string{"proposal"}, RequiresInput: true},
+	// author.plan also accepts an intent-typed input: a ContextBrief prepared by
+	// a cheap delegate is the only planning input a premium planner receives,
+	// and briefs travel as the intent artifact type.
+	{Name: "author.plan", Produces: "plan", Accepts: []string{"proposal", "intent"}, InputPorts: []string{"proposal"}, RequiredPorts: []string{"proposal"}, RequiresInput: true},
 	{Name: "implement", Produces: "branch", Accepts: []string{"plan", "intent"}, InputPorts: []string{"plan"}, RequiredPorts: []string{"plan"}, RequiresInput: true},
 	{Name: "document", Produces: "branch", Accepts: []string{"branch"}, InputPorts: []string{"branch"}, RequiredPorts: []string{"branch"}, RequiresInput: true},
 	{Name: "source.archive", Produces: "branch", Accepts: []string{"branch"}, InputPorts: []string{"branch"}, RequiredPorts: []string{"branch"}, RequiresInput: true},

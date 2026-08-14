@@ -133,6 +133,9 @@ type NativeRunner struct {
 	artifacts *wfe.ArtifactStore
 	workflows *wfe.Registry
 	forge     Forge
+	// premium bounds dispatches to the expensive planning delegates. The zero
+	// value enforces nothing.
+	premium PremiumPolicy
 	// reviews convenes a roundtable. The runner does not host a panel: the
 	// module does, over the bus, so this is the whole of the runner's coupling
 	// to reviewing.
@@ -146,6 +149,29 @@ type RoundtableReviewer interface {
 }
 
 func (r *NativeRunner) SetRoundtableReviewer(reviewer RoundtableReviewer) { r.reviews = reviewer }
+
+func (r *NativeRunner) SetPremiumPolicy(policy PremiumPolicy) { r.premium = policy }
+
+// admitPremium is the one place a premium delegate can pass on its way to a
+// provider. It refuses write capability outright and records the dispatch in
+// the durable per-run-tree ledger before anything is spent; the ledger insert
+// is atomic against the cap so concurrent siblings cannot overshoot it.
+// Replay-only steps re-consume durable results and must not double-count.
+func (r *NativeRunner) admitPremium(ctx context.Context, step StepRequest, request DelegateRequest) error {
+	if !r.premium.IsPremium(request.Delegate) {
+		return nil
+	}
+	if request.Tools || request.Role == "code" {
+		return fmt.Errorf("%w: delegate %q role %q", ErrPremiumWriteRefused, request.Delegate, request.Role)
+	}
+	if step.ReplayOnly {
+		return nil
+	}
+	if _, err := r.db.RecordPremiumCall(ctx, step.WorkItem.ID, step.Node.ID, request.Delegate, r.premium.MaxCalls); err != nil {
+		return err
+	}
+	return nil
+}
 
 const (
 	roundtableDelegateRole        = "review"
@@ -206,6 +232,9 @@ func boundOrUnset(d time.Duration) string {
 func (e *DelegateLimitError) Unwrap() error { return e.Err }
 
 func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request DelegateRequest) (DelegateResult, error) {
+	if err := r.admitPremium(ctx, step, request); err != nil {
+		return DelegateResult{}, err
+	}
 	if err := applyDelegateDeadlineCap(ctx, &request); err != nil {
 		return DelegateResult{}, err
 	}
@@ -240,6 +269,13 @@ func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requ
 		return nil
 	}
 	for i := range requests {
+		if err := r.admitPremium(ctx, step, requests[i]); err != nil {
+			out := make([]DelegateGroupResult, len(requests))
+			for j := range out {
+				out[j].Err = err
+			}
+			return out
+		}
 		if err := applyDelegateDeadlineCap(ctx, &requests[i]); err != nil {
 			out := make([]DelegateGroupResult, len(requests))
 			for j := range out {
@@ -529,6 +565,16 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 	if !ok {
 		return StepResult{}, errors.New("author.plan missing proposal input")
 	}
+	// require_brief marks this planner as premium-facing: its input must be a
+	// valid, size-bounded ContextBrief, checked before any delegate dispatch so
+	// a malformed brief costs nothing and bounces back to the preparation step.
+	requireBrief := paramBool(req.Node, "require_brief")
+	if requireBrief {
+		if err := validateContextBrief(proposal.Content); err != nil {
+			return StepResult{Status: StepChanges,
+				Detail: "premium planning input rejected: " + err.Error()}, nil
+		}
+	}
 	// The proposal input is the immutable workflow-entry request; only its schema name is historical.
 	prompt := "Author a complete implementation plan for the original request below. Return only the plan; do not truncate it. " +
 		"Complete means every part of the request is covered, not that the plan is large. Plan the smallest work that satisfies the request as written: " +
@@ -536,7 +582,17 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 		"Work the request did not ask for but that you judge genuinely necessary is technical debt. Taking on documented technical debt is completely acceptable; the requirement is that it is written down. " +
 		"Name it under a Technical debt, Deferred follow-up, or Non-goals heading and do not plan it — that is a correct and expected outcome, not a failure to plan. " +
 		"Deferring it means planning none of it, including its groundwork: do not plan a store, fixture, format, or hook whose only purpose is to enable work this same plan defers. " +
-		"What is not acceptable is leaving it undocumented: debt you neither plan nor record is a gap that silently ships.\n\nORIGINAL REQUEST:\n" + string(proposal.Content)
+		"What is not acceptable is leaving it undocumented: debt you neither plan nor record is a gap that silently ships.\n\nORIGINAL REQUEST:\n"
+	if requireBrief {
+		// The immutable request stays the planning target; the brief is the
+		// complete context the planner gets. Nothing else -- no listings, logs,
+		// diffs, or history -- may be appended to a premium planning prompt.
+		prompt += req.Proposal +
+			"\n\nCONTEXT BRIEF (relevant files, interfaces, constraints, prior decisions, risks, open questions, acceptance requirements, artifact references):\n" +
+			string(proposal.Content)
+	} else {
+		prompt += string(proposal.Content)
+	}
 	if req.Feedback != nil {
 		encoded, _ := json.Marshal(req.Feedback)
 		prompt += "\n\nPRIOR REVIEW FEEDBACK TO RESOLVE:\n" + string(encoded)
@@ -552,8 +608,20 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 }
 
 func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind string) (StepResult, error) {
+	// brief turns the understand step into ContextBrief preparation: the typed,
+	// size-bounded summary that is the only planning input a premium delegate
+	// may receive. The artifact type stays "intent" so split accepts it.
+	brief := kind == "intent" && paramBool(req.Node, "brief")
+	validate := func(content []byte) error {
+		if brief {
+			return validateContextBrief(content)
+		}
+		return validateStructured(kind, content)
+	}
 	var prompt string
-	if kind == "intent" {
+	if brief {
+		prompt = contextBriefPrompt(req.Proposal)
+	} else if kind == "intent" {
 		prompt = "Scope the engineering task below. Return only JSON shaped {\"schema_version\":1,\"status\":\"unconfirmed\",\"summary\":\"...\",\"rationale\":\"...\",\"acceptance_criteria\":[\"...\"]}. Describe the task, never the bookkeeping record.\n\nTASK:\n" + req.Proposal
 	} else {
 		source := inputText(req, "plan")
@@ -562,6 +630,15 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		}
 		if source == "" {
 			return StepResult{}, errors.New("split requires an in.plan or in.intent artifact binding")
+		}
+		// require_brief guards the premium planner's input, not its output: a
+		// malformed or oversized brief bounces back to the preparation step
+		// without any premium dispatch or ledger entry.
+		if paramBool(req.Node, "require_brief") {
+			if err := validateContextBrief([]byte(source)); err != nil {
+				return StepResult{Status: StepChanges,
+					Detail: "premium planning input rejected: " + err.Error()}, nil
+			}
 		}
 		if requestRequiresSingleSlice(req.Proposal) {
 			title, err := pullRequestTitle(req.Proposal)
@@ -613,7 +690,7 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		costUnknown = costUnknown || result.CostUnknown
 		content, validationErr = extractJSONObject(result.Response)
 		if validationErr == nil {
-			validationErr = validateStructured(kind, content)
+			validationErr = validate(content)
 		}
 		if validationErr == nil {
 			break
@@ -918,6 +995,11 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	}
 	persona := paramString(req.Node, "persona", paramString(req.Node, "reviewer", "reviewer"))
 	prompt := "Review this complete artifact against the proposal. Return only JSON shaped {\"verdict\":\"approve\" or \"changes\" or \"blocked\",\"findings\":[{\"id\":\"...\",\"severity\":\"blocking\",\"location\":\"...\",\"summary\":\"...\",\"recommendation\":\"...\"}]}.\n\nPROPOSAL:\n" + req.Proposal + "\n\nARTIFACT:\n" + string(reviewed.Content)
+	if req.Node.OnEscalate != "" {
+		prompt = strings.Replace(prompt,
+			"\"recommendation\":\"...\"}]}.",
+			"\"recommendation\":\"...\"}],\"escalation\":\"\"}. Set escalation only when the blocking problem is a genuine architecture, security, migration, contract, or requirement decision that needs a senior reviewer; use exactly one of those five words. Routine defects, test failures, and style findings must leave escalation empty.", 1)
+	}
 	workdir := req.WorkItem.Worktree
 	if workdir == "" {
 		var err error
@@ -941,7 +1023,8 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	if parsed.Verdict == "approve" && len(parsed.Findings) == 0 {
 		return StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved", ContentHash: reviewed.Hash, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
 	}
-	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: reviewed.Hash}
+	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: reviewed.Hash,
+		Escalation: normalizeEscalation(parsed.Escalation)}
 	for i, finding := range parsed.Findings {
 		feedback.Findings = append(feedback.Findings, wfe.Finding{ID: firstNonempty(finding.ID, fmt.Sprintf("%s-%d", persona, i+1)), Persona: persona, Severity: firstNonempty(finding.Severity, "blocking"), Location: finding.Location, Summary: finding.Summary, Recommendation: finding.Recommendation})
 	}
@@ -1319,6 +1402,9 @@ type panelResponse struct {
 	OriginalRequestAlignment panelAlignment `json:"original_request_alignment"`
 	Verdict                  string         `json:"verdict"`
 	Findings                 []panelFinding `json:"findings"`
+	// Escalation is honored only for the five known decision classes; any other
+	// value degrades to the routine repair path. See normalizeEscalation.
+	Escalation string `json:"escalation"`
 }
 type panelSeat struct {
 	persona, selector, participant string

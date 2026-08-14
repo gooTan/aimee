@@ -124,7 +124,16 @@ CREATE TABLE IF NOT EXISTS lifecycle_delegate_job (
   participant_token TEXT NOT NULL DEFAULT '',
   cancel_attempts INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);`
+);
+CREATE TABLE IF NOT EXISTS wfe_premium_call (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  root_id TEXT NOT NULL,
+  work_item_id TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT '',
+  delegate TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_wfe_premium_call_root ON wfe_premium_call(root_id);`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate DB1 WFE schema: %w", err)
 	}

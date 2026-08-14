@@ -148,6 +148,9 @@ func main() {
 		if runnerErr != nil {
 			log.Fatal(runnerErr)
 		}
+		// Premium planning delegates are budgeted per run tree. The default policy
+		// (sol and fable, two calls) is env-tunable; see docs/SOFTWARE_FACTORY.md.
+		nativeRunner.SetPremiumPolicy(engine.PremiumPolicyFromEnv())
 		// Reviews run in the roundtable module over the daemon's bus. This process
 		// attaches as a requesting principal under its generated grant; it does
 		// not host a panel, so there is one implementation and one place that

@@ -311,6 +311,65 @@ static void test_serve_unknown_and_nonrequests(void)
    printf("PASS: unknown request errors; notifications/responses pass through\n");
 }
 
+static void test_serve_write_denied_when_read_only(void)
+{
+   char wdbuf[64];
+   char *wd = make_workdir(wdbuf, sizeof(wdbuf));
+   char *resp = NULL;
+   int r = acp_serve_client_request_gated(
+       "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"fs/write_text_file\","
+       "\"params\":{\"path\":\"out.txt\",\"content\":\"nope\"}}",
+       wd, 0, &resp);
+   assert(r == 1 && resp != NULL);
+   assert(strstr(resp, "\"error\"") != NULL);
+   assert(strstr(resp, "read-only") != NULL);
+   free(resp);
+   char full[512];
+   snprintf(full, sizeof(full), "%s/out.txt", wd);
+   assert(access(full, F_OK) != 0); /* nothing was written */
+
+   /* Reads still work for a read-only delegate. */
+   resp = NULL;
+   snprintf(full, sizeof(full), "%s/in.txt", wd);
+   FILE *f = fopen(full, "wb");
+   assert(f && fputs("readable", f) >= 0 && fclose(f) == 0);
+   r = acp_serve_client_request_gated(
+       "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"fs/read_text_file\","
+       "\"params\":{\"path\":\"in.txt\"}}",
+       wd, 0, &resp);
+   assert(r == 1 && resp != NULL);
+   assert(strstr(resp, "readable") != NULL && strstr(resp, "\"error\"") == NULL);
+   free(resp);
+   unlink(full);
+   printf("PASS: read-only gate refuses writes but serves reads\n");
+}
+
+static void test_serve_permission_denied_when_read_only(void)
+{
+   char *resp = NULL;
+   int r = acp_serve_client_request_gated(
+       "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"session/request_permission\",\"params\":{"
+       "\"options\":[{\"optionId\":\"yes\",\"kind\":\"allow_once\"},"
+       "{\"optionId\":\"rej\",\"kind\":\"reject_once\"}]}}",
+       "/tmp", 0, &resp);
+   assert(r == 1 && resp != NULL);
+   assert(strstr(resp, "\"rej\"") != NULL); /* picked the reject option */
+   assert(strstr(resp, "\"yes\"") == NULL);
+   free(resp);
+
+   /* With no reject option offered, the read-only gate cancels outright. */
+   resp = NULL;
+   r = acp_serve_client_request_gated(
+       "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"session/request_permission\",\"params\":{"
+       "\"options\":[{\"optionId\":\"yes\",\"kind\":\"allow_always\"}]}}",
+       "/tmp", 0, &resp);
+   assert(r == 1 && resp != NULL);
+   assert(strstr(resp, "\"cancelled\"") != NULL);
+   assert(strstr(resp, "\"yes\"") == NULL);
+   free(resp);
+   printf("PASS: read-only gate rejects/cancels permission requests\n");
+}
+
 int main(void)
 {
    test_acp_adapter_registered();
@@ -329,6 +388,8 @@ int main(void)
    test_serve_path_sandbox();
    test_serve_permission_autoapprove();
    test_serve_unknown_and_nonrequests();
+   test_serve_write_denied_when_read_only();
+   test_serve_permission_denied_when_read_only();
    printf("ALL PASS\n");
    return 0;
 }

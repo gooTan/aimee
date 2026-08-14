@@ -213,6 +213,17 @@ func newLiveSmokeRepo(t *testing.T, root string) string {
 	if err := os.WriteFile(filepath.Join(repo, "verify.sh"), []byte(verify), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	skillPath := filepath.Join(repo, ".agents", "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skill := "# Code review skill\n\n" +
+		"Review along two axes. Standards: correctness, safety, convention consistency. " +
+		"Spec: the change does exactly what the request asked, nothing missing, nothing extra. " +
+		"Only report findings you would block a merge on.\n"
+	if err := os.WriteFile(skillPath, []byte(skill), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	run(repo, "add", ".")
 	run(repo, "commit", "-m", "seed live smoke fixture")
 	run(repo, "push", "-u", "origin", "trunk")
@@ -245,10 +256,11 @@ func hostPath(command, path string) string {
 }
 
 func (a *liveSmokeAgents) Delegate(ctx context.Context, request DelegateRequest) (DelegateResult, error) {
-	template := os.Getenv("AIMEE_SMOKE_CMD_" + strings.ToUpper(strings.TrimSpace(request.Delegate)))
+	envKey := "AIMEE_SMOKE_CMD_" + strings.ReplaceAll(
+		strings.ToUpper(strings.TrimSpace(request.Delegate)), "-", "_")
+	template := os.Getenv(envKey)
 	if template == "" {
-		return DelegateResult{}, fmt.Errorf("no AIMEE_SMOKE_CMD_%s template for delegate %q",
-			strings.ToUpper(request.Delegate), request.Delegate)
+		return DelegateResult{}, fmt.Errorf("no %s template for delegate %q", envKey, request.Delegate)
 	}
 	args := strings.Fields(template)
 	a.dispatchN++

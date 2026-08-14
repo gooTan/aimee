@@ -14,8 +14,9 @@ human approval. The external CLIs are dumb, single-shot delegates.
 | `sol` | Codex CLI (`codex`) | `gpt-5.6-sol` | premium second opinion: plan review, difficult debugging, escalated decisions | read-only |
 | `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
 | `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
-| `antigravity` | Antigravity CLI (`agy`) | pick one from `agy models` (a Gemini 3.x model) | Gemini reviewer in the pro ladder; optional escalation seat | read-only by role |
-| `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.6` with `--browser-thinking-time pro` (GPT-5.6 Pro) | frontier reviewer in the pro ladder; optional adjudicator | consultation only: no tools, no worktree |
+| `sol-review` | Codex CLI (`codex`) | `gpt-5.6-sol` at high effort | senior verifying reviewer in the pro ladder: confirms or discards gemini's findings, then reviews adversarially (round-bounded, not ledgered) | read-only |
+| `antigravity` | Antigravity CLI (`agy`) | `gemini-3.7-flash-high` | initial PR reviewer in the pro ladder | read-only by role |
+| `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.6` with `--browser-thinking-time pro` (GPT-5.6 Pro) | OPTIONAL consultation seat; not in the shipped ladder (browser automation is fragile) | consultation only: no tools, no worktree |
 
 Every seat uses the CLI's own login state. Aimee never extracts or proxies
 OAuth tokens; the child process reads the CLI's normal credential store from
@@ -65,29 +66,42 @@ repair path. Sol and Fable are never both called automatically on one path.
 
 ```
 prep (luna brief) -> plan (fable, one capped call) -> implement (deepseek)
-  -> freeze -> review ladder, cheapest first:
-       luna -> oracle (ChatGPT web) -> gemini (Antigravity)
+  -> freeze -> gemini_review (Gemini 3.7 Flash high: initial PR review)
+  -> sol_review (Codex gpt-5.6-sol, high effort: verifies gemini's findings
+     adversarially, then its own adversarial review)
   -> draft PR -> human gate -> deliver
 ```
 
-The fully autonomous iterate-until-clean variant. Findings from any rung of
-the ladder return directly to the DeepSeek implementer; the repaired diff is
-re-verified and climbs the whole ladder again. The draft pull request cannot
-open until luna, oracle, and gemini have each approved the same frozen diff
-with zero findings, so the human gate is only ever presented with a fully
-converged change. Oracle runs before Gemini because it is the cheaper seat.
+The fully autonomous iterate-until-clean variant, shaped like a
+code-review-skill pass: the cheap seat reviews first along two axes
+(standards/correctness and spec-compliance with the original request), and
+the senior seat adversarially verifies those findings, discarding any it
+cannot confirm, before running its own independent adversarial review.
+Gemini's verdict never gates delivery by itself: a false positive cannot
+block the PR, and a cheap approval cannot green-light it. Only findings sol
+itself asserts return to the DeepSeek implementer; after a repair the
+re-frozen diff climbs the whole ladder again, so the human gate is only
+ever presented with a diff sol approved with zero findings.
 
-Oracle and Antigravity are flat-rate consultation seats: they are bounded by
-each node's `max_rounds` (four) and the engine's no-progress convergence
-detection rather than the sol/fable premium ledger, because iterate-until-
-clean requires repeated review rounds. The planning ledger still caps fable
-plus at most one sol escalation at two calls.
+`sol-review` is deliberately a distinct delegate entry from the ledgered
+`sol` escalation seat: iterate-until-clean needs repeated senior review
+rounds, so the ladder rungs are bounded by each node's `max_rounds` (four)
+and the engine's no-progress convergence detection rather than the premium
+planning ledger, which keeps guarding fable. Codex reasoning effort comes
+from `~/.codex/config.toml` (`model_reasoning_effort = "high"`).
 
-Oracle integration boundary: aimee writes the complete review prompt to a
-temporary task file, runs `oracle -p <pointer> -f <task-file> --write-output
-<answer-file>`, and reads back only the final assistant message. Oracle never
-receives tools, a worktree, credentials, or conversation history; it is a
-provider adapter, and aimee remains the workflow controller.
+### Optional: the oracle consultation seat
+
+The `oracle` cli_kind drives a signed-in ChatGPT web session (GPT-5.6 Pro
+via `-m gpt-5.6 --browser-thinking-time pro`) as a pure consultation seat:
+aimee writes the complete prompt to a temporary task file, runs
+`oracle -p <pointer> -f <task-file> --write-output <answer-file>`, and reads
+back only the final assistant message; no tools, worktree, credentials, or
+history. It works, and supports up to three concurrent browser slots, but
+browser automation is the most fragile link in any pipeline (window
+lifecycle, picker drift, sticky effort state), so it is not wired into the
+shipped ladder. Use it as a manually pinned adjudicator or swap it into a
+custom workflow if the trade-off suits you.
 
 ## Premium-call limits
 
@@ -115,7 +129,8 @@ claude               # sign in once; verify with: claude -p "hi"
 opencode auth login  # verify with: opencode models
 agy                  # launch with no arguments to sign in; verify with: agy models
 
-# Oracle (ChatGPT web) keeps its own Chrome profile; sign in there once:
+# OPTIONAL, only if you enable the oracle consultation seat. Oracle keeps
+# its own Chrome profile; sign in there once:
 npm install -g @steipete/oracle
 oracle --engine browser --browser-manual-login --browser-keep-browser -p "HI"
 ```
@@ -187,9 +202,19 @@ shipped workflows reference the delegate names below; keep them.
     "backend": "provider-cli",
     "cli_kind": "agy",
     "cli_cmd": "agy",
-    "model": "gemini-3.1-pro-high",
+    "model": "gemini-3.7-flash-high",
     "roles": ["review", "explain"],
     "cli_idle_timeout_ms": 1800000,
+    "tier_price_exempt": "flat-rate subscription seat",
+    "enabled": true
+  },
+  {
+    "name": "sol-review",
+    "backend": "provider-cli",
+    "cli_kind": "codex",
+    "cli_cmd": "codex",
+    "model": "gpt-5.6-sol",
+    "roles": ["review", "explain"],
     "tier_price_exempt": "flat-rate subscription seat",
     "enabled": true
   },
@@ -202,7 +227,7 @@ shipped workflows reference the delegate names below; keep them.
     "roles": ["review", "explain"],
     "cli_idle_timeout_ms": 2700000,
     "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
+    "enabled": false
   }
 ]
 ```
@@ -234,8 +259,8 @@ The definitions ship in `config/workflows/` and are seeded to
 `$AIMEE_HOME/workflows` on container start. Admit work as usual (watch-dir
 trigger, API submit, or browser) and select `quick-change` for routine fixes,
 `orchestrated-change` for anything that deserves a plan, or
-`orchestrated-change-pro` when the frozen diff must clear the full
-luna/oracle/gemini review ladder before you ever see the draft pull request.
+`orchestrated-change-pro` when the frozen diff must clear the
+gemini-then-sol review ladder before you ever see the draft pull request.
 All three are `enforced` and end in a human gate. Approve or reject from the browser Workflow Actions page
 or `POST /v1/workflow/items/{id}/gate` with `{"decision":"approve","gate":"human_gate"}`.
 

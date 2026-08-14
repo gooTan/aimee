@@ -988,6 +988,31 @@ func feedbackHasBlockingFinding(feedback *wfe.ReviewFeedback) bool {
 	return false
 }
 
+// maxReviewSkillBytes bounds how much of a repository's code-review skill
+// document is embedded in a review prompt.
+const maxReviewSkillBytes = 24 * 1024
+
+// repoCodeReviewSkill returns the target repository's own code-review skill
+// document when it ships one, so every reviewing delegate applies the repo's
+// documented review method and standards instead of a generic checklist.
+func repoCodeReviewSkill(workdir string) string {
+	for _, rel := range []string{
+		".agents/skills/code-review/SKILL.md",
+		".claude/skills/code-review/SKILL.md",
+		"skills/code-review/SKILL.md",
+	} {
+		content, err := os.ReadFile(filepath.Join(workdir, rel))
+		if err != nil {
+			continue
+		}
+		if len(content) > maxReviewSkillBytes {
+			content = content[:maxReviewSkillBytes]
+		}
+		return string(content)
+	}
+	return ""
+}
+
 func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult, error) {
 	reviewed, ok := req.Inputs["src"]
 	if !ok {
@@ -999,6 +1024,29 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 		prompt = strings.Replace(prompt,
 			"\"recommendation\":\"...\"}]}.",
 			"\"recommendation\":\"...\"}],\"escalation\":\"\"}. Set escalation only when the blocking problem is a genuine architecture, security, migration, contract, or requirement decision that needs a senior reviewer; use exactly one of those five words. Routine defects, test failures, and style findings must leave escalation empty.", 1)
+	}
+	// task specializes the rung the same way it does for implement: review
+	// ladders use it to give each seat its axes (standards/spec, adversarial
+	// verification) without minting new blocks.
+	if task := paramString(req.Node, "task", ""); task != "" {
+		prompt += "\n\nREVIEW INSTRUCTIONS:\n" + task
+	}
+	// When the repository documents its own review method, every reviewing
+	// seat applies it.
+	reviewWorkdir := req.WorkItem.Worktree
+	if reviewWorkdir == "" {
+		reviewWorkdir = req.WorkItem.Repo
+	}
+	if skill := repoCodeReviewSkill(reviewWorkdir); skill != "" {
+		prompt += "\n\nREPOSITORY CODE-REVIEW SKILL (apply this repository's documented review method and standards):\n" + skill
+	}
+	// A verification rung receives the previous reviewer's findings. The
+	// contract is adversarial: confirm or discard each finding against the
+	// artifact; only findings this reviewer itself asserts survive, so one
+	// seat's false positives cannot block delivery on their own.
+	if req.Feedback != nil && len(req.Feedback.Findings) > 0 {
+		encoded, _ := json.Marshal(req.Feedback)
+		prompt += "\n\nPRIOR REVIEWER FINDINGS TO VERIFY:\nAdversarially verify each prior finding against the artifact. Discard any finding you cannot confirm as a real problem. Carry every confirmed problem into your own findings list; your verdict must reflect only what you confirmed plus what you found yourself.\n" + string(encoded)
 	}
 	workdir := req.WorkItem.Worktree
 	if workdir == "" {

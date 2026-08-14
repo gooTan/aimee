@@ -285,7 +285,7 @@ func TestQuickChangeUsesZeroPremiumCalls(t *testing.T) {
 	if got := run.premiumCalls(t); got != 0 {
 		t.Fatalf("quick-change recorded %d premium calls, want 0", got)
 	}
-	for _, name := range []string{"sol", "fable", "oracle", "antigravity"} {
+	for _, name := range []string{"sol", "fable", "sol-review", "oracle", "antigravity"} {
 		if calls := agents.delegateCalls(name); calls != 0 {
 			t.Fatalf("quick-change dispatched %s %d times, want 0", name, calls)
 		}
@@ -314,7 +314,7 @@ func TestOrchestratedChangeHappyPathUsesExactlyOnePremiumCall(t *testing.T) {
 	if calls := agents.delegateCalls("fable"); calls != 1 {
 		t.Fatalf("fable planned %d times, want exactly 1", calls)
 	}
-	for _, name := range []string{"sol", "oracle", "antigravity"} {
+	for _, name := range []string{"sol", "sol-review", "oracle", "antigravity"} {
 		if calls := agents.delegateCalls(name); calls != 0 {
 			t.Fatalf("%s was dispatched %d times on the standard happy path, want 0", name, calls)
 		}
@@ -514,8 +514,8 @@ func TestProWorkflowLadderApprovesBeforeDraftPR(t *testing.T) {
 	agents := &factoryAgents{}
 	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
 	item := run.waitFor(t, "active", "human_gate")
-	// Cheapest-first ladder, each rung exactly once on the happy path.
-	want := []string{"luna", "oracle", "antigravity"}
+	// Gemini reviews first; sol reviews adversarially even after an approval.
+	want := []string{"antigravity", "sol-review"}
 	got := reviewerSequence(agents.recorded())
 	if len(got) != len(want) {
 		t.Fatalf("review ladder = %v, want %v", got, want)
@@ -525,15 +525,14 @@ func TestProWorkflowLadderApprovesBeforeDraftPR(t *testing.T) {
 			t.Fatalf("review ladder = %v, want %v", got, want)
 		}
 	}
-	// Only fable is ledgered premium; the consultation seats are round-bounded.
+	// Only fable is ledgered premium; the review seats are round-bounded.
 	if count := run.premiumCalls(t); count != 1 {
 		t.Fatalf("pro happy path recorded %d premium calls, want 1 (fable)", count)
 	}
-	// The consultation reviewers are read-only.
 	for _, request := range agents.recorded() {
-		if request.Delegate == "oracle" || request.Delegate == "antigravity" {
+		if request.Delegate == "sol-review" || request.Delegate == "antigravity" {
 			if request.Tools || request.Role != "review" {
-				t.Fatalf("consultation seat dispatched outside read-only review: %+v", request)
+				t.Fatalf("review seat dispatched outside read-only review: %+v", request)
 			}
 		}
 	}
@@ -547,43 +546,72 @@ func TestProWorkflowLadderApprovesBeforeDraftPR(t *testing.T) {
 	run.waitFor(t, "accepted", "")
 }
 
-func TestProWorkflowIteratesOracleFindingsWithoutHumanInput(t *testing.T) {
-	agents := &factoryAgents{reviews: map[string][]string{"oracle": {reviewChanges("")}}}
+func TestProWorkflowSolDiscardsGeminiFalsePositives(t *testing.T) {
+	// Gemini reports a finding; sol adversarially verifies it, cannot confirm
+	// it, and approves. The PR opens with NO repair round: a cheap seat's
+	// false positive cannot block delivery on its own.
+	agents := &factoryAgents{reviews: map[string][]string{"antigravity": {reviewChanges("")}}}
 	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
 	run.waitFor(t, "active", "human_gate")
-	// oracle's findings went straight back to the implementer; the repaired
-	// diff climbed the whole ladder again, and gemini ran only after oracle's
-	// approval. No human input, no extra ledgered premium.
-	if calls := agents.delegateCalls("deepseek"); calls != 2 {
-		t.Fatalf("deepseek implemented %d times, want 2 (initial + oracle repair)", calls)
+	if calls := agents.delegateCalls("deepseek"); calls != 1 {
+		t.Fatalf("discarded finding still triggered %d implementations, want 1", calls)
 	}
-	if calls := agents.delegateCalls("oracle"); calls != 2 {
-		t.Fatalf("oracle reviewed %d times, want 2", calls)
+	verifyPromptSeen := false
+	for _, request := range agents.recorded() {
+		if request.Delegate == "sol-review" &&
+			strings.Contains(request.Prompt, "PRIOR REVIEWER FINDINGS TO VERIFY") {
+			verifyPromptSeen = true
+		}
 	}
-	if calls := agents.delegateCalls("antigravity"); calls != 1 {
-		t.Fatalf("gemini reviewed %d times, want exactly 1 (after oracle approval)", calls)
-	}
-	if calls := agents.delegateCalls("sol"); calls != 0 {
-		t.Fatalf("oracle findings dispatched sol %d times, want 0", calls)
-	}
-	if count := run.premiumCalls(t); count != 1 {
-		t.Fatalf("oracle iteration changed the premium ledger: %d, want 1", count)
+	if !verifyPromptSeen {
+		t.Fatal("sol never received gemini's findings for adversarial verification")
 	}
 	run.forge.mu.Lock()
 	opens := len(run.forge.opens)
 	run.forge.mu.Unlock()
 	if opens != 1 {
-		t.Fatalf("opened %d PRs, want exactly 1 after convergence", opens)
+		t.Fatalf("opened %d PRs, want 1", opens)
+	}
+	if count := run.premiumCalls(t); count != 1 {
+		t.Fatalf("verification changed the premium ledger: %d, want 1", count)
 	}
 }
 
-func TestProWorkflowGeminiFindingsRestartTheLadder(t *testing.T) {
-	agents := &factoryAgents{reviews: map[string][]string{"antigravity": {reviewChanges("")}}}
+func TestProWorkflowSolConfirmedFindingsDriveRepair(t *testing.T) {
+	// Gemini finds a problem, sol confirms it (returns changes), deepseek
+	// repairs, and the repaired diff climbs the whole ladder again before the
+	// PR opens.
+	agents := &factoryAgents{reviews: map[string][]string{
+		"antigravity": {reviewChanges("")},
+		"sol-review":  {reviewChanges("")},
+	}}
 	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
 	run.waitFor(t, "active", "human_gate")
-	// A gemini finding means the repaired diff must clear every rung again:
-	// luna and oracle re-review before gemini sees it a second time.
-	want := []string{"luna", "oracle", "antigravity", "luna", "oracle", "antigravity"}
+	want := []string{"antigravity", "sol-review", "antigravity", "sol-review"}
+	got := reviewerSequence(agents.recorded())
+	if len(got) != len(want) {
+		t.Fatalf("review ladder = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("review ladder = %v, want %v", got, want)
+		}
+	}
+	if calls := agents.delegateCalls("deepseek"); calls != 2 {
+		t.Fatalf("deepseek implemented %d times, want 2 (initial + confirmed-finding repair)", calls)
+	}
+	if count := run.premiumCalls(t); count != 1 {
+		t.Fatalf("repair loop changed the premium ledger: %d, want 1", count)
+	}
+}
+
+func TestProWorkflowSolOwnFindingsRestartTheLadder(t *testing.T) {
+	// Gemini approves but sol's independent adversarial pass finds a problem:
+	// the repair still re-runs the entire ladder before the PR opens.
+	agents := &factoryAgents{reviews: map[string][]string{"sol-review": {reviewChanges("")}}}
+	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
+	run.waitFor(t, "active", "human_gate")
+	want := []string{"antigravity", "sol-review", "antigravity", "sol-review"}
 	got := reviewerSequence(agents.recorded())
 	if len(got) != len(want) {
 		t.Fatalf("review ladder = %v, want %v", got, want)
@@ -596,7 +624,32 @@ func TestProWorkflowGeminiFindingsRestartTheLadder(t *testing.T) {
 	if calls := agents.delegateCalls("deepseek"); calls != 2 {
 		t.Fatalf("deepseek implemented %d times, want 2", calls)
 	}
-	if count := run.premiumCalls(t); count != 1 {
-		t.Fatalf("gemini iteration changed the premium ledger: %d, want 1", count)
+	if calls := agents.delegateCalls("sol"); calls != 0 {
+		t.Fatalf("the ledgered sol escalation seat ran %d times, want 0", calls)
+	}
+}
+
+func TestRepoCodeReviewSkillIsAttachedToReviewPrompts(t *testing.T) {
+	dir := t.TempDir()
+	if repoCodeReviewSkill(dir) != "" {
+		t.Fatal("empty repo produced a skill document")
+	}
+	skillPath := filepath.Join(dir, ".agents", "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "# Code review\nReview along Standards and Spec axes."
+	if err := os.WriteFile(skillPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoCodeReviewSkill(dir); got != body {
+		t.Fatalf("skill = %q, want the repository document", got)
+	}
+	oversized := strings.Repeat("x", maxReviewSkillBytes+100)
+	if err := os.WriteFile(skillPath, []byte(oversized), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoCodeReviewSkill(dir); len(got) != maxReviewSkillBytes {
+		t.Fatalf("oversized skill embedded %d bytes, want the %d cap", len(got), maxReviewSkillBytes)
 	}
 }

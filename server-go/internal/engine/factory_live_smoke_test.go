@@ -23,7 +23,7 @@ import (
 //
 //	AIMEE_FACTORY_LIVE_SMOKE=1 \
 //	AIMEE_SMOKE_WORKROOT=/mnt/c/Users/you/AppData/Local/Temp/aimee-smoke \
-//	AIMEE_SMOKE_CMD_LUNA="codex.exe exec --sandbox read-only -m gpt-5.6-luna -" \
+//	AIMEE_SMOKE_CMD_LUNA="codex.exe exec -m gpt-5.6-luna -c sandbox_mode=read-only -o {OUT_FILE} -" \
 //	AIMEE_SMOKE_CMD_DEEPSEEK="opencode.exe run -m opencode-go/deepseek-v4-flash {PROMPT}" \
 //	... go test ./internal/engine -run TestFactoryLiveSmoke -v -timeout 60m
 //
@@ -62,7 +62,14 @@ func TestFactoryLiveSmoke(t *testing.T) {
 	}
 	t.Logf("live smoke: workflow=%s workroot=%s", workflowName, workroot)
 
-	repo := newLiveSmokeRepo(t, workroot)
+	// AIMEE_SMOKE_REPO points the run at an externally seeded repository (a
+	// clone with an origin remote and its integration branch checked out);
+	// AIMEE_SMOKE_PROPOSAL_FILE then supplies the request text. Without them
+	// the harness seeds its own marker-file fixture.
+	repo := os.Getenv("AIMEE_SMOKE_REPO")
+	if repo == "" {
+		repo = newLiveSmokeRepo(t, workroot)
+	}
 	workflowDir := copyShippedWorkflowDefinitions(t)
 	registry, err := wfe.NewRegistry(workflowDir)
 	if err != nil {
@@ -87,6 +94,13 @@ func TestFactoryLiveSmoke(t *testing.T) {
 		"factory smoke ok\n" +
 		"Do not change any other file. The repository verification is `sh verify.sh`, which checks " +
 		"exactly this outcome.\n"
+	if proposalFile := os.Getenv("AIMEE_SMOKE_PROPOSAL_FILE"); proposalFile != "" {
+		content, err := os.ReadFile(proposalFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposal = string(content)
+	}
 	if err := artifacts.PutProposal(id, []byte(proposal)); err != nil {
 		t.Fatal(err)
 	}

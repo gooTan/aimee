@@ -32,4 +32,12 @@ int acp_turn_consume(const char *line, acp_turn_state_t *st);
  * acp_turn_consume. */
 int acp_serve_client_request(const char *line, const char *workdir, char **resp_out);
 
+/* Write-gated variant. When write_capable is 0, fs/write_text_file is refused
+ * and session/request_permission selects a reject/deny option (or cancels)
+ * instead of auto-approving, so a read-only role dispatched over ACP cannot
+ * mutate the worktree even if the agent asks nicely. The ungated wrapper above
+ * behaves as write_capable=1 for compatibility. */
+int acp_serve_client_request_gated(const char *line, const char *workdir, int write_capable,
+                                   char **resp_out);
+
 #endif /* DEC_CLI_ACP_H */

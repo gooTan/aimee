@@ -412,7 +412,7 @@ static int agent_execute_with_tools_internal(const agent_t *agent, const agent_n
                                              user_prompt, out);
       snprintf(out->error, sizeof(out->error),
                "provider-cli: unknown cli_kind '%s' (expected: codex, claude, mistral, "
-               "mistral-plan, vibe-plan, acp, agy)",
+               "mistral-plan, vibe-plan, acp, agy, oracle)",
                agent->cli_kind);
       return -1;
    }

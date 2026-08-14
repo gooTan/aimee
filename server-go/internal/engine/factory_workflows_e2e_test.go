@@ -33,10 +33,9 @@ type factoryAgents struct {
 	codeRuns int
 	// briefResponse overrides the ContextBrief Luna returns; empty means valid.
 	briefResponse string
-	// lunaReviews and solReviews are consumed per review call by delegate pin;
-	// exhausted scripts approve.
-	lunaReviews []string
-	solReviews  []string
+	// reviews scripts verdicts per pinned reviewer delegate, consumed one per
+	// call; a missing or exhausted script approves.
+	reviews map[string][]string
 }
 
 func (a *factoryAgents) recorded() []DelegateRequest {
@@ -92,16 +91,10 @@ func (a *factoryAgents) Delegate(_ context.Context, request DelegateRequest) (De
 		return DelegateResult{Response: "1. Implement feature.\n"}, nil
 	case "review":
 		a.mu.Lock()
-		var script *[]string
-		if request.Delegate == "sol" {
-			script = &a.solReviews
-		} else {
-			script = &a.lunaReviews
-		}
 		response := reviewApprove()
-		if len(*script) > 0 {
-			response = (*script)[0]
-			*script = (*script)[1:]
+		if script, ok := a.reviews[request.Delegate]; ok && len(script) > 0 {
+			response = script[0]
+			a.reviews[request.Delegate] = script[1:]
 		}
 		a.mu.Unlock()
 		return DelegateResult{Response: response}, nil
@@ -292,9 +285,9 @@ func TestQuickChangeUsesZeroPremiumCalls(t *testing.T) {
 	if got := run.premiumCalls(t); got != 0 {
 		t.Fatalf("quick-change recorded %d premium calls, want 0", got)
 	}
-	for _, name := range []string{"sol", "fable"} {
+	for _, name := range []string{"sol", "fable", "oracle", "antigravity"} {
 		if calls := agents.delegateCalls(name); calls != 0 {
-			t.Fatalf("quick-change dispatched premium delegate %s %d times", name, calls)
+			t.Fatalf("quick-change dispatched %s %d times, want 0", name, calls)
 		}
 	}
 	if calls := agents.delegateCalls("deepseek"); calls != 1 {
@@ -321,8 +314,10 @@ func TestOrchestratedChangeHappyPathUsesExactlyOnePremiumCall(t *testing.T) {
 	if calls := agents.delegateCalls("fable"); calls != 1 {
 		t.Fatalf("fable planned %d times, want exactly 1", calls)
 	}
-	if calls := agents.delegateCalls("sol"); calls != 0 {
-		t.Fatalf("sol was dispatched %d times on the happy path, want 0", calls)
+	for _, name := range []string{"sol", "oracle", "antigravity"} {
+		if calls := agents.delegateCalls(name); calls != 0 {
+			t.Fatalf("%s was dispatched %d times on the standard happy path, want 0", name, calls)
+		}
 	}
 	assertNoPremiumWrites(t, agents.recorded())
 	// The premium planner must receive the brief and the request, never raw
@@ -364,7 +359,7 @@ func TestRoutineVerifierFailureRepairsWithoutPremium(t *testing.T) {
 }
 
 func TestRoutineReviewFindingsReturnToImplementerWithoutPremium(t *testing.T) {
-	agents := &factoryAgents{lunaReviews: []string{reviewChanges("")}}
+	agents := &factoryAgents{reviews: map[string][]string{"luna": {reviewChanges("")}}}
 	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
 	run.waitFor(t, "active", "human_gate")
 	if got := run.premiumCalls(t); got != 1 {
@@ -379,7 +374,7 @@ func TestRoutineReviewFindingsReturnToImplementerWithoutPremium(t *testing.T) {
 }
 
 func TestEscalationInvokesSecondPremiumOpinionOnce(t *testing.T) {
-	agents := &factoryAgents{lunaReviews: []string{reviewChanges("architecture")}}
+	agents := &factoryAgents{reviews: map[string][]string{"luna": {reviewChanges("architecture")}}}
 	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
 	item := run.waitFor(t, "active", "human_gate")
 	if got := run.premiumCalls(t); got != 2 {
@@ -394,7 +389,7 @@ func TestEscalationInvokesSecondPremiumOpinionOnce(t *testing.T) {
 }
 
 func TestUnknownEscalationClassStaysOnRoutinePath(t *testing.T) {
-	agents := &factoryAgents{lunaReviews: []string{reviewChanges("vibes")}}
+	agents := &factoryAgents{reviews: map[string][]string{"luna": {reviewChanges("vibes")}}}
 	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
 	run.waitFor(t, "active", "human_gate")
 	if calls := agents.delegateCalls("sol"); calls != 0 {
@@ -407,8 +402,10 @@ func TestUnknownEscalationClassStaysOnRoutinePath(t *testing.T) {
 
 func TestPremiumCallsCannotExceedCap(t *testing.T) {
 	agents := &factoryAgents{
-		lunaReviews: []string{reviewChanges("architecture"), reviewChanges("security")},
-		solReviews:  []string{reviewChanges("")},
+		reviews: map[string][]string{
+			"luna": {reviewChanges("architecture"), reviewChanges("security")},
+			"sol":  {reviewChanges("")},
+		},
 	}
 	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
 	item := run.waitFor(t, "active", "premium_cap")
@@ -499,5 +496,107 @@ func TestPremiumDelegateCannotBeDispatchedWithWriteTools(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("refused write dispatch still recorded %d premium calls", count)
+	}
+}
+
+// reviewerSequence lists the pinned reviewer delegates in dispatch order.
+func reviewerSequence(requests []DelegateRequest) []string {
+	var order []string
+	for _, request := range requests {
+		if request.Role == "review" {
+			order = append(order, request.Delegate)
+		}
+	}
+	return order
+}
+
+func TestProWorkflowLadderApprovesBeforeDraftPR(t *testing.T) {
+	agents := &factoryAgents{}
+	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
+	item := run.waitFor(t, "active", "human_gate")
+	// Cheapest-first ladder, each rung exactly once on the happy path.
+	want := []string{"luna", "oracle", "antigravity"}
+	got := reviewerSequence(agents.recorded())
+	if len(got) != len(want) {
+		t.Fatalf("review ladder = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("review ladder = %v, want %v", got, want)
+		}
+	}
+	// Only fable is ledgered premium; the consultation seats are round-bounded.
+	if count := run.premiumCalls(t); count != 1 {
+		t.Fatalf("pro happy path recorded %d premium calls, want 1 (fable)", count)
+	}
+	// The consultation reviewers are read-only.
+	for _, request := range agents.recorded() {
+		if request.Delegate == "oracle" || request.Delegate == "antigravity" {
+			if request.Tools || request.Role != "review" {
+				t.Fatalf("consultation seat dispatched outside read-only review: %+v", request)
+			}
+		}
+	}
+	run.forge.mu.Lock()
+	opens := append([]PullRequestSpec(nil), run.forge.opens...)
+	run.forge.mu.Unlock()
+	if len(opens) != 1 || !opens[0].Draft {
+		t.Fatalf("want exactly one draft PR after full ladder approval, got %+v", opens)
+	}
+	run.approveHumanGate(t, item)
+	run.waitFor(t, "accepted", "")
+}
+
+func TestProWorkflowIteratesOracleFindingsWithoutHumanInput(t *testing.T) {
+	agents := &factoryAgents{reviews: map[string][]string{"oracle": {reviewChanges("")}}}
+	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
+	run.waitFor(t, "active", "human_gate")
+	// oracle's findings went straight back to the implementer; the repaired
+	// diff climbed the whole ladder again, and gemini ran only after oracle's
+	// approval. No human input, no extra ledgered premium.
+	if calls := agents.delegateCalls("deepseek"); calls != 2 {
+		t.Fatalf("deepseek implemented %d times, want 2 (initial + oracle repair)", calls)
+	}
+	if calls := agents.delegateCalls("oracle"); calls != 2 {
+		t.Fatalf("oracle reviewed %d times, want 2", calls)
+	}
+	if calls := agents.delegateCalls("antigravity"); calls != 1 {
+		t.Fatalf("gemini reviewed %d times, want exactly 1 (after oracle approval)", calls)
+	}
+	if calls := agents.delegateCalls("sol"); calls != 0 {
+		t.Fatalf("oracle findings dispatched sol %d times, want 0", calls)
+	}
+	if count := run.premiumCalls(t); count != 1 {
+		t.Fatalf("oracle iteration changed the premium ledger: %d, want 1", count)
+	}
+	run.forge.mu.Lock()
+	opens := len(run.forge.opens)
+	run.forge.mu.Unlock()
+	if opens != 1 {
+		t.Fatalf("opened %d PRs, want exactly 1 after convergence", opens)
+	}
+}
+
+func TestProWorkflowGeminiFindingsRestartTheLadder(t *testing.T) {
+	agents := &factoryAgents{reviews: map[string][]string{"antigravity": {reviewChanges("")}}}
+	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
+	run.waitFor(t, "active", "human_gate")
+	// A gemini finding means the repaired diff must clear every rung again:
+	// luna and oracle re-review before gemini sees it a second time.
+	want := []string{"luna", "oracle", "antigravity", "luna", "oracle", "antigravity"}
+	got := reviewerSequence(agents.recorded())
+	if len(got) != len(want) {
+		t.Fatalf("review ladder = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("review ladder = %v, want %v", got, want)
+		}
+	}
+	if calls := agents.delegateCalls("deepseek"); calls != 2 {
+		t.Fatalf("deepseek implemented %d times, want 2", calls)
+	}
+	if count := run.premiumCalls(t); count != 1 {
+		t.Fatalf("gemini iteration changed the premium ledger: %d, want 1", count)
 	}
 }

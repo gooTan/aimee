@@ -1,0 +1,127 @@
+# orchestrated-change with a frontier final-review ladder.
+#
+# prep (luna brief) -> plan (fable, the ONE capped premium planning call) ->
+# implement (deepseek) -> freeze -> review ladder, cheapest first:
+#
+#   review        luna (Codex)            pre-screen; catches routine defects
+#   oracle_review oracle (ChatGPT web)    frontier review of the frozen diff
+#   gemini_review antigravity (Gemini)    independent second opinion, most
+#                                         expensive so it runs last
+#
+# Findings from ANY rung return directly to the deepseek implementer; after
+# repair and re-verification the diff climbs the whole ladder again, so the
+# draft pull request cannot open until luna, oracle, and gemini have all
+# approved the same frozen diff with zero findings. Only then does the run
+# park at the human gate. The operator never sees a PR that still has open
+# findings.
+#
+# oracle and antigravity are flat-rate subscription seats bounded by their
+# max_rounds and the engine's no-progress convergence detection, not by the
+# sol/fable premium ledger; the planning budget (cap two) still covers fable
+# plus at most one sol escalation from luna's pre-screen.
+name: orchestrated-change-pro
+intent_tags:
+  - feature
+  - multi-file-change
+  - refactor
+  - architecture
+  - high-stakes
+enforced: true
+start: prep
+nodes:
+  - id: prep
+    block: understand
+    params:
+      brief: true
+      delegate: luna
+      max_rounds: 2
+    next: plan
+    on_fail: prep
+  - id: plan
+    block: author.plan
+    in:
+      proposal: prep.out
+    params:
+      delegate: fable
+      persona: architect
+      require_brief: true
+      max_rounds: 2
+    next: implement
+    on_fail: prep
+  - id: implement
+    block: implement
+    in:
+      plan: plan.out
+    params:
+      delegate: deepseek
+      max_rounds: 2
+    next: freeze
+    on_fail: implement
+  - id: freeze
+    block: freeze
+    in:
+      branch: implement.out
+    next: review
+  # Rung 1: luna pre-screens so the frontier reviewers never see a diff with
+  # routine defects. Decision-class findings may take one sol escalation.
+  - id: review
+    block: review
+    in:
+      src: freeze.out
+    params:
+      delegate: luna
+      persona: reviewer
+      max_rounds: 4
+    on_pass: oracle_review
+    on_fail: implement
+    on_escalate: second_opinion
+  - id: second_opinion
+    block: review
+    in:
+      src: freeze.out
+    params:
+      delegate: sol
+      persona: architect
+      max_rounds: 2
+    on_pass: oracle_review
+    on_fail: implement
+  # Rung 2: ChatGPT web through the oracle consultation adapter.
+  - id: oracle_review
+    block: review
+    in:
+      src: freeze.out
+    params:
+      delegate: oracle
+      persona: architect
+      max_rounds: 4
+    on_pass: gemini_review
+    on_fail: implement
+  # Rung 3: Gemini through the Antigravity CLI, after oracle approves.
+  - id: gemini_review
+    block: review
+    in:
+      src: freeze.out
+    params:
+      delegate: antigravity
+      persona: reviewer
+      max_rounds: 4
+    on_pass: pr
+    on_fail: implement
+  - id: pr
+    block: pr.open
+    in:
+      src: freeze.out
+    params:
+      base: trunk
+    next: human_gate
+  - id: human_gate
+    block: gate.human
+    in:
+      src: pr.out
+    params:
+      policy: every reviewer approved this frozen diff; approve delivery
+    on_pass: deliver
+  - id: deliver
+    block: gate.deliver
+    in:
+      verdict: human_gate.out

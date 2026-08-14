@@ -1408,7 +1408,7 @@ AGENT_FIELD_DESC = {
     "fallback_chain": "Ordered fallback agent chain.",
     "session_reuse": "Reuse a session across calls.",
     "cli_cmd": "CLI command for a cli-backend agent.",
-    "cli_kind": "CLI agent kind (claude / codex / mistral / acp / agy).",
+    "cli_kind": "CLI agent kind (claude / codex / mistral / acp / agy / oracle).",
     "is_server_hosted": "Whether the provider session is hosted by the aimee server.",
     "primary_only": "Restrict this agent to primary sessions; do not use it for delegates.",
     "cli_idle_timeout_ms": "Idle timeout (ms) for a CLI agent.",

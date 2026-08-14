@@ -959,6 +959,7 @@ const provider_cli_adapter_t *provider_cli_adapter_get(const char *cli_kind)
        &mistral_provider_cli_adapter,
        &acp_provider_cli_adapter,
        &agy_provider_cli_adapter,
+       &oracle_provider_cli_adapter,
        NULL,
    };
 

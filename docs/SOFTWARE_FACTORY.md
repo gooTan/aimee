@@ -14,7 +14,8 @@ human approval. The external CLIs are dumb, single-shot delegates.
 | `sol` | Codex CLI (`codex`) | `gpt-5.6-sol` | premium second opinion: plan review, difficult debugging, escalated decisions | read-only |
 | `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
 | `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
-| `antigravity` | Antigravity CLI (`agy`) | pick one from `agy models` | optional alternate reviewer or escalation seat | read-only by role |
+| `antigravity` | Antigravity CLI (`agy`) | pick one from `agy models` (a Gemini 3.x model) | Gemini reviewer in the pro ladder; optional escalation seat | read-only by role |
+| `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.5-pro` or your plan's best | frontier reviewer in the pro ladder; optional adjudicator | consultation only: no tools, no worktree |
 
 Every seat uses the CLI's own login state. Aimee never extracts or proxies
 OAuth tokens; the child process reads the CLI's normal credential store from
@@ -60,6 +61,34 @@ Sol runs only when Luna's review classifies a blocking finding as a genuine
 decision (the `on_escalate` edge). Any other label degrades to the routine
 repair path. Sol and Fable are never both called automatically on one path.
 
+### orchestrated-change-pro
+
+```
+prep (luna brief) -> plan (fable, one capped call) -> implement (deepseek)
+  -> freeze -> review ladder, cheapest first:
+       luna -> oracle (ChatGPT web) -> gemini (Antigravity)
+  -> draft PR -> human gate -> deliver
+```
+
+The fully autonomous iterate-until-clean variant. Findings from any rung of
+the ladder return directly to the DeepSeek implementer; the repaired diff is
+re-verified and climbs the whole ladder again. The draft pull request cannot
+open until luna, oracle, and gemini have each approved the same frozen diff
+with zero findings, so the human gate is only ever presented with a fully
+converged change. Oracle runs before Gemini because it is the cheaper seat.
+
+Oracle and Antigravity are flat-rate consultation seats: they are bounded by
+each node's `max_rounds` (four) and the engine's no-progress convergence
+detection rather than the sol/fable premium ledger, because iterate-until-
+clean requires repeated review rounds. The planning ledger still caps fable
+plus at most one sol escalation at two calls.
+
+Oracle integration boundary: aimee writes the complete review prompt to a
+temporary task file, runs `oracle -p <pointer> -f <task-file> --write-output
+<answer-file>`, and reads back only the final assistant message. Oracle never
+receives tools, a worktree, credentials, or conversation history; it is a
+provider adapter, and aimee remains the workflow controller.
+
 ## Premium-call limits
 
 The engine keeps a durable per-run-tree ledger (`wfe_premium_call` in DB1).
@@ -85,6 +114,10 @@ codex login          # ChatGPT subscription; verify with: codex doctor
 claude               # sign in once; verify with: claude -p "hi"
 opencode auth login  # verify with: opencode models
 agy                  # launch with no arguments to sign in; verify with: agy models
+
+# Oracle (ChatGPT web) keeps its own Chrome profile; sign in there once:
+npm install -g @steipete/oracle
+oracle --engine browser --browser-manual-login --browser-keep-browser -p "HI"
 ```
 
 Sign in as the same OS user that runs `aimee-server`, because delegates
@@ -156,6 +189,18 @@ shipped workflows reference the delegate names below; keep them.
     "cli_cmd": "agy",
     "model": "gemini-3.1-pro-high",
     "roles": ["review", "explain"],
+    "cli_idle_timeout_ms": 1800000,
+    "tier_price_exempt": "flat-rate subscription seat",
+    "enabled": true
+  },
+  {
+    "name": "oracle",
+    "backend": "provider-cli",
+    "cli_kind": "oracle",
+    "cli_cmd": "oracle -e browser",
+    "model": "gpt-5.5-pro",
+    "roles": ["review", "explain"],
+    "cli_idle_timeout_ms": 2700000,
     "tier_price_exempt": "flat-rate subscription seat",
     "enabled": true
   }
@@ -187,10 +232,11 @@ Notes:
 
 The definitions ship in `config/workflows/` and are seeded to
 `$AIMEE_HOME/workflows` on container start. Admit work as usual (watch-dir
-trigger, API submit, or browser) and select `quick-change` for routine fixes
-or `orchestrated-change` for anything that deserves a plan. Both are
-`enforced` and end in a human gate; `orchestrated-change` also opens a draft
-pull request first. Approve or reject from the browser Workflow Actions page
+trigger, API submit, or browser) and select `quick-change` for routine fixes,
+`orchestrated-change` for anything that deserves a plan, or
+`orchestrated-change-pro` when the frozen diff must clear the full
+luna/oracle/gemini review ladder before you ever see the draft pull request.
+All three are `enforced` and end in a human gate. Approve or reject from the browser Workflow Actions page
 or `POST /v1/workflow/items/{id}/gate` with `{"decision":"approve","gate":"human_gate"}`.
 
 ## Troubleshooting
@@ -203,6 +249,9 @@ or `POST /v1/workflow/items/{id}/gate` with `{"decision":"approve","gate":"human
 | `premium planning input rejected` in the plan detail | the brief was malformed or over 32 KiB | the run loops back to prep without premium spend; usually resolves itself |
 | `agent did not accept pinned model` | ACP peer refused `session/set_model` | re-check `opencode models` for the exact id |
 | `agy` returns `Please sign in` | Antigravity has no cached login | run `agy` interactively once |
+| oracle: `manual-login profile is not initialized` | Oracle's private Chrome profile has no ChatGPT session | run the one-time `--browser-manual-login` flow from setup step 1 |
+| `oracle adapter: exit N with no answer output` | browser automation failed mid-run | check `oracle status`, re-login if needed; the run parks and resumes cleanly |
+| oracle reviews park `runner_unavailable` when aimee runs in a container | the container has no browser | run `oracle serve` (or `oracle bridge` from Windows) next to the browser and point `cli_cmd` at the remote engine flags |
 | codex dispatch runs the wrong model | the agent entry has no `model` pin | set the exact id from your plan's model list |
 | everything parks `runner_unavailable` | delegate CLI missing from PATH of aimee-server | install the CLI for the service user |
 
@@ -223,6 +272,12 @@ opencode models | grep deepseek-v4-flash
 
 # 4. Antigravity responds in headless stream-json (prompt travels in argv)
 agy -p "Reply with exactly: agy-ok" --output-format stream-json
+
+# 4b. Oracle reaches ChatGPT web through its signed-in profile
+echo "smoke context" > /tmp/ctx.txt
+oracle -p "Reply with exactly: oracle-ok" -f /tmp/ctx.txt -e browser \
+  -m gpt-5.5 --no-notify --write-output /tmp/oracle-ok.txt --timeout 240
+cat /tmp/oracle-ok.txt
 
 # 5. Factory dry run: admit a small request on quick-change, watch it reach
 #    the human gate, approve, and confirm zero premium calls in the ledger:

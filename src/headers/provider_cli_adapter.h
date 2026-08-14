@@ -123,6 +123,7 @@ extern "C"
    extern const provider_cli_adapter_t claude_provider_cli_adapter;
    extern const provider_cli_adapter_t mistral_provider_cli_adapter;
    extern const provider_cli_adapter_t agy_provider_cli_adapter;
+   extern const provider_cli_adapter_t oracle_provider_cli_adapter;
 
 #ifdef __cplusplus
 }

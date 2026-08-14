@@ -15,7 +15,7 @@ human approval. The external CLIs are dumb, single-shot delegates.
 | `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
 | `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
 | `antigravity` | Antigravity CLI (`agy`) | pick one from `agy models` (a Gemini 3.x model) | Gemini reviewer in the pro ladder; optional escalation seat | read-only by role |
-| `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.5-pro` or your plan's best | frontier reviewer in the pro ladder; optional adjudicator | consultation only: no tools, no worktree |
+| `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.6` with `--browser-thinking-time pro` (GPT-5.6 Pro) | frontier reviewer in the pro ladder; optional adjudicator | consultation only: no tools, no worktree |
 
 Every seat uses the CLI's own login state. Aimee never extracts or proxies
 OAuth tokens; the child process reads the CLI's normal credential store from
@@ -197,8 +197,8 @@ shipped workflows reference the delegate names below; keep them.
     "name": "oracle",
     "backend": "provider-cli",
     "cli_kind": "oracle",
-    "cli_cmd": "oracle -e browser",
-    "model": "gpt-5.5-pro",
+    "cli_cmd": "oracle -e browser --browser-thinking-time pro",
+    "model": "gpt-5.6",
     "roles": ["review", "explain"],
     "cli_idle_timeout_ms": 2700000,
     "tier_price_exempt": "flat-rate subscription seat",
@@ -252,6 +252,7 @@ or `POST /v1/workflow/items/{id}/gate` with `{"decision":"approve","gate":"human
 | oracle: `manual-login profile is not initialized` | Oracle's private Chrome profile has no ChatGPT session | run the one-time `--browser-manual-login` flow from setup step 1 |
 | `oracle adapter: exit N with no answer output` | browser automation failed mid-run | check `oracle status`, re-login if needed; the run parks and resumes cleanly |
 | oracle reviews park `runner_unavailable` when aimee runs in a container | the container has no browser | run `oracle serve` (or `oracle bridge` from Windows) next to the browser and point `cli_cmd` at the remote engine flags |
+| oracle runs GPT-5.5 instead of the current Pro tier | oracle's `gpt-5-pro` alias mis-normalizes (steipete/oracle#373) | pin `"model": "gpt-5.6"` plus `--browser-thinking-time pro` in `cli_cmd`; switch to the `gpt-5-pro` alias once the upstream fix ships |
 | codex dispatch runs the wrong model | the agent entry has no `model` pin | set the exact id from your plan's model list |
 | everything parks `runner_unavailable` | delegate CLI missing from PATH of aimee-server | install the CLI for the service user |
 

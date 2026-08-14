@@ -793,6 +793,18 @@ func implementationDelegatePrompt() string {
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
+// repairDelegatePrompt frames a review-driven repair round as a bounded task.
+// Small implementation models execute best against a closed instruction set:
+// re-sending the full "implement the plan" framing on a repair invites a
+// broad re-implementation, while this framing makes the findings themselves
+// the entire task and the plan reference-only context.
+func repairDelegatePrompt() string {
+	return "Repair this worktree by addressing EXACTLY the review findings listed under REVIEW FEEDBACK TO RESOLVE; those findings are the complete task. " +
+		"Make the smallest change that resolves each finding, run the repository verification, and fix any failures it reports. " +
+		"Do not re-implement the approved plan, do not refactor beyond what the findings require, and do not touch files the findings do not require. " +
+		"Any other input below is reference context only."
+}
+
 func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (StepResult, error) {
 	workdir, branch, err := r.worktrees.Ensure(ctx, req.WorkItem, req.WorkItem.ParentID == "")
 	if err != nil {
@@ -859,6 +871,9 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		}
 	}
 	prompt := implementationDelegatePrompt()
+	if !docs && req.Feedback != nil && len(req.Feedback.Findings) > 0 {
+		prompt = repairDelegatePrompt()
+	}
 	if docs {
 		prompt, err = documentDelegatePrompt(ctx, req, workdir)
 		if err != nil {
@@ -1019,7 +1034,8 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 		return StepResult{}, errors.New("review missing src input")
 	}
 	persona := paramString(req.Node, "persona", paramString(req.Node, "reviewer", "reviewer"))
-	prompt := "Review this complete artifact against the proposal. Return only JSON shaped {\"verdict\":\"approve\" or \"changes\" or \"blocked\",\"findings\":[{\"id\":\"...\",\"severity\":\"blocking\",\"location\":\"...\",\"summary\":\"...\",\"recommendation\":\"...\"}]}.\n\nPROPOSAL:\n" + req.Proposal + "\n\nARTIFACT:\n" + string(reviewed.Content)
+	prompt := "Review this complete artifact against the proposal. Return only JSON shaped {\"verdict\":\"approve\" or \"changes\" or \"blocked\",\"findings\":[{\"id\":\"...\",\"severity\":\"blocking\",\"location\":\"...\",\"summary\":\"...\",\"recommendation\":\"...\"}]}. " +
+		"Write every recommendation as a bounded, directly actionable fix instruction: name the file and location and state the exact change, because a small implementation model will execute it literally and must not have to interpret intent.\n\nPROPOSAL:\n" + req.Proposal + "\n\nARTIFACT:\n" + string(reviewed.Content)
 	if req.Node.OnEscalate != "" {
 		prompt = strings.Replace(prompt,
 			"\"recommendation\":\"...\"}]}.",

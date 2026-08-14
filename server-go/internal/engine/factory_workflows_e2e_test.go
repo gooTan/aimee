@@ -603,6 +603,30 @@ func TestProWorkflowSolConfirmedFindingsDriveRepair(t *testing.T) {
 	if count := run.premiumCalls(t); count != 1 {
 		t.Fatalf("repair loop changed the premium ledger: %d, want 1", count)
 	}
+	// The repair dispatch must be a bounded task: the findings are the whole
+	// job, and the broad implement-the-plan framing must be gone.
+	var implPrompts []string
+	for _, request := range agents.recorded() {
+		if request.Delegate == "deepseek" {
+			implPrompts = append(implPrompts, request.Prompt)
+		}
+	}
+	if len(implPrompts) != 2 {
+		t.Fatalf("recorded %d deepseek prompts, want 2", len(implPrompts))
+	}
+	if !strings.Contains(implPrompts[0], "Implement the complete approved task") {
+		t.Fatalf("initial dispatch lost the implementation framing:\n%s", implPrompts[0])
+	}
+	repair := implPrompts[1]
+	if !strings.Contains(repair, "Repair this worktree by addressing EXACTLY the review findings") {
+		t.Fatalf("repair dispatch is not bounded:\n%s", repair)
+	}
+	if !strings.Contains(repair, "REVIEW FEEDBACK TO RESOLVE") {
+		t.Fatalf("repair dispatch carries no findings:\n%s", repair)
+	}
+	if strings.Contains(repair, "Implement the complete approved task") {
+		t.Fatalf("repair dispatch still carries the broad implementation framing:\n%s", repair)
+	}
 }
 
 func TestProWorkflowSolOwnFindingsRestartTheLadder(t *testing.T) {

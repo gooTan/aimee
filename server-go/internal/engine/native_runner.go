@@ -1076,7 +1076,7 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	if err != nil {
 		return StepResult{}, err
 	}
-	doc, err := extractJSONObject(result.Response)
+	doc, err := extractReviewVerdict(result.Response)
 	if err != nil {
 		return malformedReview(reviewed.Hash, persona, err, result.CostUSD), nil
 	}
@@ -2139,6 +2139,42 @@ func firstNonempty(value, fallback string) string {
 // JSON object. Candidate spans are disjoint and the scan index is monotonic, so
 // every byte is scanned once and passed to json.Unmarshal at most once.
 func extractJSONObject(text string) ([]byte, error) {
+	docs, err := extractJSONObjects(text)
+	if err != nil {
+		return nil, err
+	}
+	return docs[0], nil
+}
+
+// extractReviewVerdict returns the review verdict object from a delegate
+// response. A response can legitimately contain several top-level JSON
+// objects: transcript-style CLIs echo the reviewer's reasoning, and that
+// reasoning may quote the PRIOR feedback it was asked to verify, which is
+// itself findings-shaped JSON. Taking the first object then replays stale
+// findings forever (observed live as three identical review rounds ending in
+// a convergence park while the reviewer's final message approved). The
+// verdict contract puts the decision in the FINAL message, so prefer the
+// last object that carries a "verdict" key and fall back to the first object
+// only when none does, preserving the malformed-review path.
+func extractReviewVerdict(text string) ([]byte, error) {
+	docs, err := extractJSONObjects(text)
+	if err != nil {
+		return nil, err
+	}
+	for i := len(docs) - 1; i >= 0; i-- {
+		var value map[string]any
+		if json.Unmarshal(docs[i], &value) == nil {
+			if _, ok := value["verdict"]; ok {
+				return docs[i], nil
+			}
+		}
+	}
+	return docs[0], nil
+}
+
+// extractJSONObjects returns every parseable top-level JSON object in order.
+// The result is never empty without an error.
+func extractJSONObjects(text string) ([][]byte, error) {
 	// Delegate providers sometimes append prose, shell snippets, or a second JSON
 	// value despite an "only JSON" prompt. Parsing first-'{' through last-'}' turns
 	// that harmless suffix into an infinite workflow refinement loop. Balance one
@@ -2159,6 +2195,7 @@ func extractJSONObject(text string) ([]byte, error) {
 	matches := func(open, close byte) bool {
 		return (open == objectOpen && close == objectClose) || (open == arrayOpen && close == arrayClose)
 	}
+	var docs [][]byte
 	start := -1
 	// Retain both backing arrays across candidates/outer values. Candidates are
 	// scanned once; no candidate-count or byte limit truncates the response.
@@ -2244,7 +2281,7 @@ func extractJSONObject(text string) ([]byte, error) {
 				doc := []byte(text[start : i+1])
 				var value map[string]any
 				if json.Unmarshal(doc, &value) == nil {
-					return doc, nil
+					docs = append(docs, doc)
 				}
 				// i only advances: no byte from this failed candidate is
 				// revisited or promoted as the start of a nested candidate.
@@ -2255,7 +2292,10 @@ func extractJSONObject(text string) ([]byte, error) {
 	if len(outerDelimiters) > 0 || outerInString || outerEscaped {
 		return nil, errors.New("delegate returned unterminated outer JSON value")
 	}
-	return nil, errors.New("delegate returned no valid JSON object")
+	if len(docs) == 0 {
+		return nil, errors.New("delegate returned no valid JSON object")
+	}
+	return docs, nil
 }
 func validateStructured(kind string, doc []byte) error {
 	var root map[string]any

@@ -677,3 +677,33 @@ func TestRepoCodeReviewSkillIsAttachedToReviewPrompts(t *testing.T) {
 		t.Fatalf("oversized skill embedded %d bytes, want the %d cap", len(got), maxReviewSkillBytes)
 	}
 }
+
+func TestExtractReviewVerdictPrefersFinalVerdictObject(t *testing.T) {
+	// A transcript-style response: the reviewer echoes the prior findings it
+	// was asked to verify (findings-shaped JSON) before its final verdict.
+	transcript := `Considering the prior feedback:
+{"schema_version":1,"artifact_hash":"abc","findings":[{"id":"f1","severity":"blocking","summary":"old","recommendation":"fix"}]}
+All confirmed resolved on re-test.
+{"verdict":"approve","findings":[]}`
+	doc, err := extractReviewVerdict(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), `"verdict":"approve"`) {
+		t.Fatalf("extracted %s, want the final verdict object", doc)
+	}
+	// A verdict followed by trailing prose keeps working.
+	doc, err = extractReviewVerdict(`{"verdict":"changes","findings":[]} thanks!`)
+	if err != nil || !strings.Contains(string(doc), `"changes"`) {
+		t.Fatalf("doc=%s err=%v", doc, err)
+	}
+	// No verdict-shaped object falls back to the first object so the
+	// malformed-review path still sees something to reject.
+	doc, err = extractReviewVerdict(`{"a":1} {"b":2}`)
+	if err != nil || string(doc) != `{"a":1}` {
+		t.Fatalf("fallback doc=%s err=%v", doc, err)
+	}
+	if _, err := extractReviewVerdict("no json here"); err == nil {
+		t.Fatal("prose-only response was accepted")
+	}
+}

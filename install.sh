@@ -311,7 +311,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
     # aimee-gateway.service (multi-channel ambient presence) is refreshed here
     # too, but not auto-enabled — it needs per-channel config, so the operator
     # enables it explicitly (systemctl --user enable --now aimee-gateway).
-    for unit in aimee.slice aimee-kb.service aimee-server.service aimee-gateway.service; do
+    for unit in aimee.slice aimee-kb.service aimee-server.service aimee-runtime-web.service aimee-gateway.service; do
         src="$SCRIPT_DIR/systemd/user/$unit"
         if [ -f "$src" ]; then
             cp "$src" "$USER_UNIT_DIR/$unit"
@@ -325,18 +325,18 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
             # Remote kb: don't run a local sidecar; stop/disable it if a prior
             # local install left it enabled, then bring up just the server.
             systemctl --user disable --now aimee-kb.service 2>/dev/null || true
-            if systemctl --user enable --now aimee-server.service 2>/dev/null; then
-                info "aimee-server.service enabled and started (remote aimee-kb)"
+            if systemctl --user enable --now aimee-server.service aimee-runtime-web.service 2>/dev/null; then
+                info "aimee-server.service + aimee-runtime-web.service enabled and started (remote aimee-kb)"
             else
-                warn "systemctl --user enable failed; run: systemctl --user enable --now aimee-server"
+                warn "systemctl --user enable failed; run: systemctl --user enable --now aimee-server aimee-runtime-web"
             fi
         else
             # Local kb: enable kb FIRST so the server unit's After= ordering can
             # actually find it. enable --now is idempotent.
-            if systemctl --user enable --now aimee-kb.service aimee-server.service 2>/dev/null; then
-                info "aimee-kb.service + aimee-server.service enabled and started"
+            if systemctl --user enable --now aimee-kb.service aimee-server.service aimee-runtime-web.service 2>/dev/null; then
+                info "aimee-kb.service + aimee-server.service + aimee-runtime-web.service enabled and started"
             else
-                warn "systemctl --user enable failed; run: systemctl --user enable --now aimee-kb aimee-server"
+                warn "systemctl --user enable failed; run: systemctl --user enable --now aimee-kb aimee-server aimee-runtime-web"
             fi
         fi
     else

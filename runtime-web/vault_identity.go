@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -35,10 +36,21 @@ type commandWebchatVault struct {
 	mu sync.Mutex
 }
 
+// In the appliance, the C server owns the Vault and runtime-web must cross the
+// user boundary to reach it. A local user install has no `aimee` service user;
+// run the helper as the current user instead so it shares the local server's
+// AIMEE_HOME and credentials.
+func webchatVaultCommand(args ...string) *exec.Cmd {
+	if os.Getenv("AIMEE_RUNTIME_WEB_LOCAL") == "1" {
+		return exec.Command("aimee-server", args...)
+	}
+	return exec.Command("runuser", append([]string{"-u", "aimee", "--", "aimee-server"}, args...)...)
+}
+
 func (v *commandWebchatVault) Snapshot() (webchatVaultSnapshot, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	cmd := exec.Command("runuser", "-u", "aimee", "--", "aimee-server", "--webchat-vault-export")
+	cmd := webchatVaultCommand("--webchat-vault-export")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = new(bytes.Buffer)
@@ -54,7 +66,7 @@ func (v *commandWebchatVault) Snapshot() (webchatVaultSnapshot, error) {
 func (v *commandWebchatVault) Seal(record string, value []byte) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	cmd := exec.Command("runuser", "-u", "aimee", "--", "aimee-server", "--webchat-vault-seal", record)
+	cmd := webchatVaultCommand("--webchat-vault-seal", record)
 	cmd.Stdin = bytes.NewReader(value)
 	cmd.Stdout = new(bytes.Buffer)
 	cmd.Stderr = new(bytes.Buffer)

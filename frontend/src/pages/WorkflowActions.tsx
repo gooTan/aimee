@@ -155,6 +155,26 @@ export const isTerminal = (s: string) =>
 // control visibility must understand both wire-compatible spellings.
 export const isHumanGatePause = (reason: string) => reason === "human_gate" || reason === "pending_human";
 
+// One requested-changes finding per non-empty line, split on `|` and filled
+// from the left: `location | summary | recommendation`, `location | summary`,
+// or a bare `summary`. Deterministic on purpose: a reviewer pasting quick
+// notes must not have to guess how the line will be interpreted.
+export type GateFinding = { location?: string; summary: string; recommendation?: string };
+export const parseGateFindings = (text: string): GateFinding[] => {
+  const findings: GateFinding[] = [];
+  for (const raw of text.split("\n")) {
+    const parts = raw.split("|").map((p) => p.trim());
+    if (parts.length >= 3 && parts[1]) {
+      findings.push({ location: parts[0] || undefined, summary: parts[1], recommendation: parts.slice(2).join(" | ") || undefined });
+    } else if (parts.length === 2 && parts[1]) {
+      findings.push({ location: parts[0] || undefined, summary: parts[1] });
+    } else if (parts.length === 1 && parts[0]) {
+      findings.push({ summary: parts[0] });
+    }
+  }
+  return findings;
+};
+
 // A human status label + tone from the row's state + pause_reason + stage. Derived
 // strictly from the documented enums — no invented "drafting" state.
 function statusOf(it: Item): { label: string; variant: BadgeVariant } {
@@ -453,6 +473,32 @@ export default function WorkflowActions() {
     [selId, openProposal],
   );
 
+  // Request changes: the human's PR review notes become findings routed back
+  // to the implementer through the gate's on_fail stage.
+  const [changesOpen, setChangesOpen] = useState(false);
+  const [changesText, setChangesText] = useState("");
+  const submitChanges = useCallback(async () => {
+    if (!selId) return;
+    const findings = parseGateFindings(changesText);
+    if (findings.length === 0) {
+      setGateMsg("Write at least one finding line first.");
+      return;
+    }
+    setGateMsg("");
+    const { status: st, data } = await postJSON<{ error?: string }>(
+      `/api/workflow/items/${encodeURIComponent(selId)}/gate`,
+      { decision: "changes", findings },
+    );
+    if (st >= 200 && st < 300) {
+      setGateMsg("Changes requested — the run returns to the implementer.");
+      setChangesOpen(false);
+      setChangesText("");
+      openProposal(selId);
+    } else {
+      setGateMsg(data.error || `failed (HTTP ${st})`);
+    }
+  }, [selId, changesText, openProposal]);
+
   // Lifecycle control (pause / resume / stop / delete). On success we refresh the
   // open proposal (or clear the selection after a delete).
   const [actMsg, setActMsg] = useState("");
@@ -667,20 +713,51 @@ export default function WorkflowActions() {
 
             {canDecide && (
               <Panel title={`Human gate · ${detail.stage}`}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <Button onClick={() => void decideGate("approve")} size="md" title="Approve this gate and resume the run.">
                     Approve
+                  </Button>
+                  <Button
+                    size="md"
+                    onClick={() => setChangesOpen((open) => !open)}
+                    title="Send your review comments back to the implementer; the run repairs and re-reviews instead of ending."
+                  >
+                    Request changes
                   </Button>
                   <Button
                     variant="danger"
                     size="md"
                     onClick={() => void decideGate("reject")}
-                    title="Reject at this gate."
+                    title="Reject at this gate and end the run."
                   >
                     Reject
                   </Button>
                   {gateMsg && <span style={{ fontSize: 12, color: "#667" }}>{gateMsg}</span>}
                 </div>
+                {changesOpen && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 12, color: "#667", marginBottom: 4 }}>
+                      One finding per line: <code>location | summary | recommendation</code> (location and
+                      recommendation optional). Each becomes a blocking finding the implementer must resolve;
+                      the repaired diff re-runs the full review ladder to a fresh gate.
+                    </div>
+                    <textarea
+                      value={changesText}
+                      onChange={(e) => setChangesText(e.target.value)}
+                      rows={5}
+                      placeholder={"src/duration.js:42 | error message drops the unit | include the offending unit in the message\nREADME example still shows the old CLI name"}
+                      style={{ ...inp, width: "100%", fontFamily: "monospace", fontSize: 13, lineHeight: 1.5 }}
+                    />
+                    <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                      <Button size="md" onClick={() => void submitChanges()} title="Send these findings back to the implementer.">
+                        Send back for changes
+                      </Button>
+                      <Button size="md" onClick={() => setChangesOpen(false)} title="Close without sending.">
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </Panel>
             )}
 

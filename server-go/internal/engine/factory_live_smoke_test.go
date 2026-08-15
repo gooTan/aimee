@@ -232,7 +232,10 @@ func newLiveSmokeRepo(t *testing.T, root string) string {
 	if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	skill := "# Code review skill\n\n" +
+	// Codex refuses to auto-load a skill file without YAML frontmatter, so the
+	// fixture ships the same shape a real repository would.
+	skill := "---\nname: code-review\ndescription: Repository code review standards\n---\n\n" +
+		"# Code review skill\n\n" +
 		"Review along two axes. Standards: correctness, safety, convention consistency. " +
 		"Spec: the change does exactly what the request asked, nothing missing, nothing extra. " +
 		"Only report findings you would block a merge on.\n"
@@ -301,7 +304,18 @@ func (a *liveSmokeAgents) Delegate(ctx context.Context, request DelegateRequest)
 			args[i] = hostPath(args[0], outFile)
 		}
 	}
-	callCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	// Always persist the prompt, whatever transport carries it, so a hung or
+	// killed dispatch still leaves the operator its exact input.
+	_ = os.WriteFile(filepath.Join(a.fileDir, label+"-task.md"), []byte(request.Prompt), 0o644)
+	// High-effort review seats legitimately verify for tens of minutes;
+	// AIMEE_SMOKE_DISPATCH_TIMEOUT_MIN widens the per-dispatch bound to match.
+	dispatchTimeout := 30 * time.Minute
+	if raw := os.Getenv("AIMEE_SMOKE_DISPATCH_TIMEOUT_MIN"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			dispatchTimeout = time.Duration(n) * time.Minute
+		}
+	}
+	callCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(callCtx, args[0], args[1:]...)
 	if request.Workdir != "" {
@@ -312,7 +326,22 @@ func (a *liveSmokeAgents) Delegate(ctx context.Context, request DelegateRequest)
 	}
 	started := time.Now()
 	a.t.Logf("dispatch %s (role=%s tools=%v workdir=%s)", label, request.Role, request.Tools, cmd.Dir)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				a.t.Logf("dispatch %s still running after %s", label,
+					time.Since(started).Round(time.Second))
+			}
+		}
+	}()
 	output, err := cmd.CombinedOutput()
+	close(heartbeatDone)
 	a.t.Logf("dispatch %s finished in %s (%d bytes, err=%v)", label,
 		time.Since(started).Round(time.Second), len(output), err)
 	// Keep a transcript per dispatch for the operator.

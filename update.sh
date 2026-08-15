@@ -37,16 +37,18 @@ done
 INSTALL_DIR="$HOME/.local/bin"
 AIMEE_BIN="$INSTALL_DIR/aimee"
 AIMEE_SERVER_BIN="$INSTALL_DIR/aimee-server"
-AIMEE_WEBCHAT_BIN="$INSTALL_DIR/aimee-webchat"
+AIMEE_RUNTIME_WEB_BIN="$INSTALL_DIR/aimee-runtime-web"
+AIMEE_WFE_BIN="$INSTALL_DIR/aimee-wfe"
 AIMEE_KB_BIN="$INSTALL_DIR/aimee-kb"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
 LOCAL_BIN="$SCRIPT_DIR/aimee"
 LOCAL_SERVER="$SCRIPT_DIR/aimee-server"
-LOCAL_WEBCHAT="$SCRIPT_DIR/aimee-webchat"
+LOCAL_RUNTIME_WEB="$SCRIPT_DIR/aimee-runtime-web"
+LOCAL_WFE="$SCRIPT_DIR/aimee-wfe"
 LOCAL_KB="$SCRIPT_DIR/aimee-kb"
-DEFAULT_UPDATE_SOURCE_URL="https://github.com/RakuenSoftware/aimee.git"
-DEFAULT_UPDATE_SOURCE_BRANCH="main"
+DEFAULT_UPDATE_SOURCE_URL="https://github.com/gooTan/aimee.git"
+DEFAULT_UPDATE_SOURCE_BRANCH="feature/subscription-factory"
 
 # shellcheck source=distro-detect.sh
 source "$SCRIPT_DIR/distro-detect.sh"
@@ -188,11 +190,9 @@ NEW_HEAD=$(git rev-parse HEAD)
 # --- Check if rebuild is needed ---
 
 needs_build() {
-    # aimee-webchat (Go) is optional: only required/buildable when a Go toolchain
-    # is present (see `make all`'s ALL_WEBCHAT gate). Without Go the C core still
-    # builds, so a missing webchat must not force a perpetual rebuild.
+    # aimee-runtime-web and aimee-wfe are optional when Go is unavailable.
     local bins=("$LOCAL_BIN" "$LOCAL_SERVER" "$LOCAL_KB")
-    command -v go >/dev/null 2>&1 && bins+=("$LOCAL_WEBCHAT")
+    command -v go >/dev/null 2>&1 && bins+=("$LOCAL_RUNTIME_WEB" "$LOCAL_WFE")
     local bin
 
     if $FORCE; then
@@ -218,6 +218,20 @@ needs_build() {
         done
     done < <(find "$SRC_DIR" \( -name '*.c' -o -name '*.h' \) -print0)
 
+    if [ -f "$LOCAL_RUNTIME_WEB" ]; then
+        while IFS= read -r -d '' src; do
+            [ "$src" -nt "$LOCAL_RUNTIME_WEB" ] && return 0
+        done < <(find "$SCRIPT_DIR/runtime-web" \
+            \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -print0)
+    fi
+
+    if [ -f "$LOCAL_WFE" ]; then
+        while IFS= read -r -d '' src; do
+            [ "$src" -nt "$LOCAL_WFE" ] && return 0
+        done < <(find "$SCRIPT_DIR/server-go" \
+            \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -print0)
+    fi
+
     # Makefile itself changed
     for bin in "${bins[@]}"; do
         [ "$SRC_DIR/Makefile" -nt "$bin" ] && return 0
@@ -232,8 +246,9 @@ needs_install() {
     fi
 
     local bins=("$AIMEE_BIN" "$AIMEE_SERVER_BIN" "$AIMEE_KB_BIN")
-    # webchat only counts toward "needs install" when a local build exists.
-    [ -f "$LOCAL_WEBCHAT" ] && bins+=("$AIMEE_WEBCHAT_BIN")
+    # Runtime web only counts toward "needs install" when a local build exists.
+    [ -f "$LOCAL_RUNTIME_WEB" ] && bins+=("$AIMEE_RUNTIME_WEB_BIN")
+    [ -f "$LOCAL_WFE" ] && bins+=("$AIMEE_WFE_BIN")
     for bin in "${bins[@]}"; do
         [ -f "$bin" ] || return 0
     done
@@ -366,17 +381,27 @@ done
 
 if $REFRESH_BINARIES; then
     mkdir -p "$INSTALL_DIR"
-    rm -f "$AIMEE_BIN" "$AIMEE_SERVER_BIN" "$AIMEE_WEBCHAT_BIN" "$AIMEE_KB_BIN"
+    rm -f "$AIMEE_BIN" "$AIMEE_SERVER_BIN" "$AIMEE_RUNTIME_WEB_BIN" "$AIMEE_WFE_BIN" "$AIMEE_KB_BIN"
     cp "$LOCAL_BIN" "$AIMEE_BIN"
     cp "$LOCAL_SERVER" "$AIMEE_SERVER_BIN"
     cp "$LOCAL_KB" "$AIMEE_KB_BIN"
     chmod +x "$AIMEE_BIN" "$AIMEE_SERVER_BIN" "$AIMEE_KB_BIN"
-    # webchat is optional (built only when Go is available); install if present.
-    if [ -f "$LOCAL_WEBCHAT" ]; then
-        cp "$LOCAL_WEBCHAT" "$AIMEE_WEBCHAT_BIN"
-        chmod +x "$AIMEE_WEBCHAT_BIN"
+    # Runtime web is optional (built only when Go is available); install if present.
+    if [ -f "$LOCAL_RUNTIME_WEB" ]; then
+        cp "$LOCAL_RUNTIME_WEB" "$AIMEE_RUNTIME_WEB_BIN"
+        chmod +x "$AIMEE_RUNTIME_WEB_BIN"
+    fi
+    if [ -f "$LOCAL_WFE" ]; then
+        cp "$LOCAL_WFE" "$AIMEE_WFE_BIN"
+        chmod +x "$AIMEE_WFE_BIN"
     fi
 fi
+
+AIMEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/aimee"
+"$SCRIPT_DIR/scripts/seed-managed-defaults.sh" \
+    "$SCRIPT_DIR/config/workflows" .yaml "$AIMEE_CONFIG_DIR/workflows"
+"$SCRIPT_DIR/scripts/seed-managed-defaults.sh" \
+    "$SCRIPT_DIR/config/roundtables" .json "$AIMEE_CONFIG_DIR/roundtables"
 
 # --- Refresh systemd user units (Linux only) ---
 #
@@ -398,7 +423,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
 
     # aimee-gateway.service is refreshed alongside the core units (not enabled
     # here; the operator enables it once per-channel config exists).
-    for unit in aimee.slice aimee-kb.service aimee-server.service aimee-gateway.service; do
+    for unit in aimee.slice aimee-kb.service aimee-server.service aimee-wfe.service aimee-runtime-web.service aimee-gateway.service; do
         src="$SCRIPT_DIR/systemd/user/$unit"
         dst="$USER_UNIT_DIR/$unit"
         if [ -f "$src" ]; then
@@ -427,6 +452,8 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
         fi
 
         if systemctl --user is-enabled --quiet aimee-server.service 2>/dev/null; then
+            systemctl --user enable aimee-wfe.service >/dev/null 2>&1 || \
+                warn "systemctl --user enable aimee-wfe failed"
             if systemctl --user restart aimee-server.service 2>/dev/null; then
                 info "aimee-server restarted via systemd"
                 SERVER_WAS_RUNNING=false
@@ -436,6 +463,14 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
             fi
         else
             info "aimee-server.service not enabled; leaving fork-and-exec fallback active"
+        fi
+
+        if systemctl --user is-enabled --quiet aimee-wfe.service 2>/dev/null; then
+            if systemctl --user restart aimee-wfe.service 2>/dev/null; then
+                info "aimee-wfe restarted via systemd"
+            else
+                warn "systemctl --user restart aimee-wfe failed"
+            fi
         fi
     else
         warn "systemctl --user daemon-reload failed (user manager may not be running)"
@@ -518,8 +553,8 @@ fi
 
 bash "$SCRIPT_DIR/configure-hooks.sh"
 
-if [ -f "$AIMEE_WEBCHAT_BIN" ]; then
-    info "Updated: $AIMEE_BIN, $AIMEE_SERVER_BIN, $AIMEE_WEBCHAT_BIN, $AIMEE_KB_BIN"
+if [ -f "$AIMEE_RUNTIME_WEB_BIN" ]; then
+    info "Updated: $AIMEE_BIN, $AIMEE_SERVER_BIN, $AIMEE_RUNTIME_WEB_BIN, $AIMEE_KB_BIN"
 else
-    info "Updated: $AIMEE_BIN, $AIMEE_SERVER_BIN, $AIMEE_KB_BIN (aimee-webchat skipped: no Go toolchain)"
+    info "Updated: $AIMEE_BIN, $AIMEE_SERVER_BIN, $AIMEE_KB_BIN (aimee-runtime-web skipped: no Go toolchain)"
 fi

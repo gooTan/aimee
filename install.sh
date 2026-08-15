@@ -11,6 +11,7 @@ SRC_DIR="$SCRIPT_DIR/src"
 LOCAL_BIN="$SCRIPT_DIR/aimee"
 LOCAL_SERVER="$SCRIPT_DIR/aimee-server"
 LOCAL_RUNTIME_WEB="$SCRIPT_DIR/aimee-runtime-web"
+LOCAL_WFE="$SCRIPT_DIR/aimee-wfe"
 LOCAL_KB="$SCRIPT_DIR/aimee-kb"
 
 # shellcheck source=distro-detect.sh
@@ -125,7 +126,7 @@ needs_build() {
     # present; without Go the C core still builds and installs (see make all's
     # ALL_WEBCHAT gate), so don't let a missing webchat force a rebuild loop.
     local bins=("$LOCAL_BIN" "$LOCAL_SERVER" "$LOCAL_KB")
-    command -v go >/dev/null 2>&1 && bins+=("$LOCAL_RUNTIME_WEB")
+    command -v go >/dev/null 2>&1 && bins+=("$LOCAL_RUNTIME_WEB" "$LOCAL_WFE")
     local bin
 
     for bin in "${bins[@]}"; do
@@ -142,7 +143,8 @@ needs_build() {
         for bin in "${bins[@]}"; do
             [ "$src" -nt "$bin" ] && return 0
         done
-    done < <(find "$SCRIPT_DIR/webchat" -name '*.go' -o -name 'go.mod' | tr '\n' '\0')
+    done < <(find "$SCRIPT_DIR/runtime-web" "$SCRIPT_DIR/server-go" \
+        \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -print0)
 
     for bin in "${bins[@]}"; do
         [ "$SRC_DIR/Makefile" -nt "$bin" ] && return 0
@@ -187,7 +189,7 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 rm -f "$INSTALL_DIR/aimee" "$INSTALL_DIR/aimee-server" \
-      "$INSTALL_DIR/aimee-runtime-web" "$INSTALL_DIR/aimee-kb"
+      "$INSTALL_DIR/aimee-runtime-web" "$INSTALL_DIR/aimee-wfe" "$INSTALL_DIR/aimee-kb"
 cp "$LOCAL_BIN" "$INSTALL_DIR/aimee"
 cp "$LOCAL_SERVER" "$INSTALL_DIR/aimee-server"
 cp "$LOCAL_KB" "$INSTALL_DIR/aimee-kb"
@@ -196,6 +198,10 @@ chmod +x "$INSTALL_DIR/aimee" "$INSTALL_DIR/aimee-server" "$INSTALL_DIR/aimee-kb
 if [ -f "$LOCAL_RUNTIME_WEB" ]; then
     cp "$LOCAL_RUNTIME_WEB" "$INSTALL_DIR/aimee-runtime-web"
     chmod +x "$INSTALL_DIR/aimee-runtime-web"
+fi
+if [ -f "$LOCAL_WFE" ]; then
+    cp "$LOCAL_WFE" "$INSTALL_DIR/aimee-wfe"
+    chmod +x "$INSTALL_DIR/aimee-wfe"
 fi
 
 # Remove retired binaries. aimee-worker was folded into aimee-server's
@@ -245,6 +251,11 @@ fi
 # are never matched.
 AIMEE_CONFIG_DIR="$HOME/.config/aimee"
 AIMEE_YAML="$AIMEE_CONFIG_DIR/aimee.yaml"
+
+"$SCRIPT_DIR/scripts/seed-managed-defaults.sh" \
+    "$SCRIPT_DIR/config/workflows" .yaml "$AIMEE_CONFIG_DIR/workflows"
+"$SCRIPT_DIR/scripts/seed-managed-defaults.sh" \
+    "$SCRIPT_DIR/config/roundtables" .json "$AIMEE_CONFIG_DIR/roundtables"
 
 aimee_yaml_unset() { # remove any top-level "<key>:" lines
     [ -s "$AIMEE_YAML" ] || return 0
@@ -311,7 +322,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
     # aimee-gateway.service (multi-channel ambient presence) is refreshed here
     # too, but not auto-enabled — it needs per-channel config, so the operator
     # enables it explicitly (systemctl --user enable --now aimee-gateway).
-    for unit in aimee.slice aimee-kb.service aimee-server.service aimee-runtime-web.service aimee-gateway.service; do
+    for unit in aimee.slice aimee-kb.service aimee-server.service aimee-wfe.service aimee-runtime-web.service aimee-gateway.service; do
         src="$SCRIPT_DIR/systemd/user/$unit"
         if [ -f "$src" ]; then
             cp "$src" "$USER_UNIT_DIR/$unit"
@@ -325,16 +336,16 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SCRIPT_DIR/systemd/user" ]; th
             # Remote kb: don't run a local sidecar; stop/disable it if a prior
             # local install left it enabled, then bring up just the server.
             systemctl --user disable --now aimee-kb.service 2>/dev/null || true
-            if systemctl --user enable --now aimee-server.service aimee-runtime-web.service 2>/dev/null; then
-                info "aimee-server.service + aimee-runtime-web.service enabled and started (remote aimee-kb)"
+            if systemctl --user enable --now aimee-server.service aimee-wfe.service aimee-runtime-web.service 2>/dev/null; then
+                info "aimee-server.service + aimee-wfe.service + aimee-runtime-web.service enabled and started (remote aimee-kb)"
             else
                 warn "systemctl --user enable failed; run: systemctl --user enable --now aimee-server aimee-runtime-web"
             fi
         else
             # Local kb: enable kb FIRST so the server unit's After= ordering can
             # actually find it. enable --now is idempotent.
-            if systemctl --user enable --now aimee-kb.service aimee-server.service aimee-runtime-web.service 2>/dev/null; then
-                info "aimee-kb.service + aimee-server.service + aimee-runtime-web.service enabled and started"
+            if systemctl --user enable --now aimee-kb.service aimee-server.service aimee-wfe.service aimee-runtime-web.service 2>/dev/null; then
+                info "aimee-kb.service + aimee-server.service + aimee-wfe.service + aimee-runtime-web.service enabled and started"
             else
                 warn "systemctl --user enable failed; run: systemctl --user enable --now aimee-kb aimee-server aimee-runtime-web"
             fi

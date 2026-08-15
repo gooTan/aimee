@@ -11,6 +11,8 @@ PartOf=aimee.slice
 [Service]
 Type=simple
 Slice=aimee.slice
+Environment=AIMEE_WFE_ENGINE=go
+Environment=AIMEE_WFE_HTTP_SOCKET=%h/.config/aimee/aimee-wfe-http.sock
 # aimee-server serves its /v1 HTTP surface over %h/.config/aimee/aimee-http.sock
 # (the legacy NDJSON --socket flag was removed; it is accepted-but-ignored).
 ExecStart=%h/.local/bin/aimee-server

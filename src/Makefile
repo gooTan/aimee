@@ -23,6 +23,7 @@ KB_JWKS_PUBLISHER = ../aimee-kb-jwks-publish$(EXEEXT)
 KB_STATUS_AUTHORITY = ../aimee-kb-status-authority$(EXEEXT)
 KB_TOKEN_AUTHORITY = ../aimee-kb-token-authority$(EXEEXT)
 RUNTIME_WEB = ../aimee-runtime-web$(EXEEXT)
+WFE     = ../aimee-wfe$(EXEEXT)
 GATEWAY = ../aimee-gateway$(EXEEXT)
 # Binaries a rename left behind. `all` removes these first so a renamed artifact
 # does not sit in the repo root forever: aimee-webchat became aimee-runtime-web
@@ -39,8 +40,10 @@ RETIRED_ROOT_BINARIES = ../aimee-client$(EXEEXT) ../aimee-worker$(EXEEXT) \
 HAVE_GO := $(shell command -v go >/dev/null 2>&1 && echo 1)
 ifeq ($(HAVE_GO),1)
 ALL_RUNTIME_WEB = $(RUNTIME_WEB)
+ALL_WFE = $(WFE)
 else
 ALL_RUNTIME_WEB =
+ALL_WFE =
 endif
 
 define AIMEE_RUNTIME_MUTATION_GUARD
@@ -873,7 +876,7 @@ DEPS = $(ALL_OBJS:.o=.d) $(shell find $(OBJDIR) -name '*.d' 2>/dev/null)
 
 .PHONY: optional-tool-ownership-check refactor-baseline-check module-source-ownership-check module-bus-boundary-check cleanup-ledger-check repository-lock-check all clean install inc-check forge-app-token-validation lint code-vector-graph-corpus-check line-check schema-sync-check config-schema-drift-check config-uninitialized-check cmd-srcs-compile-check charter-tables-check tier-deps-check module-boundary-check module-inventory-check background-skill-curator-absence-check guidance-tool-parity-check capability-ownership-check panel-contract-boundary-check published-compose-images-check dispatch-caps-check kb-v1-coverage-check kb-target-isolation-check kb-container-packaging-check deploy-env-consumed-check sidecar-clients-check docs-check docs-gen docs-gen-check api-conformance-check server-api-conformance-check v1-method-coverage-check cli-v1-routes-check async-op-handlers-check v1-route-order-check cli-help-coverage-check kb-intelligence-surfaced-check proposal-links-check pending-audit-manifest-check proposal-reconcile-check dev-accept-check curator-sidecar-parse-check git-cred-centralized-check sanitizer-callsites-check lessons-isolation-check md-store-retired-check models-dev-snapshot-check test-tmpdir-check model-fallback-shadow-check p1-tenant-guard-check p1-rls-gate-check bus-blast-radius-check entrypoint-exit-report-check webchat-bootstrap-login-check deployed-image-check gen-sdks sdk-parity-check v1-ws-test format unit-tests go-unit-tests verify-local integration-tests wizard-bootstrap-e2e v1-third-party-test v1-sdk-smoke v1-ws-test init-migrate-service-test server lean fuzz coverage static-analysis cppcheck clang-tidy bench bench-check bench-baseline memory-retrieval-eval-check virtual-context-eval-check virtual-context-inspect curator-eval curator-eval-check build-integrity build-variants check-linking retire-obsolete-binaries kb
 
-all: retire-obsolete-binaries $(BINARY) $(ALL_RUNTIME_WEB) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY) $(FORWARDER)
+all: retire-obsolete-binaries $(BINARY) $(ALL_RUNTIME_WEB) $(ALL_WFE) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY) $(FORWARDER)
 
 # The forwarder is a standalone static binary (libc only, no aimee objects); it is
 # shipped in the aimee-server image and docker-cp'd into a delegate sandbox.
@@ -935,7 +938,7 @@ verify-local: all
 	@$(MAKE) go-unit-tests
 	@echo "verify-local: ok"
 
-server: retire-obsolete-binaries $(SERVER) $(KB) $(KB_RESOLVER) $(FORWARDER)
+server: retire-obsolete-binaries $(SERVER) $(ALL_WFE) $(KB) $(KB_RESOLVER) $(FORWARDER)
 
 wizard-bootstrap-e2e: $(BINARY) $(SERVER)
 	@cd .. && ./scripts/test-wizard-first-user-bootstrap.sh
@@ -1293,6 +1296,12 @@ $(RUNTIME_WEB): $(RUNTIME_WEB_GO_SRCS)
 	$(AIMEE_RUNTIME_MUTATION_GUARD)
 	cd ../runtime-web && go build -buildvcs=false -o "$(CURDIR)/$@" .
 
+# Go owns workflow definition validation, scheduling, and factory execution.
+WFE_GO_SRCS := $(shell find ../server-go -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \))
+$(WFE): $(WFE_GO_SRCS)
+	$(AIMEE_RUNTIME_MUTATION_GUARD)
+	cd ../server-go && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$(CURDIR)/$@" ./cmd/aimee-server
+
 # Server (daemon). DB2-bound work routes through kb_client to aimee-kb;
 # keep this target free of DB2_OBJS and libpq.
 #
@@ -1594,10 +1603,11 @@ CFLAGS_DATADIR = -DAIMEE_DATADIR='"$(DATADIR)"'
 install:
 	$(AIMEE_RUNTIME_MUTATION_GUARD)
 	@mkdir -p build && date +%s > $(BUILD_ID_FILE)
-	$(MAKE) $(BINARY) $(RUNTIME_WEB) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY)
+	$(MAKE) $(BINARY) $(RUNTIME_WEB) $(ALL_WFE) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY)
 	rm -f $(PREFIX)/bin/aimee-client $(PREFIX)/bin/aimee-worker
 	install -m 755 $(BINARY) $(PREFIX)/bin/aimee
 	install -m 755 $(RUNTIME_WEB) $(PREFIX)/bin/aimee-runtime-web
+	@if [ -x "$(WFE)" ]; then install -m 755 $(WFE) $(PREFIX)/bin/aimee-wfe; fi
 	install -m 755 $(SERVER) $(PREFIX)/bin/aimee-server
 	install -m 755 $(FORWARDER) $(PREFIX)/bin/aimee-forwarder
 	install -m 755 $(KB) $(PREFIX)/bin/aimee-kb

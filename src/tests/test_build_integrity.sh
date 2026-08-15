@@ -767,6 +767,45 @@ else
     fail "install/update scripts miss systemd user units:$missing_systemd_units"
 fi
 
+# Native installs must ship the same Go workflow control plane and managed
+# factory definitions as the container image. Otherwise `aimee workflow list`
+# is empty after a successful source install even though config/workflows is
+# present in the checkout.
+native_factory_install_ok=1
+[ -f ../systemd/user/aimee-wfe.service ] || native_factory_install_ok=0
+grep -q 'AIMEE_WFE_ENGINE=go' ../systemd/user/aimee-server.service || native_factory_install_ok=0
+for script in ../install.sh ../update.sh; do
+    grep -q 'aimee-wfe' "$script" || native_factory_install_ok=0
+    grep -q 'seed-managed-defaults.sh' "$script" || native_factory_install_ok=0
+    grep -q 'config/workflows' "$script" || native_factory_install_ok=0
+done
+if [ "$native_factory_install_ok" -eq 1 ]; then
+    pass "native installs ship the Go WFE and seed factory workflows"
+else
+    fail "native installs omit the Go WFE or shipped factory workflows"
+fi
+
+managed_defaults_tmp=$(mktemp -d /tmp/aimee-managed-defaults.XXXXXX)
+mkdir -p "$managed_defaults_tmp/source"
+printf 'first\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+printf 'second\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+managed_update=$(cat "$managed_defaults_tmp/installed/demo.yaml")
+printf 'operator edit\n' > "$managed_defaults_tmp/installed/demo.yaml"
+printf 'third\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+operator_update=$(cat "$managed_defaults_tmp/installed/demo.yaml")
+rm -rf "$managed_defaults_tmp"
+if [ "$managed_update" = "second" ] && [ "$operator_update" = "operator edit" ]; then
+    pass "managed workflow defaults update without overwriting operator edits"
+else
+    fail "managed workflow default seeding overwrites or fails to refresh definitions"
+fi
+
 # 7c2. update.sh must refresh hooks/support files even when binaries are current.
 if awk '
     /configure-hooks\.sh/ { hook_seen = 1 }

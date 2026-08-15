@@ -137,6 +137,12 @@ bootstrap_postgres() {
     fi
 
     if command -v systemctl >/dev/null 2>&1; then
+        # Fedora ships an uninitialized cluster.  The service refuses to start
+        # until its data directory has been created once.
+        if [ ! -s /var/lib/pgsql/data/PG_VERSION ] && command -v postgresql-setup >/dev/null 2>&1; then
+            info "postgres: initializing database cluster"
+            $AIMEE_SUDO postgresql-setup --initdb
+        fi
         if ! systemctl is-active --quiet postgresql 2>/dev/null; then
             info "postgres: starting postgresql service"
             $AIMEE_SUDO systemctl enable --now postgresql 2>/dev/null || \

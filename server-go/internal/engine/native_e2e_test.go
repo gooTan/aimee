@@ -84,8 +84,16 @@ func (r *transientGateRunner) Run(ctx context.Context, request StepRequest) (Ste
 }
 
 type e2eForge struct {
-	mu    sync.Mutex
-	opens []PullRequestSpec
+	mu       sync.Mutex
+	opens    []PullRequestSpec
+	comments []ReviewComment
+}
+
+func (f *e2eForge) ReviewComments(_ context.Context, _ string, _ string, comments []ReviewComment) error {
+	f.mu.Lock()
+	f.comments = append(f.comments, comments...)
+	f.mu.Unlock()
+	return nil
 }
 
 func (*e2eForge) Push(ctx context.Context, _, workdir, branch string) error {

@@ -1853,8 +1853,114 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	if err := r.db.SetPRRef(ctx, item.ID, pr.Ref); err != nil {
 		return StepResult{}, err
 	}
+	// Surface the reviewers' surviving findings as inline PR comments. The
+	// seats authored them (with file:line locations); the engine posts them
+	// because delegates hold no forge credentials. Best-effort by contract:
+	// the PR body's review history already carries every finding, so a
+	// commenting failure degrades presentation, never the workflow.
+	commentDetail := r.postReviewFindingComments(ctx, item, workdir, pr)
 	encoded, _ := json.Marshal(pr)
-	return StepResult{Status: StepAdvanced, ArtifactType: "pr", Artifact: string(encoded), ContentHash: wfe.Hash(encoded)}, nil
+	return StepResult{Status: StepAdvanced, ArtifactType: "pr", Artifact: string(encoded), ContentHash: wfe.Hash(encoded), Detail: commentDetail}, nil
+}
+
+// parseFindingLocation splits a finding location of the form path:line into
+// its parts. Locations without a parseable trailing line number cannot anchor
+// an inline comment and are skipped (they still appear in the PR body).
+func parseFindingLocation(location string) (string, int, bool) {
+	location = strings.TrimSpace(location)
+	idx := strings.LastIndexByte(location, ':')
+	if idx <= 0 || idx == len(location)-1 {
+		return "", 0, false
+	}
+	line := 0
+	for _, r := range location[idx+1:] {
+		if r < '0' || r > '9' {
+			return "", 0, false
+		}
+		line = line*10 + int(r-'0')
+	}
+	if line <= 0 {
+		return "", 0, false
+	}
+	return location[:idx], line, true
+}
+
+func (r *NativeRunner) postReviewFindingComments(ctx context.Context, item db1.WorkItem,
+	workdir string, pr PullRequest) string {
+	feedback, err := r.artifacts.Feedback(item.ID)
+	if err != nil {
+		return ""
+	}
+	var comments []ReviewComment
+	for _, finding := range feedback.Findings {
+		path, line, ok := parseFindingLocation(finding.Location)
+		if !ok {
+			continue
+		}
+		body := strings.TrimSpace(finding.Summary)
+		if recommendation := strings.TrimSpace(finding.Recommendation); recommendation != "" {
+			body += "\n\nSuggestion: " + recommendation
+		}
+		persona := strings.TrimSpace(finding.Persona)
+		if persona == "" {
+			persona = "reviewer"
+		}
+		severity := strings.TrimSpace(finding.Severity)
+		if severity == "" {
+			severity = "suggestion"
+		}
+		body = "**[" + persona + " · " + severity + "]** " + body
+		comments = append(comments, ReviewComment{Path: path, Line: line, Body: body})
+	}
+	if len(comments) == 0 {
+		return ""
+	}
+	if commenter, ok := r.forge.(ReviewCommenter); ok {
+		if err := commenter.ReviewComments(ctx, workdir, pr.Ref, comments); err != nil {
+			return "inline review comments not posted: " + safeDiagnostic(err.Error())
+		}
+		return ""
+	}
+	if err := postReviewCommentsViaGH(ctx, workdir, pr, comments); err != nil {
+		return "inline review comments not posted: " + safeDiagnostic(err.Error())
+	}
+	return ""
+}
+
+// postReviewCommentsViaGH is the host-deployment fallback: the aimee-server
+// process (never a delegate) posts each comment with the operator's gh login.
+// The repository is inferred from the worktree's origin remote by gh itself.
+func postReviewCommentsViaGH(ctx context.Context, workdir string, pr PullRequest,
+	comments []ReviewComment) error {
+	ref := pr.URL
+	if ref == "" {
+		ref = pr.Ref
+	}
+	number, err := exec.CommandContext(ctx, "gh", "pr", "view", ref, "--json", "number",
+		"--jq", ".number").Output()
+	if err != nil {
+		return fmt.Errorf("resolve pull request number: %w", err)
+	}
+	commit, err := gitText(ctx, workdir, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	prNumber := strings.TrimSpace(string(number))
+	for _, comment := range comments {
+		cmd := exec.CommandContext(ctx, "gh", "api",
+			"repos/{owner}/{repo}/pulls/"+prNumber+"/comments",
+			"-f", "body="+comment.Body,
+			"-f", "path="+comment.Path,
+			"-F", "line="+fmt.Sprintf("%d", comment.Line),
+			"-f", "commit_id="+commit,
+			"-f", "side=RIGHT")
+		cmd.Dir = workdir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("post inline comment on %s:%d: %v: %s",
+				comment.Path, comment.Line, err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
 }
 
 // refreshPullRequestBase makes the PR contract describe the remote target that

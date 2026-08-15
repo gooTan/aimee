@@ -753,6 +753,19 @@ func TestProPRBodyCarriesReviewHistory(t *testing.T) {
 	if !strings.Contains(body, "tiny naming nit") {
 		t.Fatalf("PR body lacks the surviving nit:\n%s", body)
 	}
+	// The same finding lands as an inline PR comment, attributed to its seat.
+	run.forge.mu.Lock()
+	comments := append([]ReviewComment(nil), run.forge.comments...)
+	run.forge.mu.Unlock()
+	if len(comments) != 1 {
+		t.Fatalf("posted %d inline comments, want 1: %+v", len(comments), comments)
+	}
+	if comments[0].Path != "feature.txt" || comments[0].Line != 1 {
+		t.Fatalf("comment anchored at %s:%d, want feature.txt:1", comments[0].Path, comments[0].Line)
+	}
+	if !strings.Contains(comments[0].Body, "[architect") || !strings.Contains(comments[0].Body, "tiny naming nit") {
+		t.Fatalf("comment body lacks attribution or summary: %s", comments[0].Body)
+	}
 }
 
 func TestHumanGateChangesDecisionRoutesFindingsToImplementer(t *testing.T) {

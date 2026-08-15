@@ -16,7 +16,7 @@ human approval. The external CLIs are dumb, single-shot delegates.
 | `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
 | `opus-ui` | Claude CLI (`claude`) | `opus` (Claude Opus 4.8) at high effort | implementer for frontend/UI work (the `-ui` workflow variants) | isolated writable worktree |
 | `sol-review` | Codex CLI (`codex`) | `gpt-5.6-sol` at high effort | senior verifying reviewer in the pro ladder: confirms or discards gemini's findings, then reviews adversarially (round-bounded, not ledgered) | read-only |
-| `antigravity` | Antigravity CLI (`agy`) | `gemini-3.7-flash-high` | initial PR reviewer in the pro ladder | read-only by role |
+| `antigravity` | Antigravity CLI (`agy`) | `gemini-3.7-flash-high` | initial PR reviewer in the pro ladder | read-only: repo reads allowed via agy settings, writes/commands auto-denied |
 | `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.6` with `--browser-thinking-time pro` (GPT-5.6 Pro) | OPTIONAL consultation seat; not in the shipped ladder (browser automation is fragile) | consultation only: no tools, no worktree |
 
 Every seat uses the CLI's own login state. Aimee never extracts or proxies
@@ -130,6 +130,10 @@ codex login          # ChatGPT subscription; verify with: codex doctor
 claude               # sign in once; verify with: claude -p "hi"
 opencode auth login  # verify with: opencode models
 agy                  # launch with no arguments to sign in; verify with: agy models
+# Give the agy review seat read-only repo access (writes/commands stay
+# denied). In ~/.gemini/antigravity-cli/settings.json set:
+#   "permissions": { "allow": ["read_file(*)", "list_dir(*)",
+#                              "grep_search(*)", "find_by_name(*)"] }
 
 # OPTIONAL, only if you enable the oracle consultation seat. Oracle keeps
 # its own Chrome profile; sign in there once:
@@ -298,9 +302,13 @@ decisions:
   can read them with `gh pr view --comments` and make this call for you).
 
 Reviewer commentary also reaches the pull request itself: `suggestion` and
-`nit` severity findings no longer hold the review gate; they are recorded
-and surfaced in the draft PR body's Review history section, alongside the
-count of change rounds each review stage fought.
+`nit` severity findings no longer hold the review gate; they are recorded,
+surfaced in the draft PR body's Review history section alongside each
+stage's change-round count, and posted as INLINE review comments at their
+file:line, attributed to the reviewer seat. The seats author the findings;
+the ENGINE posts them (via the forge's ReviewComments capability or a gh
+CLI fallback run by aimee-server), because delegates hold no forge
+credentials. Posting is best-effort: a failure degrades presentation only.
 
 ## Agent-agnostic operation
 

@@ -87,7 +87,10 @@ nodes:
         conventions visible in the artifact? Spec: does it do exactly what the
         original request asked, nothing missing and nothing extra? Report
         every real problem as a finding with a severity; do not pad findings
-        with style nits you would not block a merge on.
+        with style nits you would not block a merge on. You may explore the
+        repository with your read-only file tools (view_file, grep_search,
+        list_dir, find_by_name) to check callers and conventions; shell
+        commands and writes are unavailable to you.
       max_rounds: 4
     on_pass: sol_review
     on_fail: sol_review

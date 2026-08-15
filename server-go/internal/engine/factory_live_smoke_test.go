@@ -188,9 +188,10 @@ func TestFactoryLiveSmoke(t *testing.T) {
 		if item.State == "accepted" {
 			forge.mu.Lock()
 			opens := append([]PullRequestSpec(nil), forge.opens...)
+			commentCount := len(forge.comments)
 			forge.mu.Unlock()
-			t.Logf("accepted; draft PRs opened: %d; delegate dispatches: %v",
-				len(opens), agents.dispatchSummary())
+			t.Logf("accepted; draft PRs opened: %d; inline review comments posted: %d; delegate dispatches: %v",
+				len(opens), commentCount, agents.dispatchSummary())
 			return
 		}
 		time.Sleep(500 * time.Millisecond)

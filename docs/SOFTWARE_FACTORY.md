@@ -10,9 +10,9 @@ human approval. The external CLIs are dumb, single-shot delegates.
 
 | Seat | CLI | Model | Role | Access |
 |------|-----|-------|------|--------|
-| `fable` | Claude CLI (`claude`) | the CLI's default subscription model | premium planner: architecture, decomposition, contracts, invariants, acceptance criteria | read-only |
+| `fable` | Claude CLI (`claude`) | the CLI's default subscription model at medium effort | premium planner: architecture, decomposition, contracts, invariants, acceptance criteria | read-only |
 | `sol` | Codex CLI (`codex`) | `gpt-5.6-sol` | premium second opinion: plan review, difficult debugging, escalated decisions | read-only |
-| `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
+| `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` at xhigh effort | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
 | `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
 | `sol-review` | Codex CLI (`codex`) | `gpt-5.6-sol` at high effort | senior verifying reviewer in the pro ladder: confirms or discards gemini's findings, then reviews adversarially (round-bounded, not ledgered) | read-only |
 | `antigravity` | Antigravity CLI (`agy`) | `gemini-3.7-flash-high` | initial PR reviewer in the pro ladder | read-only by role |
@@ -87,8 +87,9 @@ ever presented with a diff sol approved with zero findings.
 `sol` escalation seat: iterate-until-clean needs repeated senior review
 rounds, so the ladder rungs are bounded by each node's `max_rounds` (four)
 and the engine's no-progress convergence detection rather than the premium
-planning ledger, which keeps guarding fable. Codex reasoning effort comes
-from `~/.codex/config.toml` (`model_reasoning_effort = "high"`).
+planning ledger, which keeps guarding fable. Reasoning effort is pinned per
+seat with the `reasoning_effort` agents.json field (codex turn effort,
+claude --effort); a seat without one uses the CLI's configured default.
 
 ### Optional: the oracle consultation seat
 
@@ -161,6 +162,7 @@ shipped workflows reference the delegate names below; keep them.
     "backend": "provider-cli",
     "cli_kind": "claude",
     "cli_cmd": "claude",
+    "reasoning_effort": "medium",
     "roles": ["draft", "review", "explain"],
     "primary_only": false,
     "tier_price_exempt": "flat-rate subscription seat",
@@ -172,6 +174,7 @@ shipped workflows reference the delegate names below; keep them.
     "cli_kind": "codex",
     "cli_cmd": "codex",
     "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
     "roles": ["review", "draft", "diagnose"],
     "tier_price_exempt": "flat-rate subscription seat",
     "enabled": true
@@ -182,6 +185,7 @@ shipped workflows reference the delegate names below; keep them.
     "cli_kind": "codex",
     "cli_cmd": "codex",
     "model": "gpt-5.6-luna",
+    "reasoning_effort": "xhigh",
     "roles": ["draft", "review", "explain", "search"],
     "tier_price_exempt": "flat-rate subscription seat",
     "enabled": true
@@ -214,6 +218,7 @@ shipped workflows reference the delegate names below; keep them.
     "cli_kind": "codex",
     "cli_cmd": "codex",
     "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
     "roles": ["review", "explain"],
     "tier_price_exempt": "flat-rate subscription seat",
     "enabled": true

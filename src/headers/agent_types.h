@@ -300,6 +300,10 @@ typedef struct
    char name[MAX_AGENT_NAME];
    char endpoint[MAX_ENDPOINT_LEN];
    char model[MAX_MODEL_LEN];
+   /* Per-seat reasoning effort for CLI agents that expose one (codex turn
+    * "effort", claude --effort). Empty = the CLI's own configured default, so
+    * existing agents.json files keep their behavior. */
+   char reasoning_effort[16];
    char api_key[MAX_API_KEY_LEN];
    /* The verbatim on-disk api_key — a "$VAR" reference (or, during boot-time
     * migration only, a legacy literal).

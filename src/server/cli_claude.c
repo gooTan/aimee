@@ -108,6 +108,11 @@ static int claude_build_argv(const provider_cli_cfg_t *cfg, char **tokens, int c
       CLAUDE_ADD_ARG("--model");
       CLAUDE_ADD_ARG(agent->model);
    }
+   if (agent && agent->reasoning_effort[0])
+   {
+      CLAUDE_ADD_ARG("--effort");
+      CLAUDE_ADD_ARG(agent->reasoning_effort);
+   }
 #undef CLAUDE_ADD_ARG
    return argc;
 }

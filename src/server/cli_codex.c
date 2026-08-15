@@ -1876,6 +1876,10 @@ int agent_execute_cli_codex_at_cwd(const agent_t *agent, const char *cwd, const 
       cJSON_AddStringToObject(params, "threadId", thread_id);
       if (agent->model[0])
          cJSON_AddStringToObject(params, "model", agent->model);
+      /* Per-seat reasoning effort; absent means the CLI's configured default
+       * (config.toml model_reasoning_effort), same wire key as the chat path. */
+      if (agent->reasoning_effort[0])
+         cJSON_AddStringToObject(params, "effort", agent->reasoning_effort);
       cJSON *input = cli_codex_text_input_array(user_prompt);
       cJSON_AddItemToObject(params, "input", input);
       cJSON *resp = cli_codex_request(&c, "turn/start", params, 3, &deadline_ms, idle_timeout_ms);

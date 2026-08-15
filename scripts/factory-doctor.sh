@@ -1,5 +1,5 @@
 #!/bin/sh
-# factory-doctor: preflight for the subscription factory seats, from WSL.
+# factory-doctor: preflight for the subscription factory seats.
 #
 # Every failure the factory has hit in live runs was environment decay, not
 # engine logic: a codex update losing its sandbox helpers, PATH resolving an
@@ -15,7 +15,7 @@
 # {PROMPT}/{OUT_FILE} tokens or stdin. Missing template = seat skipped.
 # Exit code: number of failed checks.
 
-BRIDGE_ROOT="${AIMEE_BRIDGE_ROOT:-/mnt/c/Users/zains/AppData/Local/Temp/aimee-smoke/bridge}"
+BRIDGE_ROOT="${AIMEE_BRIDGE_ROOT:-}"
 PROBE_TIMEOUT="${AIMEE_DOCTOR_TIMEOUT_S:-90}"
 FAILS=0
 
@@ -35,7 +35,9 @@ esac
 git --version >/dev/null 2>&1 && pass "git present" || fail "git missing"
 
 say "[bridge worker]"
-if [ -d "$BRIDGE_ROOT" ]; then
+if [ -z "$BRIDGE_ROOT" ]; then
+  say "  skip  bridge not configured (set AIMEE_BRIDGE_ROOT on bridge hosts)"
+elif [ -d "$BRIDGE_ROOT" ]; then
   OUT="$(printf x | timeout 15 node "$BRIDGE_ROOT/bridge-exec.js" doctor-probe 2>&1)"
   case "$OUT" in
     *"not allowlisted"*) pass "bridge worker answering" ;;
@@ -47,9 +49,7 @@ else
 fi
 
 say "[codex sandbox]"
-# The 0.147 standalone installer shipped without its sandbox helpers next to
-# codex.exe; every seat that shells out then dies retrying. A one-command probe
-# proves the whole exec path. Run via the bridge when codex is Windows-side.
+# A one-command probe proves the whole Codex exec path when configured.
 if [ -n "$AIMEE_DOCTOR_CODEX_SANDBOX_CMD" ]; then
   if OUT="$(printf x | timeout 60 sh -c "$AIMEE_DOCTOR_CODEX_SANDBOX_CMD" 2>&1)" && \
      [ "${OUT##*sandbox-ok*}" != "$OUT" ] || printf '%s' "$OUT" | grep -q sandbox-ok; then
@@ -58,7 +58,7 @@ if [ -n "$AIMEE_DOCTOR_CODEX_SANDBOX_CMD" ]; then
     fail "codex sandbox broken: $(printf '%s' "$OUT" | tail -c 300)"
   fi
 else
-  say "  skip  set AIMEE_DOCTOR_CODEX_SANDBOX_CMD to probe (e.g. bridge codex sandbox -- cmd /c echo sandbox-ok)"
+  say "  skip  set AIMEE_DOCTOR_CODEX_SANDBOX_CMD to probe the Codex exec path"
 fi
 
 say "[repo hygiene]"

@@ -64,6 +64,7 @@ nodes:
     params:
       policy: confirm the reviewed change before delivery
     on_pass: deliver
+    on_fail: implement
   - id: deliver
     block: gate.deliver
     in:

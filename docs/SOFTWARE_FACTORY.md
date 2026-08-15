@@ -261,8 +261,24 @@ trigger, API submit, or browser) and select `quick-change` for routine fixes,
 `orchestrated-change` for anything that deserves a plan, or
 `orchestrated-change-pro` when the frozen diff must clear the
 gemini-then-sol review ladder before you ever see the draft pull request.
-All three are `enforced` and end in a human gate. Approve or reject from the browser Workflow Actions page
-or `POST /v1/workflow/items/{id}/gate` with `{"decision":"approve","gate":"human_gate"}`.
+All three are `enforced` and end in a human gate. From the browser Workflow
+Actions page or `POST /v1/workflow/items/{id}/gate` the gate takes three
+decisions:
+
+- `{"decision":"approve","gate":"human_gate"}` releases the run.
+- `{"decision":"reject",...}` ends it.
+- `{"decision":"changes","gate":"human_gate","findings":[{"location":"file:line","summary":"...","recommendation":"..."}]}`
+  turns the human's pull-request review comments into review feedback
+  (persona `human`, blocking) and sends the run back to the implementer
+  through the gate's `on_fail` edge; the repaired diff climbs the whole
+  review ladder again to a fresh gate. Leaving PR comments therefore loops
+  back into the factory: distill them into findings (your front-door agent
+  can read them with `gh pr view --comments` and make this call for you).
+
+Reviewer commentary also reaches the pull request itself: `suggestion` and
+`nit` severity findings no longer hold the review gate; they are recorded
+and surfaced in the draft PR body's Review history section, alongside the
+count of change rounds each review stage fought.
 
 ## Troubleshooting
 

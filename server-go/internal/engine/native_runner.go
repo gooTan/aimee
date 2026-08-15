@@ -1084,13 +1084,21 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	if err := json.Unmarshal(doc, &parsed); err != nil {
 		return malformedReview(reviewed.Hash, persona, err, result.CostUSD), nil
 	}
-	if parsed.Verdict == "approve" && len(parsed.Findings) == 0 {
-		return StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved", ContentHash: reviewed.Hash, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
-	}
 	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: reviewed.Hash,
 		Escalation: normalizeEscalation(parsed.Escalation)}
 	for i, finding := range parsed.Findings {
 		feedback.Findings = append(feedback.Findings, wfe.Finding{ID: firstNonempty(finding.ID, fmt.Sprintf("%s-%d", persona, i+1)), Persona: persona, Severity: firstNonempty(finding.Severity, "blocking"), Location: finding.Location, Summary: finding.Summary, Recommendation: finding.Recommendation})
+	}
+	if parsed.Verdict == "approve" && !feedbackHasBlockingFinding(&feedback) {
+		// Non-blocking findings (suggestion/nit) do not hold the gate; they ride
+		// along as recorded feedback, and the engine persists them on advance so
+		// delivery surfaces them (pull request review history, inline comments)
+		// instead of silently dropping reviewer commentary.
+		step := StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved", ContentHash: reviewed.Hash, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}
+		if len(feedback.Findings) > 0 {
+			step.Feedback = &feedback
+		}
+		return step, nil
 	}
 	if len(feedback.Findings) == 0 {
 		feedback.Findings = append(feedback.Findings, wfe.Finding{ID: "review-invalid", Persona: persona, Severity: "blocking", Summary: "review did not approve and supplied no finding", Recommendation: "review the artifact and provide an actionable finding"})

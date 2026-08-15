@@ -707,3 +707,94 @@ All confirmed resolved on re-test.
 		t.Fatal("prose-only response was accepted")
 	}
 }
+
+func reviewApproveWithNit() string {
+	return `{"verdict":"approve","findings":[{"id":"n1","severity":"nit",` +
+		`"location":"feature.txt:1","summary":"tiny naming nit","recommendation":"optional polish"}]}`
+}
+
+func TestReviewApproveWithNitsAdvancesAndRecordsFeedback(t *testing.T) {
+	agents := &factoryAgents{reviews: map[string][]string{"luna": {reviewApproveWithNit()}}}
+	run := startFactoryWorkflow(t, "quick-change", agents, nil)
+	run.waitFor(t, "active", "human_gate")
+	// The nit did not hold the gate: no repair round happened.
+	if calls := agents.delegateCalls("deepseek"); calls != 1 {
+		t.Fatalf("a nit triggered %d implementations, want 1", calls)
+	}
+	// But the commentary survived as recorded feedback for delivery surfaces.
+	feedback, err := run.artifacts.Feedback(run.id)
+	if err != nil {
+		t.Fatalf("approve-with-nit recorded no feedback: %v", err)
+	}
+	if len(feedback.Findings) != 1 || feedback.Findings[0].Severity != "nit" {
+		t.Fatalf("recorded feedback = %+v, want the single nit", feedback.Findings)
+	}
+}
+
+func TestProPRBodyCarriesReviewHistory(t *testing.T) {
+	agents := &factoryAgents{reviews: map[string][]string{
+		"sol-review": {reviewChanges(""), reviewApproveWithNit()},
+	}}
+	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
+	run.waitFor(t, "active", "human_gate")
+	run.forge.mu.Lock()
+	opens := append([]PullRequestSpec(nil), run.forge.opens...)
+	run.forge.mu.Unlock()
+	if len(opens) != 1 {
+		t.Fatalf("opened %d PRs, want 1", len(opens))
+	}
+	body := opens[0].Body
+	if !strings.Contains(body, "## Review history") {
+		t.Fatalf("PR body lacks the review history section:\n%s", body)
+	}
+	if !strings.Contains(body, "`sol_review` requested changes 1 time(s)") {
+		t.Fatalf("PR body lacks the change-round count:\n%s", body)
+	}
+	if !strings.Contains(body, "tiny naming nit") {
+		t.Fatalf("PR body lacks the surviving nit:\n%s", body)
+	}
+}
+
+func TestHumanGateChangesDecisionRoutesFindingsToImplementer(t *testing.T) {
+	agents := &factoryAgents{}
+	run := startFactoryWorkflow(t, "quick-change", agents, nil)
+	item := run.waitFor(t, "active", "human_gate")
+	// The human requests changes: findings become review feedback (persona
+	// human) and the run returns to the implement stage through the gate's
+	// on_fail edge. This mirrors the API handler's "changes" decision.
+	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: item.ContentHash,
+		Findings: []wfe.Finding{{ID: "human-1", Persona: "human", Severity: "blocking",
+			Location: "feature.txt:1", Summary: "please rename the marker constant",
+			Recommendation: "call it FACTORY_MARKER"}}}
+	if err := run.artifacts.PutFeedback(run.id, feedback); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := run.artifacts.PutNodeArtifact(run.id, "human_gate", "approval", []byte("changes requested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.store.ResolveGate(context.Background(), run.id, "human_gate", "implement",
+		"changes", artifact.Hash); err != nil {
+		t.Fatal(err)
+	}
+	item = run.waitFor(t, "active", "human_gate")
+	if calls := agents.delegateCalls("deepseek"); calls != 2 {
+		t.Fatalf("deepseek ran %d times, want 2 (initial + human-requested repair)", calls)
+	}
+	var repairPrompt string
+	for _, request := range agents.recorded() {
+		if request.Delegate == "deepseek" {
+			repairPrompt = request.Prompt
+		}
+	}
+	if !strings.Contains(repairPrompt, "please rename the marker constant") ||
+		!strings.Contains(repairPrompt, "Repair this worktree") {
+		t.Fatalf("human findings did not reach the implementer as a bounded repair:\n%s", repairPrompt)
+	}
+	// The repaired run climbs back to a fresh human gate; approval still works.
+	run.approveHumanGate(t, item)
+	run.waitFor(t, "accepted", "")
+	if got := run.premiumCalls(t); got != 0 {
+		t.Fatalf("human-requested repair spent %d premium calls, want 0", got)
+	}
+}

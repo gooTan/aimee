@@ -124,6 +124,7 @@ nodes:
     params:
       policy: gemini reviewed and sol verified this frozen diff; approve delivery
     on_pass: deliver
+    on_fail: implement
   - id: deliver
     block: gate.deliver
     in:

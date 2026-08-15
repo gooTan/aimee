@@ -1275,7 +1275,9 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 }
 
 func (s *Store) ResolveGate(ctx context.Context, workItemID, fromStage, toStage, decision, contentHash string) error {
-	if decision != "approve" && decision != "reject" {
+	// "changes" is the human's request-changes decision: the run stays active
+	// and moves to the gate's repair stage carrying the human's findings.
+	if decision != "approve" && decision != "reject" && decision != "changes" {
 		return errors.New("invalid gate decision")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -108,6 +108,7 @@ nodes:
     params:
       policy: review the draft pull request and approve delivery
     on_pass: deliver
+    on_fail: implement
   - id: deliver
     block: gate.deliver
     in:

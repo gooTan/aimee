@@ -115,11 +115,12 @@ func (s *Server) workflowGate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, putErr)
 			return
 		}
-		if node.OnFail == "" {
-			err = s.db.RejectGate(r.Context(), item.ID, node.ID, artifact.Hash)
-		} else {
-			err = s.db.ResolveGate(r.Context(), item.ID, node.ID, node.OnFail, "reject", artifact.Hash)
-		}
+		// Reject is always terminal. The gate's on_fail edge belongs to the
+		// "changes" decision exclusively: before that decision existed, reject
+		// doubled as the send-it-back path, but a rejection that silently
+		// re-dispatches an implementer with no feedback is neither an ending
+		// nor a usable repair.
+		err = s.db.RejectGate(r.Context(), item.ID, node.ID, artifact.Hash)
 	}
 	if err != nil {
 		writeError(w, http.StatusConflict, err)

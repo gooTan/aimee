@@ -66,6 +66,11 @@ func TestShippedAutonomousWorkflowRetriesAreBounded(t *testing.T) {
 		{workflow: "orchestrated-change-pro", node: "implement", max: 2},
 		{workflow: "orchestrated-change-pro", node: "gemini_review", max: 4},
 		{workflow: "orchestrated-change-pro", node: "sol_review", max: 4},
+		{workflow: "quick-change-ui", node: "implement", max: 2},
+		{workflow: "quick-change-ui", node: "review", max: 2},
+		{workflow: "orchestrated-change-pro-ui", node: "implement", max: 2},
+		{workflow: "orchestrated-change-pro-ui", node: "gemini_review", max: 4},
+		{workflow: "orchestrated-change-pro-ui", node: "sol_review", max: 4},
 	}
 	for _, check := range checks {
 		definition, err := registry.Pin(check.workflow)

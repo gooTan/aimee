@@ -14,6 +14,7 @@ human approval. The external CLIs are dumb, single-shot delegates.
 | `sol` | Codex CLI (`codex`) | `gpt-5.6-sol` | premium second opinion: plan review, difficult debugging, escalated decisions | read-only |
 | `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` at xhigh effort | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
 | `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
+| `opus-ui` | Claude CLI (`claude`) | `opus` (Claude Opus 4.8) at high effort | implementer for frontend/UI work (the `-ui` workflow variants) | isolated writable worktree |
 | `sol-review` | Codex CLI (`codex`) | `gpt-5.6-sol` at high effort | senior verifying reviewer in the pro ladder: confirms or discards gemini's findings, then reviews adversarially (round-bounded, not ledgered) | read-only |
 | `antigravity` | Antigravity CLI (`agy`) | `gemini-3.7-flash-high` | initial PR reviewer in the pro ladder | read-only by role |
 | `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.6` with `--browser-thinking-time pro` (GPT-5.6 Pro) | OPTIONAL consultation seat; not in the shipped ladder (browser automation is fragile) | consultation only: no tools, no worktree |
@@ -213,6 +214,17 @@ shipped workflows reference the delegate names below; keep them.
     "enabled": true
   },
   {
+    "name": "opus-ui",
+    "backend": "provider-cli",
+    "cli_kind": "claude",
+    "cli_cmd": "claude",
+    "model": "opus",
+    "reasoning_effort": "high",
+    "roles": ["code", "execute"],
+    "tier_price_exempt": "flat-rate subscription seat",
+    "enabled": true
+  },
+  {
     "name": "sol-review",
     "backend": "provider-cli",
     "cli_kind": "codex",
@@ -266,6 +278,11 @@ trigger, API submit, or browser) and select `quick-change` for routine fixes,
 `orchestrated-change` for anything that deserves a plan, or
 `orchestrated-change-pro` when the frozen diff must clear the
 gemini-then-sol review ladder before you ever see the draft pull request.
+Frontend/UI work uses the `-ui` variants (`quick-change-ui`,
+`orchestrated-change-pro-ui`): the same graphs with the implementer seat
+swapped from `deepseek` to `opus-ui`. Note the trade: UI runs spend Claude
+subscription turns on implementation and repairs, not just the one
+planning call.
 All three are `enforced` and end in a human gate. From the browser Workflow
 Actions page or `POST /v1/workflow/items/{id}/gate` the gate takes three
 decisions:

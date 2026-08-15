@@ -72,8 +72,9 @@ pkg_name() {
                 pkg-config)          echo "pkgconfig" ;;
                 clang-tidy)          echo "clang-tools-extra" ;;
                 postgresql-server)   echo "postgresql-server postgresql-contrib" ;;
-                postgresql-pgvector) local _pv; _pv=$(pg_config --version 2>/dev/null | grep -oE '[0-9]+' | head -1)
-                                     echo "pgvector_${_pv:-17}" ;;
+                # Fedora ships one pgvector package for the supported server
+                # versions; unlike Debian it is not version-suffixed.
+                postgresql-pgvector) echo "pgvector" ;;
                 *)                   echo "$dep" ;;
             esac ;;
         apt)
@@ -201,8 +202,9 @@ dep_present() {
                               { command -v postgres &>/dev/null || \
                                 ls /usr/lib/postgresql/*/bin/postgres &>/dev/null; } ;;
         # pgvector package installs a .control file under the PG extension dir.
-        postgresql-pgvector)  ls /usr/share/postgresql/*/extension/vector.control \
-                                  2>/dev/null | grep -q . ;;
+        postgresql-pgvector)  { ls /usr/share/postgresql/*/extension/vector.control \
+                                  /usr/share/pgsql/extension/vector.control \
+                                  2>/dev/null || true; } | grep -q . ;;
         *)                    return 1 ;;
     esac
 }

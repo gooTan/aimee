@@ -280,6 +280,23 @@ Reviewer commentary also reaches the pull request itself: `suggestion` and
 and surfaced in the draft PR body's Review history section, alongside the
 count of change rounds each review stage fought.
 
+## Agent-agnostic operation
+
+The factory has no privileged orchestrator. Every control surface is plain
+HTTP, CLI, or browser: admit with the watch directory or `POST /v1`, monitor
+with `GET /v1/workflow/items`, decide gates with the dashboard or the gate
+endpoint. Any coding agent that can run `gh` and `curl` can serve as the
+front door by following the repository's `aimee-factory` skill, and a human
+with the dashboard needs no agent at all.
+
+The one correlated dependency is the `fable` seat: it spends the same Claude
+subscription as a Claude-based front-door agent, so exhausting that quota
+takes out both at once. The playbook is a single seat swap: in the workflow
+definitions change the plan node's `delegate: fable` to `delegate: sol`
+(Codex, already premium-ledgered), or point the `fable` agents.json entry at
+a different CLI. Nothing else changes; the ledger caps whichever planner is
+seated.
+
 ## Troubleshooting
 
 | Symptom | Meaning | Action |

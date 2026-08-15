@@ -321,11 +321,20 @@ with the dashboard needs no agent at all.
 
 The one correlated dependency is the `fable` seat: it spends the same Claude
 subscription as a Claude-based front-door agent, so exhausting that quota
-takes out both at once. The playbook is a single seat swap: in the workflow
-definitions change the plan node's `delegate: fable` to `delegate: sol`
-(Codex, already premium-ledgered), or point the `fable` agents.json entry at
-a different CLI. Nothing else changes; the ledger caps whichever planner is
-seated.
+takes out both at once. Reseating is configuration, never a definition
+edit, at two scopes:
+
+- Per run: pass `"delegate_aliases": {"fable": "sol"}` on the `POST /v1`
+  submit ("factory this using sol"). Stored as the run's config artifact
+  and applied at every dispatch of that run only.
+- Server-wide: set `AIMEE_DELEGATE_ALIASES=fable=sol` in the aimee-server
+  environment and restart; it remaps every run, including already-pinned
+  workflow versions, until removed.
+
+A run's own alias wins over the environment. The premium ledger always
+charges the delegate that actually runs, so a reseated planner stays
+capped. Seat identity (model and effort) lives in agents.json: `sol` is
+gpt-5.6-sol at high effort, `fable` is the Claude default at medium.
 
 ## Troubleshooting
 

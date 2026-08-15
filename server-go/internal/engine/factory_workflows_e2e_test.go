@@ -136,6 +136,7 @@ func (v *failNVerifier) Verify(context.Context, string) error {
 }
 
 type factoryRun struct {
+	runner    *NativeRunner
 	store     *db1.Store
 	artifacts *wfe.ArtifactStore
 	forge     *e2eForge
@@ -144,6 +145,8 @@ type factoryRun struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 }
+
+func (r *factoryRun) runnerAliases(aliases map[string]string) { r.runner.SetDelegateAliases(aliases) }
 
 func (r *factoryRun) shutdown() {
 	r.cancel()
@@ -206,7 +209,7 @@ func startFactoryWorkflow(t *testing.T, workflowName string, agents *factoryAgen
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { scheduler.Run(ctx); close(done) }()
-	run := &factoryRun{store: store, artifacts: artifacts, forge: forge, agents: agents,
+	run := &factoryRun{runner: runner, store: store, artifacts: artifacts, forge: forge, agents: agents,
 		id: id, cancel: cancel, done: done}
 	t.Cleanup(run.shutdown)
 	return run
@@ -809,5 +812,86 @@ func TestHumanGateChangesDecisionRoutesFindingsToImplementer(t *testing.T) {
 	run.waitFor(t, "accepted", "")
 	if got := run.premiumCalls(t); got != 0 {
 		t.Fatalf("human-requested repair spent %d premium calls, want 0", got)
+	}
+}
+
+func TestDelegateAliasReseatsThePlanner(t *testing.T) {
+	t.Setenv("AIMEE_DELEGATE_ALIASES", "fable=sol")
+	agents := &factoryAgents{}
+	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
+	run.runnerAliases(DelegateAliasesFromEnv())
+	item := run.waitFor(t, "active", "human_gate")
+	if calls := agents.delegateCalls("fable"); calls != 0 {
+		t.Fatalf("alias left %d fable dispatches, want 0", calls)
+	}
+	if calls := agents.delegateCalls("sol"); calls != 1 {
+		t.Fatalf("sol planned %d times, want exactly 1", calls)
+	}
+	// The budget follows the delegate that actually ran.
+	if count := run.premiumCalls(t); count != 1 {
+		t.Fatalf("aliased planner recorded %d premium calls, want 1", count)
+	}
+	run.approveHumanGate(t, item)
+	run.waitFor(t, "accepted", "")
+}
+
+func TestPerRunConfigAliasWinsOverEnvironment(t *testing.T) {
+	root := t.TempDir()
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(root, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := wfe.NewRegistry(filepath.Join(root, "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktrees, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &factoryAgents{}
+	runner, err := NewNativeRunner(store, worktrees, agents, passVerifier{}, artifacts, registry, &e2eForge{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.SetPremiumPolicy(factoryPremiumPolicy())
+	runner.SetDelegateAliases(map[string]string{"fable": "luna"}) // env says luna
+	itemID := "wi_alias_config"
+	if err := artifacts.PutRunConfig(itemID, wfe.RunConfig{
+		DelegateAliases: map[string]string{"fable": "sol"}}); err != nil { // the run says sol
+		t.Fatal(err)
+	}
+	step := StepRequest{WorkItem: db1.WorkItem{ID: itemID}, Node: wfe.Node{ID: "plan"}}
+	if _, err := runner.delegate(context.Background(), step, DelegateRequest{
+		Role: "draft", Persona: "architect", Delegate: "fable", Prompt: "plan it"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := agents.delegateCalls("sol"); calls != 1 {
+		t.Fatalf("per-run alias dispatched sol %d times, want 1", calls)
+	}
+	if calls := agents.delegateCalls("fable") + agents.delegateCalls("luna"); calls != 0 {
+		t.Fatalf("alias precedence wrong: fable/luna dispatched %d times", calls)
+	}
+	// The premium ledger charged the delegate that actually ran.
+	count, err := store.PremiumCallCount(context.Background(), itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("ledger recorded %d premium calls for the aliased planner, want 1", count)
+	}
+	// An item without a run config falls back to the environment alias.
+	step2 := StepRequest{WorkItem: db1.WorkItem{ID: "wi_alias_env"}, Node: wfe.Node{ID: "plan"}}
+	if _, err := runner.delegate(context.Background(), step2, DelegateRequest{
+		Role: "draft", Persona: "architect", Delegate: "fable", Prompt: "plan it"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := agents.delegateCalls("luna"); calls != 1 {
+		t.Fatalf("environment alias dispatched luna %d times, want 1", calls)
 	}
 }

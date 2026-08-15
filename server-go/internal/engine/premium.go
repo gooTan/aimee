@@ -61,6 +61,31 @@ func PremiumPolicyFromEnv() PremiumPolicy {
 	return policy
 }
 
+// DelegateAliasesFromEnv reads AIMEE_DELEGATE_ALIASES, a comma-separated
+// list of from=to pairs (for example "fable=sol"). Aliases remap pinned
+// workflow delegates at dispatch time, so one environment change reseats a
+// role across every workflow, including already-pinned run versions. The
+// canonical use is the planner swap when the seat's subscription quota is
+// exhausted. Premium accounting applies to the delegate that actually runs.
+func DelegateAliasesFromEnv() map[string]string {
+	raw := strings.TrimSpace(os.Getenv("AIMEE_DELEGATE_ALIASES"))
+	if raw == "" {
+		return nil
+	}
+	aliases := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		from, to, ok := strings.Cut(pair, "=")
+		from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+		if ok && from != "" && to != "" {
+			aliases[strings.ToLower(from)] = to
+		}
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	return aliases
+}
+
 // escalationClasses are the only decision classes that justify a second
 // premium call. Anything else a reviewer writes in the escalation field is
 // treated as routine, so an over-eager reviewer fails toward the cheap repair

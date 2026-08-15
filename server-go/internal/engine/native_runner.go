@@ -136,6 +136,10 @@ type NativeRunner struct {
 	// premium bounds dispatches to the expensive planning delegates. The zero
 	// value enforces nothing.
 	premium PremiumPolicy
+	// aliases remaps pinned workflow delegates at dispatch (from -> to), so a
+	// seat can be reseated by configuration (AIMEE_DELEGATE_ALIASES) without
+	// editing definitions. The canonical use is the planner swap.
+	aliases map[string]string
 	// reviews convenes a roundtable. The runner does not host a panel: the
 	// module does, over the bus, so this is the whole of the runner's coupling
 	// to reviewing.
@@ -151,6 +155,28 @@ type RoundtableReviewer interface {
 func (r *NativeRunner) SetRoundtableReviewer(reviewer RoundtableReviewer) { r.reviews = reviewer }
 
 func (r *NativeRunner) SetPremiumPolicy(policy PremiumPolicy) { r.premium = policy }
+
+func (r *NativeRunner) SetDelegateAliases(aliases map[string]string) { r.aliases = aliases }
+
+// applyDelegateAlias reseats a pinned delegate. The run's own config (set at
+// admission, "factory this using sol") wins over the server-wide environment
+// aliases. Applied before premium admission on purpose: the budget belongs to
+// whoever actually runs.
+func (r *NativeRunner) applyDelegateAlias(itemID string, request *DelegateRequest) {
+	if request.Delegate == "" {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(request.Delegate))
+	if config, err := r.artifacts.RunConfig(itemID); err == nil {
+		if to, ok := config.DelegateAliases[key]; ok && to != "" {
+			request.Delegate = to
+			return
+		}
+	}
+	if to, ok := r.aliases[key]; ok {
+		request.Delegate = to
+	}
+}
 
 // admitPremium is the one place a premium delegate can pass on its way to a
 // provider. It refuses write capability outright and records the dispatch in
@@ -232,6 +258,7 @@ func boundOrUnset(d time.Duration) string {
 func (e *DelegateLimitError) Unwrap() error { return e.Err }
 
 func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request DelegateRequest) (DelegateResult, error) {
+	r.applyDelegateAlias(step.WorkItem.ID, &request)
 	if err := r.admitPremium(ctx, step, request); err != nil {
 		return DelegateResult{}, err
 	}
@@ -269,6 +296,7 @@ func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requ
 		return nil
 	}
 	for i := range requests {
+		r.applyDelegateAlias(step.WorkItem.ID, &requests[i])
 		if err := r.admitPremium(ctx, step, requests[i]); err != nil {
 			out := make([]DelegateGroupResult, len(requests))
 			for j := range out {

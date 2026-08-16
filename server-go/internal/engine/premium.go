@@ -130,10 +130,11 @@ type ContextBrief struct {
 const maxContextBriefBytes = 32 * 1024
 
 func contextBriefPrompt(proposal string) string {
-	return "Prepare a concise ContextBrief for a senior planning reviewer. Return only JSON shaped " +
+	return "TASK:\n" + proposal +
+		"\n\nPrepare a concise ContextBrief for a senior planning reviewer. Return only JSON shaped " +
 		`{"schema_version":1,"summary":"...","files":["path or path:symbol"],"interfaces":["..."],"constraints":["..."],"decisions":["..."],"risks":["..."],"open_questions":["..."],"acceptance_criteria":["..."],"artifacts":["..."]}. ` +
 		"List only the files, symbols, interfaces, constraints, prior decisions, risks, open questions, acceptance requirements, and artifact references that are relevant to this task. " +
-		"Never include full repository listings, raw logs, complete diffs, or conversation history. The whole brief must stay under 32768 bytes.\n\nTASK:\n" + proposal
+		"Use the repository index before raw filesystem scouting. Never include full repository listings, raw logs, complete diffs, or conversation history. The whole brief must stay under 32768 bytes."
 }
 
 func validateContextBrief(doc []byte) error {

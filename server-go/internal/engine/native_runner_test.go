@@ -316,6 +316,22 @@ func TestImplementationPromptUsesNoOpForSiblingSatisfiedTask(t *testing.T) {
 	}
 }
 
+func TestRequiredImplementationBriefRejectsMissingOrMalformedInput(t *testing.T) {
+	node := wfe.Node{Params: map[string]any{"require_brief": true}}
+	for _, inputs := range []map[string]wfe.Artifact{
+		nil,
+		{"plan": {Content: []byte("not a context brief")}},
+	} {
+		if err := validateRequiredContextBrief(StepRequest{Node: node, Inputs: inputs}); err == nil {
+			t.Fatalf("required brief accepted inputs: %+v", inputs)
+		}
+	}
+	valid := []byte(`{"schema_version":1,"summary":"change auth","acceptance_criteria":["reset works"]}`)
+	if err := validateRequiredContextBrief(StepRequest{Node: node, Inputs: map[string]wfe.Artifact{"plan": {Content: valid}}}); err != nil {
+		t.Fatalf("valid required brief rejected: %v", err)
+	}
+}
+
 func TestRoundtableDeadlineRequiresEveryConfiguredPhase(t *testing.T) {
 	panel := roundtablecfg.Panel{DeadlineMS: 100, ChairmanEnabled: true}
 	short, cancelShort := context.WithTimeout(t.Context(), 150*time.Millisecond)

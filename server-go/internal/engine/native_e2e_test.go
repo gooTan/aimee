@@ -28,6 +28,9 @@ func (a *e2eAgents) Delegate(_ context.Context, request DelegateRequest) (Delega
 		return DelegateResult{Response: fmt.Sprintf(`{"run_id":%q,"artifact_hash":%q,"artifact_stage":%q,"original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`,
 			request.WorkItemID, request.ArtifactHash, request.ArtifactStage)}, nil
 	case "draft":
+		if strings.Contains(request.Prompt, "Prepare a concise ContextBrief") {
+			return DelegateResult{Response: `{"schema_version":1,"summary":"implement feature","files":["feature.txt"],"acceptance_criteria":["feature exists"]}`}, nil
+		}
 		if strings.Contains(request.Prompt, "PACKET PLAN") || strings.Contains(request.Prompt, "Decompose the complete approved plan") {
 			return DelegateResult{Response: `{"schema_version":1,"packets":[{"packet_id":"p1","summary":"implement feature","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature exists"]}]}`}, nil
 		}

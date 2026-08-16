@@ -244,8 +244,10 @@ int handle_workspace_add(server_ctx_t *ctx, server_conn_t *conn, cJSON *req)
    cJSON *arr = cJSON_AddArrayToObject(resp, "projects");
    for (int i = 0; i < count; i++)
    {
-      const char *name = strrchr(projects[i], '/');
-      name = name ? name + 1 : projects[i];
+      char name[512], workspace[512];
+      if (workspace_repo_index_keys(projects[i], abs, name, sizeof(name), workspace,
+                                    sizeof(workspace)) != 0)
+         continue;
 
       cJSON *p = cJSON_CreateObject();
       jo_add_str(p, "name", name);

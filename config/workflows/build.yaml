@@ -27,8 +27,16 @@ nodes:
     block: author.proposal
     params:
       with_user: true
-    next: feature
+    next: prep
     on_fail: draft
+  - id: prep
+    block: understand
+    params:
+      brief: true
+      delegate: luna
+      max_rounds: 2
+    next: feature
+    on_fail: prep
   # Open the durable feature branch before the plan. Slice PRs merge into it.
   # branch.open needs no input; base: trunk selects the repository default branch.
   - id: feature
@@ -41,9 +49,11 @@ nodes:
   - id: plan
     block: author.plan
     in:
-      proposal: draft.out
+      proposal: prep.out
     params:
-      max_rounds: 60
+      delegate: fable
+      require_brief: true
+      max_rounds: 2
     next: plan_gate
     on_fail: plan
   # Review the plan against the proposal. Requested changes return to plan.

@@ -817,7 +817,7 @@ func retryDetailForPrompt(detail string) string {
 }
 
 func implementationDelegatePrompt() string {
-	return "Implement the complete approved task in this worktree, run the repository verification, fix failures, and leave the accepted changes in the worktree. " +
+	return "Implement the complete approved task in this worktree, run one focused check for your change, and leave the accepted changes in the worktree. The workflow runs repository-wide verification once after implementation. " +
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
@@ -828,12 +828,28 @@ func implementationDelegatePrompt() string {
 // the entire task and the plan reference-only context.
 func repairDelegatePrompt() string {
 	return "Repair this worktree by addressing EXACTLY the review findings listed under REVIEW FEEDBACK TO RESOLVE; those findings are the complete task. " +
-		"Make the smallest change that resolves each finding, run the repository verification, and fix any failures it reports. " +
+		"Make the smallest change that resolves each finding and run one focused check for that repair. The workflow runs repository-wide verification once afterward. " +
 		"Do not re-implement the approved plan, do not refactor beyond what the findings require, and do not touch files the findings do not require. " +
 		"Any other input below is reference context only."
 }
 
+func validateRequiredContextBrief(req StepRequest) error {
+	if !paramBool(req.Node, "require_brief") {
+		return nil
+	}
+	brief, ok := req.Inputs["plan"]
+	if !ok {
+		return errors.New("implementation requires a ContextBrief plan input")
+	}
+	return validateContextBrief(brief.Content)
+}
+
 func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (StepResult, error) {
+	if !docs {
+		if err := validateRequiredContextBrief(req); err != nil {
+			return StepResult{Status: StepChanges, Detail: "implementation input rejected: " + err.Error()}, nil
+		}
+	}
 	workdir, branch, err := r.worktrees.Ensure(ctx, req.WorkItem, req.WorkItem.ParentID == "")
 	if err != nil {
 		return StepResult{}, err

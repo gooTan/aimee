@@ -82,3 +82,15 @@ func TestValidateContextBrief(t *testing.T) {
 		t.Fatalf("oversized brief err = %v, want size-cap rejection", err)
 	}
 }
+
+func TestContextBriefPromptLeadsWithTaskForRetrieval(t *testing.T) {
+	task := "Add password reset through the authentication service"
+	prompt := contextBriefPrompt(task)
+	prefix := prompt
+	if len(prefix) > 240 {
+		prefix = prefix[:240]
+	}
+	if !strings.Contains(prefix, task) {
+		t.Fatalf("task is absent from retrieval prefix: %q", prefix)
+	}
+}

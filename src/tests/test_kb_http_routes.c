@@ -3754,6 +3754,17 @@ int memory_find_facts_visible_ex(const char *query, const char *workspace, const
    return n;
 }
 
+static int g_memory_find_facts_scoped_calls;
+
+int memory_find_facts_scoped(const char *query, const char *scope_type, const char *scope_value,
+                             int limit, void *out, int max)
+{
+   assert(scope_type && strcmp(scope_type, "project") == 0);
+   assert(scope_value && strcmp(scope_value, "proj-alpha") == 0);
+   g_memory_find_facts_scoped_calls++;
+   return db2_memory_find_facts_like(query, limit, out, max);
+}
+
 int memory_scope_visibility_rank(int64_t memory_id, const char *workspace, const char *project)
 {
    (void)workspace;
@@ -4230,6 +4241,7 @@ static void test_code_scope_all_keeps_active_project_first(void)
 static void test_code_hybrid_ok(void)
 {
    char buf[2048];
+   g_memory_find_facts_scoped_calls = 0;
    int s = kb_http_route_ex("GET", "/v1/code/hybrid",
                             "query=needle&symbol=target_fn&project=proj-alpha&max_results=10", NULL,
                             NULL, NULL, 0, buf, sizeof(buf));
@@ -4246,6 +4258,7 @@ static void test_code_hybrid_ok(void)
    /* Memory recall surfaces as typed "why" context, not a fused row. */
    assert(strstr(buf, "\"why\"") != NULL);
    assert(strstr(buf, "why needle exists") != NULL);
+   assert(g_memory_find_facts_scoped_calls == 1);
 }
 
 /* §6 cross-session memory fusion: the knowledge graph connects the seed symbol to a

@@ -111,7 +111,7 @@ func TestFactoryLiveSmoke(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	worktrees, err := NewWorktreeManager(store, filepath.Join(workroot, "trees"))
+	worktrees, err := NewWorktreeManager(store, filepath.Join(workroot, "wfe-worktrees"))
 	if err != nil {
 		t.Fatal(err)
 	}

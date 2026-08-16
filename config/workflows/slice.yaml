@@ -13,6 +13,9 @@ nodes:
     block: understand
     params:
       with_user: false
+      brief: true
+      delegate: luna
+      max_rounds: 2
     next: impl
     on_fail: scope
   # Implement the packet on the slice branch.
@@ -21,6 +24,8 @@ nodes:
     in:
       plan: scope.out
     params:
+      delegate: deepseek
+      require_brief: true
       # Give implementation a small corrective window before operator repair.
       max_rounds: 3
     next: freeze

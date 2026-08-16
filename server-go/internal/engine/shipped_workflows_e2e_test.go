@@ -93,6 +93,40 @@ func TestShippedAutonomousWorkflowRetriesAreBounded(t *testing.T) {
 	}
 }
 
+func TestBuildWorkflowsRequireBoundedContextBeforePlanningAndImplementation(t *testing.T) {
+	registry, err := wfe.NewRegistry(copyShippedWorkflowDefinitions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, workflow := range []string{"build", "build-triggered"} {
+		definition, err := registry.Pin(workflow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNodeBoolParam(t, definition, "prep", "brief")
+		assertNodeBoolParam(t, definition, "plan", "require_brief")
+	}
+	slice, err := registry.Pin("slice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNodeBoolParam(t, slice, "scope", "brief")
+	assertNodeBoolParam(t, slice, "impl", "require_brief")
+}
+
+func assertNodeBoolParam(t *testing.T, definition wfe.Definition, nodeID, param string) {
+	t.Helper()
+	for _, node := range definition.Nodes {
+		if node.ID == nodeID {
+			if value, ok := node.Params[param].(bool); !ok || !value {
+				t.Fatalf("workflow %s node %s must set %s: true", definition.Name, nodeID, param)
+			}
+			return
+		}
+	}
+	t.Fatalf("workflow %s has no node %s", definition.Name, nodeID)
+}
+
 func runExactShippedWorkflow(t *testing.T, workflowName, wantState, wantPause string) {
 	t.Helper()
 	root := t.TempDir()

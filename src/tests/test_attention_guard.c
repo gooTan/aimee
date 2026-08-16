@@ -449,6 +449,13 @@ static void test_session_isolation_decision(void)
    assert(attn_session_isolation_blocked(ATTN_OP_SOFT, "/home/u/.codex/x.c", primary_cwd, NULL) ==
           1);
 
+   /* Workflow-engine worktrees are already isolated; the thin client must not
+    * create a nested .aimee/worktrees tree inside them. */
+   const char *wfe_wt = "/home/u/.config/aimee/wfe-worktrees/wi_123/src/x.c";
+   const char *wfe_wt_cwd = "/home/u/.config/aimee/wfe-worktrees/wi_123";
+   assert(attn_session_isolation_blocked(ATTN_OP_SOFT, wfe_wt, primary_cwd, NULL) == 0);
+   assert(attn_session_isolation_blocked(ATTN_OP_HARD, NULL, wfe_wt_cwd, NULL) == 0);
+
    /* The loose "/.aimee-" prefix is NOT treated as a managed worktree (only the
     * canonical "/.aimee/worktrees/" counts) — avoids false-matching e.g. a
     * user's "/.aimee-notes" dir. */

@@ -668,33 +668,11 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 					Detail: "premium planning input rejected: " + err.Error()}, nil
 			}
 		}
-		if requestRequiresSingleSlice(req.Proposal) {
-			title, err := pullRequestTitle(req.Proposal)
-			if err != nil {
-				return StepResult{}, fmt.Errorf("single-slice request title: %w", err)
-			}
-			content, err := json.Marshal(map[string]any{
-				"schema_version": 1,
-				"packets": []map[string]any{{
-					"packet_id":     "p1",
-					"summary":       title,
-					"target_blocks": []string{"implement"},
-					"dependencies":  []string{},
-					"acceptance_criteria": []string{
-						"Implement the complete approved plan as one reviewable change.",
-						"Do not add deferred, post-adoption, or otherwise out-of-scope deliverables.",
-					},
-					"original_request": req.Proposal,
-					"approved_plan":    source,
-				}},
-			})
-			if err != nil {
-				return StepResult{}, err
-			}
-			return StepResult{Status: StepAdvanced, ArtifactType: "plan", Artifact: string(content)}, nil
-		}
 		prompt = "Decompose the complete approved plan into the smallest independent implementation packets that preserve the ORIGINAL REQUEST exactly. " +
-			"Return only JSON shaped {\"schema_version\":1,\"packets\":[{\"packet_id\":\"p1\",\"summary\":\"...\",\"target_blocks\":[\"implement\"],\"dependencies\":[],\"acceptance_criteria\":[\"...\"]}]}. " +
+			"Return only JSON shaped {\"schema_version\":2,\"packets\":[{\"packet_id\":\"p1\",\"summary\":\"...\",\"target_blocks\":[\"implement\"],\"dependencies\":[],\"acceptance_criteria\":[\"...\"],\"implementation_kind\":\"general|ui\"}]}; implementation_kind must be exactly general or ui. " +
+			"Classify by the requested outcome: UI means the packet changes a frontend, browser, presentation, interaction, style, component, or accessibility outcome; general means backend, server, API, CLI, storage, configuration, workflow, test, documentation, or infrastructure outcomes. " +
+			"The outcome rule is to classify what the user receives, not how it is implemented. For mixed work (mixed-work), split independent UI and general deliverables when possible; if one packet must contain both, use ui when a user-visible UI outcome is part of the requested deliverable, otherwise use general. Do not infer classification from workflow names, model names, delegate names, CLI flags, or other routing metadata. " +
+			"Never include model, delegate, CLI, or workflow-selection identifiers in packet content; those are routing metadata and are rejected. " +
 			"Only create packets for repository changes that can be completed in this workflow run. Do not create packets for post-adoption measurements, future observation windows, operational follow-up, proposal bookkeeping, or manual verification. " +
 			"Tests and acceptance checks are criteria, not packets, unless the original request explicitly asks for a new reusable test artifact. Every packet must trace to an explicit requested deliverable; useful extra work is scope drift. " +
 			"Each summary becomes a pull request title: make it a concise reviewer-facing outcome that says what changes, not a process instruction such as inspect, only if necessary, or minimally update. Do not omit requested implementation work or truncate content.\n\n" +
@@ -710,7 +688,11 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 	var content []byte
 	var validationErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo})
+		delegate := paramString(req.Node, "delegate", "")
+		if kind == "packets" {
+			delegate = "fable"
+		}
+		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: req.WorkItem.Repo})
 		if validationErr != nil {
 			return StepResult{}, validationErr
 		}
@@ -739,18 +721,6 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		typeName = "plan"
 	}
 	return StepResult{Status: StepAdvanced, ArtifactType: typeName, Artifact: string(content), CostUSD: cost, CostUnknown: costUnknown}, nil
-}
-
-func requestRequiresSingleSlice(request string) bool {
-	replacer := strings.NewReplacer("-", " ", "‑", " ", "–", " ", "—", " ", "_", " ")
-	for _, raw := range strings.Split(strings.ReplaceAll(request, "\r\n", "\n"), "\n") {
-		line := strings.ToLower(replacer.Replace(raw))
-		line = strings.Join(strings.Fields(line), " ")
-		if strings.Contains(line, "state:") && strings.Contains(line, "single slice") {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *NativeRunner) branchOpen(ctx context.Context, req StepRequest) (StepResult, error) {
@@ -821,6 +791,27 @@ func implementationDelegatePrompt() string {
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
+func packetImplementationDelegate(item db1.WorkItem, proposal, fallback string) (string, error) {
+	switch item.PacketSchemaVersion {
+	case 0, 1:
+		return fallback, nil
+	case 2:
+		var packet map[string]any
+		if err := json.Unmarshal([]byte(proposal), &packet); err != nil {
+			return "", fmt.Errorf("decode version-2 packet: %w", err)
+		}
+		if _, _, err := validatePacketFields(packet, 2); err != nil {
+			return "", fmt.Errorf("validate version-2 packet: %w", err)
+		}
+		if packet["implementation_kind"] == "ui" {
+			return "fable", nil
+		}
+		return fallback, nil
+	default:
+		return "", fmt.Errorf("unsupported packet schema version %d", item.PacketSchemaVersion)
+	}
+}
+
 // repairDelegatePrompt frames a review-driven repair round as a bounded task.
 // Small implementation models execute best against a closed instruction set:
 // re-sending the full "implement the plan" framing on a repair invites a
@@ -834,6 +825,14 @@ func repairDelegatePrompt() string {
 }
 
 func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (StepResult, error) {
+	delegate := paramString(req.Node, "delegate", "")
+	if !docs {
+		var err error
+		delegate, err = packetImplementationDelegate(req.WorkItem, req.Proposal, delegate)
+		if err != nil {
+			return StepResult{}, err
+		}
+	}
 	workdir, branch, err := r.worktrees.Ensure(ctx, req.WorkItem, req.WorkItem.ParentID == "")
 	if err != nil {
 		return StepResult{}, err
@@ -946,7 +945,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	// independently committed and verified by the Go native runner". Record the
 	// pre-delegate HEAD so that promise can actually be checked below.
 	baseHead, baseHeadErr := gitText(ctx, workdir, "rev-parse", "HEAD")
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: paramString(req.Node, "persona", "engineer"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: paramString(req.Node, "persona", "engineer"), Delegate: delegate, Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -1719,8 +1718,12 @@ func (r *NativeRunner) foreach(ctx context.Context, req StepRequest) (StepResult
 	if !ok {
 		return StepResult{}, errors.New("foreach.workflow requires packets input")
 	}
+	if err := validateStructured("packets", packetsArtifact.Content); err != nil {
+		return StepResult{}, fmt.Errorf("foreach packet plan is invalid: %w", err)
+	}
 	var packetPlan struct {
-		Packets []json.RawMessage `json:"packets"`
+		SchemaVersion int               `json:"schema_version"`
+		Packets       []json.RawMessage `json:"packets"`
 	}
 	if err := json.Unmarshal(packetsArtifact.Content, &packetPlan); err != nil || len(packetPlan.Packets) == 0 {
 		return StepResult{}, errors.New("foreach packet plan is missing or invalid")
@@ -1770,7 +1773,7 @@ func (r *NativeRunner) foreach(ctx context.Context, req StepRequest) (StepResult
 		// row and wedged the parent in slices. The content hash stays appended
 		// for operator diagnosis. Same-generation retries still deduplicate on
 		// the id above, before this insert is reached.
-		if err := r.db.CreateWorkItem(ctx, db1.CreateWorkItem{ID: id, Repo: req.WorkItem.Repo, ProposalPath: "packet:" + id + ":" + wfe.Hash(packet), WorkflowName: childName, WorkflowVersion: definition.Version, StartStage: start, Mode: "autonomous", ParentID: req.WorkItem.ID}); err != nil {
+		if err := r.db.CreateWorkItem(ctx, db1.CreateWorkItem{ID: id, Repo: req.WorkItem.Repo, ProposalPath: "packet:" + id + ":" + wfe.Hash(packet), WorkflowName: childName, WorkflowVersion: definition.Version, StartStage: start, Mode: "autonomous", ParentID: req.WorkItem.ID, PacketSchemaVersion: packetPlan.SchemaVersion}); err != nil {
 			r.rollbackChildren(ctx, created)
 			return StepResult{}, err
 		}
@@ -2439,15 +2442,73 @@ func extractJSONObjects(text string) ([][]byte, error) {
 	}
 	return docs, nil
 }
+
+func packetSchemaVersion(root map[string]any) (int, error) {
+	version, ok := root["schema_version"].(float64)
+	if !ok || (version != 1 && version != 2) {
+		return 0, errors.New("packet schema_version must be 1 or 2")
+	}
+	return int(version), nil
+}
+
+func validatePacketFields(packet map[string]any, version int) (string, []string, error) {
+	allowed := map[string]bool{
+		"packet_id": true, "summary": true, "target_blocks": true,
+		"dependencies": true, "acceptance_criteria": true,
+	}
+	if version == 2 {
+		allowed["implementation_kind"] = true
+	}
+	for field := range packet {
+		if !allowed[field] {
+			return "", nil, fmt.Errorf("packet field %s is not allowed", field)
+		}
+	}
+	id, _ := packet["packet_id"].(string)
+	if id == "" {
+		return "", nil, errors.New("packet_id is required")
+	}
+	if version == 2 {
+		kind, ok := packet["implementation_kind"].(string)
+		if !ok || (kind != "general" && kind != "ui") {
+			return "", nil, fmt.Errorf("packet %s implementation_kind must be general or ui", id)
+		}
+	}
+	if len(stringSlice(packet["acceptance_criteria"])) == 0 {
+		return "", nil, fmt.Errorf("packet %s needs acceptance criteria", id)
+	}
+	var dependencies []string
+	if rawDependencies, exists := packet["dependencies"]; exists {
+		values, valid := rawDependencies.([]any)
+		if !valid {
+			return "", nil, fmt.Errorf("packet %s dependencies must be an array", id)
+		}
+		seen := make(map[string]bool, len(values))
+		for _, rawDependency := range values {
+			dependency, valid := rawDependency.(string)
+			dependency = strings.TrimSpace(dependency)
+			if !valid || dependency == "" {
+				return "", nil, fmt.Errorf("packet %s has an invalid dependency", id)
+			}
+			if seen[dependency] {
+				return "", nil, fmt.Errorf("packet %s repeats dependency %s", id, dependency)
+			}
+			seen[dependency] = true
+			dependencies = append(dependencies, dependency)
+		}
+	}
+	return id, dependencies, nil
+}
+
 func validateStructured(kind string, doc []byte) error {
 	var root map[string]any
 	if err := json.Unmarshal(doc, &root); err != nil {
 		return err
 	}
-	if root["schema_version"] != float64(1) {
-		return errors.New("schema_version must be 1")
-	}
 	if kind == "intent" {
+		if root["schema_version"] != float64(1) {
+			return errors.New("schema_version must be 1")
+		}
 		if strings.TrimSpace(fmt.Sprint(root["summary"])) == "" {
 			return errors.New("intent summary is required")
 		}
@@ -2455,6 +2516,15 @@ func validateStructured(kind string, doc []byte) error {
 			return errors.New("intent acceptance criteria are required")
 		}
 		return nil
+	}
+	version, err := packetSchemaVersion(root)
+	if err != nil {
+		return err
+	}
+	for field := range root {
+		if field != "schema_version" && field != "packets" {
+			return fmt.Errorf("packet plan field %s is not allowed", field)
+		}
 	}
 	packets, ok := root["packets"].([]any)
 	if !ok || len(packets) == 0 {
@@ -2467,33 +2537,12 @@ func validateStructured(kind string, doc []byte) error {
 		if !ok {
 			return errors.New("packet must be an object")
 		}
-		id, _ := packet["packet_id"].(string)
-		if id == "" {
-			return errors.New("packet_id is required")
+		id, packetDependencies, err := validatePacketFields(packet, version)
+		if err != nil {
+			return err
 		}
 		ids = append(ids, id)
-		if rawDependencies, exists := packet["dependencies"]; exists {
-			values, valid := rawDependencies.([]any)
-			if !valid {
-				return fmt.Errorf("packet %s dependencies must be an array", id)
-			}
-			seen := make(map[string]bool, len(values))
-			for _, rawDependency := range values {
-				dependency, valid := rawDependency.(string)
-				dependency = strings.TrimSpace(dependency)
-				if !valid || dependency == "" {
-					return fmt.Errorf("packet %s has an invalid dependency", id)
-				}
-				if seen[dependency] {
-					return fmt.Errorf("packet %s repeats dependency %s", id, dependency)
-				}
-				seen[dependency] = true
-				dependencies[id] = append(dependencies[id], dependency)
-			}
-		}
-		if len(stringSlice(packet["acceptance_criteria"])) == 0 {
-			return fmt.Errorf("packet %s needs acceptance criteria", id)
-		}
+		dependencies[id] = packetDependencies
 	}
 	sort.Strings(ids)
 	for i := 1; i < len(ids); i++ {

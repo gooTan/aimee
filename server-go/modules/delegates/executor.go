@@ -772,10 +772,11 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	}
 	if err := cmd.Run(); err != nil {
 		response := finalOutput(agent.CLIKind, output.BytesCopy())
+		result.ResponseStarted = response != ""
 		if monitor.Exceeded() {
 			detail := fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
 			result.Error = detail
-			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), response != "")
+			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
 			return result
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -783,7 +784,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			if detail := strings.TrimSpace(output.String()); detail != "" {
 				result.Error += ": " + delegatecontract.SafeDiagnostic(detail)
 			}
-			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, response != "")
+			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, result.ResponseStarted)
 			return result
 		}
 		detail := strings.TrimSpace(output.String())
@@ -791,7 +792,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			detail = err.Error()
 		}
 		result.Error = delegatecontract.SafeDiagnostic(detail)
-		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(err, response != "")
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(err, result.ResponseStarted)
 		return result
 	}
 	response := finalOutput(agent.CLIKind, output.BytesCopy())
@@ -799,6 +800,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		return fail(errors.New("delegate CLI returned no final response"), "delegate CLI returned no final response")
 	}
 	result.Status, result.Response = "done", response
+	result.ResponseStarted = true
 	return result
 }
 

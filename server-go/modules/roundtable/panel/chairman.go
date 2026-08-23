@@ -38,21 +38,22 @@ func chairmanResponseNote(response string) string {
 }
 
 type chairmanAttemptResult struct {
-	final        panelResponse
-	response     string
-	err          error
-	detail       string
-	availability delegate.AvailabilityClass
-	replayLost   bool
-	cost         float64
-	costUnknown  bool
+	final           panelResponse
+	response        string
+	err             error
+	detail          string
+	availability    delegate.AvailabilityClass
+	responseStarted bool
+	replayLost      bool
+	cost            float64
+	costUnknown     bool
 }
 
 func chairmanAvailabilityAllowed(class delegate.AvailabilityClass) bool {
 	switch class {
 	case delegate.AvailabilityClassQuotaRateLimit, delegate.AvailabilityClassCapacity,
-		delegate.AvailabilityClassAuthentication, delegate.AvailabilityClassProviderUnavailable,
-		delegate.AvailabilityClassStartDeadline:
+		delegate.AvailabilityClassCapacityDeadline, delegate.AvailabilityClassAuthenticationSession,
+		delegate.AvailabilityClassProviderCLIUnavailable, delegate.AvailabilityClassStartDeadline:
 		return true
 	default:
 		return false
@@ -63,8 +64,9 @@ func runChairmanAttempt(ctx context.Context, delegates Delegates, run Run, reque
 	result := delegates.One(ctx, run, request)
 	out := chairmanAttemptResult{response: result.Response, err: result.Err,
 		detail: result.FailureDetail, availability: result.AvailabilityClass,
-		replayLost: result.ReplayLost,
-		cost:       result.CostUSD, costUnknown: result.CostUnknown}
+		responseStarted: result.ResponseStarted,
+		replayLost:      result.ReplayLost,
+		cost:            result.CostUSD, costUnknown: result.CostUnknown}
 	if result.Err != nil {
 		return out
 	}
@@ -89,9 +91,11 @@ func runChairmanAttempt(ctx context.Context, delegates Delegates, run Run, reque
 		out.err = repaired.Err
 		out.detail = repaired.FailureDetail
 		out.availability = ""
+		out.responseStarted = repaired.ResponseStarted
 		return out
 	}
 	out.response = repaired.Response
+	out.responseStarted = repaired.ResponseStarted
 	final, parseErr = parsePanelResponse(repaired.Response, nil)
 	if parseErr == nil {
 		parseErr = panelVerdictError(final)
@@ -114,7 +118,16 @@ func chairmanUnavailableDetail(label string, attempt chairmanAttemptResult) stri
 	if detail == "" && attempt.err != nil {
 		detail = attempt.err.Error()
 	}
-	return fmt.Sprintf("%s chairman unavailable (%s): %s", label, class, detail)
+	base := fmt.Sprintf("%s chairman unavailable (%s): %s", label, class, detail)
+	if class == delegate.AvailabilityClassQuotaRateLimit {
+		// Keep the old diagnostic spelling visible to operators while callers
+		// migrate to the canonical quota_rate_limit class.
+		base += fmt.Sprintf(" [%s chairman unavailable (provider_quota)]", label)
+	}
+	if class == delegate.AvailabilityClassProviderCLIUnavailable {
+		base += fmt.Sprintf(" [%s chairman unavailable (provider_unavailable)]", label)
+	}
+	return base
 }
 
 // RunChairman is an optional, single post-synthesis review. The configured
@@ -141,7 +154,7 @@ func RunChairman(ctx context.Context, delegates Delegates, run Run, panel Panel,
 	cost += attempt.cost
 	costUnknown = costUnknown || attempt.costUnknown
 	if attempt.err != nil {
-		if chairmanAvailabilityAllowed(attempt.availability) && !attempt.replayLost && !run.ReplayOnly && strings.TrimSpace(panel.ChairmanFallback) != "" {
+		if chairmanAvailabilityAllowed(attempt.availability) && !attempt.responseStarted && !attempt.replayLost && !run.ReplayOnly && strings.TrimSpace(panel.ChairmanFallback) != "" {
 			fallback := request
 			fallback.Selector = panel.ChairmanFallback
 			fallback.DurableSlot = chairmanDurableSlot(run) + ":fallback"

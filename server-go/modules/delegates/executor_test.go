@@ -264,7 +264,7 @@ func TestRegistryExecutorTypesCallerDeadlineAsExecutionDeadline(t *testing.T) {
 	defer cancel()
 	result := executor.Execute(ctx, delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
 		Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
-	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassStartDeadline || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassStartDeadline || result.ResponseStarted || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
 		delegatecontract.IsCapacityDeadline(errors.New(result.Error)) {
 		t.Fatalf("caller deadline was not typed as an execution deadline: %+v", result)
 	}
@@ -291,8 +291,8 @@ func TestRegistryExecutorDoesNotClassifyFailureAfterResponseBegins(t *testing.T)
 		t.Fatal(err)
 	}
 	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
-		Role: "code", Persona: "engineer", Prompt: "work", Workdir: workdir})
-	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassNone {
+		Role: "code", Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassNone || !result.ResponseStarted {
 		t.Fatalf("partial response was classified as unavailable: %+v", result)
 	}
 }

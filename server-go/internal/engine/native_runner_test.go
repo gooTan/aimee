@@ -596,7 +596,7 @@ func (deadlineDiscussionAgents) Delegate(ctx context.Context, request DelegateRe
 
 func (chairmanFailureAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
 	if request.Persona == "chairman" {
-		return DelegateResult{}, &DelegateExecutionError{Err: fmt.Errorf("%s chairman unavailable", request.Delegate), AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}
+		return DelegateResult{AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}, fmt.Errorf("%s chairman unavailable", request.Delegate)
 	}
 	return DelegateResult{Response: `{"artifact_stage":"plan","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`}, nil
 }

@@ -21,11 +21,12 @@ type recordingCaller struct {
 }
 
 type groupRoutingCaller struct {
-	mu            sync.Mutex
-	plannedModels []string
-	planError     string
-	invokedModels []string
-	plan          GroupPlan
+	mu               sync.Mutex
+	plannedModels    []string
+	planError        string
+	invocationResult InvocationResult
+	invokedModels    []string
+	plan             GroupPlan
 }
 
 func (c *groupRoutingCaller) Call(_ context.Context, _, stage uint32, _ uint64,
@@ -43,8 +44,12 @@ func (c *groupRoutingCaller) Call(_ context.Context, _, stage uint32, _ uint64,
 		return nil, err
 	}
 	c.invokedModels = append(c.invokedModels, invocation.Model)
-	return json.Marshal(InvocationResult{Version: WireVersion, Status: "done",
-		Agent: invocation.Model, Response: "ok"})
+	result := c.invocationResult
+	if result.Status == "" {
+		result = InvocationResult{Version: WireVersion, Status: "done", Response: "ok"}
+	}
+	result.Agent = invocation.Model
+	return json.Marshal(result)
 }
 
 func (c *recordingCaller) Call(_ context.Context, kind, stage uint32, _ uint64,
@@ -208,10 +213,52 @@ func TestDelegateCarriesAvailabilityClass(t *testing.T) {
 	}
 
 	partial := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
-		Response: "partial output", Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}
+		Response: "partial output", Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable, ResponseStarted: true}}, deadline: time.Second}
 	result, err = partial.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
-	if err == nil || result.AvailabilityClass != AvailabilityClassNone {
+	if err == nil || result.AvailabilityClass != AvailabilityClassNone || !result.ResponseStarted {
 		t.Fatalf("partial response was classified as unavailable: result=%+v err=%v", result, err)
+	}
+}
+
+func TestDelegateCarriesEveryAvailabilityClass(t *testing.T) {
+	classes := []AvailabilityClass{
+		AvailabilityClassQuotaRateLimit,
+		AvailabilityClassCapacity,
+		AvailabilityClassCapacityDeadline,
+		AvailabilityClassAuthenticationSession,
+		AvailabilityClassProviderCLIUnavailable,
+		AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(class, func(t *testing.T) {
+			client := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion,
+				Status: "failed", Error: "transport failure", AvailabilityClass: class}}, deadline: time.Second}
+			result, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
+			if err == nil || result.AvailabilityClass != class || result.ResponseStarted {
+				t.Fatalf("metadata was not preserved: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestDelegateGroupCarriesEveryAvailabilityClass(t *testing.T) {
+	classes := []AvailabilityClass{
+		AvailabilityClassQuotaRateLimit,
+		AvailabilityClassCapacity,
+		AvailabilityClassCapacityDeadline,
+		AvailabilityClassAuthenticationSession,
+		AvailabilityClassProviderCLIUnavailable,
+		AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(class, func(t *testing.T) {
+			client := &BusClient{caller: &groupRoutingCaller{plannedModels: []string{"agent"},
+				invocationResult: InvocationResult{Version: WireVersion, Status: "failed", Error: "transport failure", AvailabilityClass: class}}, deadline: time.Second}
+			results := client.DelegateGroup(t.Context(), []DelegateRequest{{Role: "review", Persona: "qa", Prompt: "review"}})
+			if len(results) != 1 || results[0].AvailabilityClass != class || results[0].ResponseStarted {
+				t.Fatalf("group metadata was not preserved: %+v", results)
+			}
+		})
 	}
 }
 

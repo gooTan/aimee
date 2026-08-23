@@ -96,19 +96,30 @@ type SeatResult struct {
 	// AvailabilityClass is the transport-owned retry class. It is independent
 	// of FailureCategory and remains empty for replay loss and ordinary failures.
 	AvailabilityClass string
+	// ResponseStarted is transport-owned evidence that a usable response began.
+	// Chairman fallback is only eligible when this is false.
+	ResponseStarted bool
 }
 
 const (
-	AvailabilityClassNone                = ""
-	AvailabilityClassProviderQuota       = "provider_quota"
-	AvailabilityClassQuotaRateLimit      = AvailabilityClassProviderQuota
-	AvailabilityClassCapacity            = "capacity"
-	AvailabilityClassAuthentication      = "authentication"
-	AvailabilityClassProviderUnavailable = "provider_unavailable"
-	AvailabilityClassStartDeadline       = "start_deadline"
+	AvailabilityClassNone                   = ""
+	AvailabilityClassQuotaRateLimit         = "quota_rate_limit"
+	AvailabilityClassCapacity               = "capacity"
+	AvailabilityClassCapacityDeadline       = "capacity_deadline"
+	AvailabilityClassAuthenticationSession  = "authentication_session"
+	AvailabilityClassProviderCLIUnavailable = "provider_cli_unavailable"
+	AvailabilityClassStartDeadline          = "start_deadline"
+	// Compatibility spellings for older panel callers.
+	AvailabilityClassProviderQuota       = AvailabilityClassQuotaRateLimit
+	AvailabilityClassAuthentication      = AvailabilityClassAuthenticationSession
+	AvailabilityClassProviderUnavailable = AvailabilityClassProviderCLIUnavailable
 	AvailabilityProviderQuota            = AvailabilityClassProviderQuota
 	AvailabilityCapacity                 = AvailabilityClassCapacity
+	AvailabilityCapacityDeadline         = AvailabilityClassCapacityDeadline
 	AvailabilityAuthentication           = AvailabilityClassAuthentication
+	AvailabilityAuthenticationSession    = AvailabilityClassAuthenticationSession
+	AvailabilityProviderCLIUnavailable   = AvailabilityClassProviderCLIUnavailable
+	AvailabilityProviderCliUnavailable   = AvailabilityClassProviderCLIUnavailable
 	AvailabilityProviderUnavailable      = AvailabilityClassProviderUnavailable
 	AvailabilityStartDeadline            = AvailabilityClassStartDeadline
 )

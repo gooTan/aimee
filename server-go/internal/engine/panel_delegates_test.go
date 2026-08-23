@@ -92,7 +92,7 @@ func TestPanelDelegatesClassifyAndRedactTheirFailures(t *testing.T) {
 
 func TestPanelDelegatesForwardAvailabilityClass(t *testing.T) {
 	err := &delegate.DelegateExecutionError{Err: errors.New("provider unavailable"), AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}
-	agents := &recordingPlaneAgents{err: err}
+	agents := &recordingPlaneAgents{err: err, availability: delegate.AvailabilityClassProviderUnavailable}
 	plane := panelDelegates{runner: &NativeRunner{agents: agents}}
 	if got := plane.Group(context.Background(), testSeatRun(), []roundtablecfg.SeatRequest{{Persona: "qa"}})[0].AvailabilityClass; got != delegate.AvailabilityClassProviderUnavailable {
 		t.Fatalf("group lost availability class: %q", got)

@@ -136,6 +136,7 @@ func TestChairmanFallbackRunsForAvailabilityFailures(t *testing.T) {
 	classes := []delegate.AvailabilityClass{
 		delegate.AvailabilityClassQuotaRateLimit,
 		delegate.AvailabilityClassCapacity,
+		delegate.AvailabilityClassCapacityDeadline,
 		delegate.AvailabilityClassAuthentication,
 		delegate.AvailabilityClassProviderUnavailable,
 		delegate.AvailabilityClassStartDeadline,
@@ -197,6 +198,7 @@ func TestChairmanDoesNotFallbackForSemanticOrUnclassifiedFailures(t *testing.T) 
 		{name: "blocked", responses: []SeatResult{{Response: chairmanResponse(`"artifact_stage":"plan","original_request_alignment":{"status":"aligned"},"verdict":"blocked","findings":[{"severity":"foundational","summary":"impossible","recommendation":"ask a human"}]}`)}}, wantCalls: 1},
 		{name: "malformed after repair", responses: []SeatResult{{Response: "not json"}, {Response: "still not json"}}, wantCalls: 2},
 		{name: "replay loss", responses: []SeatResult{{Err: delegate.ErrDelegateReplayUnavailable}}, wantCalls: 1},
+		{name: "response started", responses: []SeatResult{{AvailabilityClass: delegate.AvailabilityClassCapacity, ResponseStarted: true, Err: errors.New("partial output")}}, wantCalls: 1},
 		{name: "terminal", responses: []SeatResult{{Err: errors.New("ordinary terminal failure")}}, wantCalls: 1},
 	}
 	for _, tc := range tests {

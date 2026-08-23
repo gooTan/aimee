@@ -320,8 +320,8 @@ static int oracle_execute(const provider_cli_cfg_t *cfg, agent_result_t *out)
    }
    free(answer);
    if (exit_code < 0)
-      snprintf(out->error, sizeof(out->error),
-               "oracle adapter: timed out after %lld ms: %.400s", timeout_ms, tail);
+      snprintf(out->error, sizeof(out->error), "oracle adapter: timed out after %lld ms: %.400s",
+               timeout_ms, tail);
    else
       snprintf(out->error, sizeof(out->error),
                "oracle adapter: exit %d with no answer output: %.400s", exit_code, tail);

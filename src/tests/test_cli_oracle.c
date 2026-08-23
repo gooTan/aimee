@@ -97,7 +97,7 @@ static void test_oracle_argv_without_model(void)
    int argc = oracle_build_argv(&cfg, "/tmp/t.md", "/tmp/a.md", 60, tokens, 48, &split);
    assert(argc > 0);
    for (int i = 0; i < argc; i++)
-      assert(strcmp(tokens[i], "-m") != 0); /* unpinned agent adds no -m */
+      assert(strcmp(tokens[i], "-m") != 0);  /* unpinned agent adds no -m */
    assert(strcmp(tokens[0], "oracle") == 0); /* default command */
    provider_cli_free_tokens(tokens, split);
    printf("PASS: unpinned oracle agent omits the model flag\n");

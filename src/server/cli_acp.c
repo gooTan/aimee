@@ -589,7 +589,7 @@ int acp_serve_client_request_gated(const char *line, const char *workdir, int wr
       if (!write_capable)
          *resp_out = acp_error_response(id_j, -32603, "write denied: delegate role is read-only");
       else if (!pj || !cJSON_IsString(pj) || !cj || !cJSON_IsString(cj) ||
-          acp_resolve_in_workdir(workdir, pj->valuestring, full, sizeof(full)) != 0)
+               acp_resolve_in_workdir(workdir, pj->valuestring, full, sizeof(full)) != 0)
          *resp_out = acp_error_response(id_j, -32602, "invalid or out-of-workdir path");
       else
       {

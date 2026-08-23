@@ -100,11 +100,10 @@ static void test_agy_parse_text_delta(void)
 {
    const provider_cli_adapter_t *agy = provider_cli_adapter_get("agy");
    cli_event_t ev;
-   int m = agy->parse_line(
-       "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"c1\","
-       "\"step_index\":2,\"state\":\"ACTIVE\",\"step_type\":\"agent_response\","
-       "\"text_delta\":\"pong\"}}",
-       &ev);
+   int m = agy->parse_line("{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"c1\","
+                           "\"step_index\":2,\"state\":\"ACTIVE\",\"step_type\":\"agent_response\","
+                           "\"text_delta\":\"pong\"}}",
+                           &ev);
    assert(m == 1);
    assert(ev.type == CLI_EVENT_TEXT_DELTA);
    assert(strcmp(ev.text, "pong") == 0);
@@ -177,10 +176,10 @@ static void test_agy_parse_init_and_noise(void)
    const provider_cli_adapter_t *agy = provider_cli_adapter_get("agy");
    cli_event_t ev;
    /* init is matched (kept out of the raw fallback) but carries no event. */
-   int m = agy->parse_line(
-       "{\"event\":\"init\",\"conversation_id\":\"c1\",\"init\":{\"model\":\"g\","
-       "\"tools\":[\"invoke_subagent\"],\"permission_mode\":\"request-review\"}}",
-       &ev);
+   int m =
+       agy->parse_line("{\"event\":\"init\",\"conversation_id\":\"c1\",\"init\":{\"model\":\"g\","
+                       "\"tools\":[\"invoke_subagent\"],\"permission_mode\":\"request-review\"}}",
+                       &ev);
    assert(m == 1);
    assert(ev.type == CLI_EVENT_NONE);
    assert(agy->parse_line("not json", &ev) == 0);

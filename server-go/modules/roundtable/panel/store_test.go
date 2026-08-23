@@ -158,3 +158,91 @@ func TestNamedButAbsentRoundtableFailsClosed(t *testing.T) {
 		t.Fatal("named roundtable that does not exist silently fell back")
 	}
 }
+
+func TestShippedRoundtablePresetsExactAllocation(t *testing.T) {
+	dir := filepath.Join("..", "..", "..", "..", "config", "roundtables")
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// plan: dedicated planning panel with two required seats, Sol reviewer + Antigravity qa, no Fable, chairman Sol.
+	plan, err := store.Resolve("plan", nil, nil)
+	if err != nil {
+		t.Fatalf("plan preset: %v", err)
+	}
+	if plan.Name != "plan" || len(plan.Seats) != 2 || !plan.Acquired || !plan.ChairmanEnabled || plan.MinSuccessful != 2 || plan.DeadlineMS != 600000 || plan.Discussion {
+		t.Fatalf("plan panel mismatch: %+v", plan)
+	}
+	if plan.Chairman != "codex:gpt-5.6-sol" || plan.ChairmanFallback != "antigravity" {
+		t.Fatalf("plan chairman mismatch: chairman=%q fallback=%q", plan.Chairman, plan.ChairmanFallback)
+	}
+	if plan.Seats[0].Selector != "codex:gpt-5.6-sol" || plan.Seats[0].Persona != "reviewer" || plan.Seats[0].Optional {
+		t.Fatalf("plan seat 0 mismatch: %+v", plan.Seats[0])
+	}
+	if plan.Seats[1].Selector != "antigravity" || plan.Seats[1].Persona != "qa" || plan.Seats[1].Optional {
+		t.Fatalf("plan seat 1 mismatch: %+v", plan.Seats[1])
+	}
+	// No Fable seat in plan.
+	for _, seat := range plan.Seats {
+		if seat.Selector == "claude:claude-fable-5" {
+			t.Fatalf("plan must not contain a Fable seat: %+v", plan.Seats)
+		}
+	}
+
+	// implementation: Sol reviewer, Antigravity qa, Fable architect optional, chairman Fable, fallback Sol.
+	implementation, err := store.Resolve("implementation", nil, nil)
+	if err != nil {
+		t.Fatalf("implementation preset: %v", err)
+	}
+	if implementation.Name != "implementation" || len(implementation.Seats) != 3 || !implementation.Acquired || !implementation.ChairmanEnabled || implementation.MinSuccessful != 2 || implementation.DeadlineMS != 600000 || implementation.Discussion {
+		t.Fatalf("implementation panel mismatch: %+v", implementation)
+	}
+	if implementation.Chairman != "claude:claude-fable-5" || implementation.ChairmanFallback != "codex:gpt-5.6-sol" {
+		t.Fatalf("implementation chairman mismatch: chairman=%q fallback=%q", implementation.Chairman, implementation.ChairmanFallback)
+	}
+	if implementation.Seats[0].Selector != "codex:gpt-5.6-sol" || implementation.Seats[0].Persona != "reviewer" || implementation.Seats[0].Optional {
+		t.Fatalf("implementation seat 0 mismatch: %+v", implementation.Seats[0])
+	}
+	if implementation.Seats[1].Selector != "antigravity" || implementation.Seats[1].Persona != "qa" || implementation.Seats[1].Optional {
+		t.Fatalf("implementation seat 1 mismatch: %+v", implementation.Seats[1])
+	}
+	if implementation.Seats[2].Selector != "claude:claude-fable-5" || implementation.Seats[2].Persona != "architect" || !implementation.Seats[2].Optional {
+		t.Fatalf("implementation seat 2 mismatch: %+v", implementation.Seats[2])
+	}
+
+	// documentation: identical allocation to implementation but name documentation.
+	documentation, err := store.Resolve("documentation", nil, nil)
+	if err != nil {
+		t.Fatalf("documentation preset: %v", err)
+	}
+	if documentation.Name != "documentation" || len(documentation.Seats) != 3 || !documentation.Acquired || !documentation.ChairmanEnabled || documentation.MinSuccessful != 2 || documentation.DeadlineMS != 600000 || documentation.Discussion {
+		t.Fatalf("documentation panel mismatch: %+v", documentation)
+	}
+	if documentation.Chairman != "claude:claude-fable-5" || documentation.ChairmanFallback != "codex:gpt-5.6-sol" {
+		t.Fatalf("documentation chairman mismatch: chairman=%q fallback=%q", documentation.Chairman, documentation.ChairmanFallback)
+	}
+	if documentation.Seats[0].Selector != "codex:gpt-5.6-sol" || documentation.Seats[0].Persona != "reviewer" || documentation.Seats[0].Optional {
+		t.Fatalf("documentation seat 0 mismatch: %+v", documentation.Seats[0])
+	}
+	if documentation.Seats[1].Selector != "antigravity" || documentation.Seats[1].Persona != "qa" || documentation.Seats[1].Optional {
+		t.Fatalf("documentation seat 1 mismatch: %+v", documentation.Seats[1])
+	}
+	if documentation.Seats[2].Selector != "claude:claude-fable-5" || documentation.Seats[2].Persona != "architect" || !documentation.Seats[2].Optional {
+		t.Fatalf("documentation seat 2 mismatch: %+v", documentation.Seats[2])
+	}
+
+	// default must remain unchanged for other workflows.
+	def, err := store.Resolve("default", nil, nil)
+	if err != nil {
+		t.Fatalf("default preset: %v", err)
+	}
+	if def.Name != "default" || len(def.Seats) != 3 || def.MinSuccessful != 2 || def.DeadlineMS != 600000 || def.Discussion {
+		t.Fatalf("default panel mismatch: %+v", def)
+	}
+	if def.Chairman != "antigravity" || def.ChairmanFallback != "codex:gpt-5.6-sol" || !def.ChairmanEnabled {
+		t.Fatalf("default chairman mismatch: %+v", def)
+	}
+	if def.Seats[0].Selector != "codex:gpt-5.6-sol" || def.Seats[1].Selector != "antigravity" || def.Seats[2].Selector != "claude:claude-fable-5" || !def.Seats[2].Optional {
+		t.Fatalf("default seats mismatch: %+v", def.Seats)
+	}
+}

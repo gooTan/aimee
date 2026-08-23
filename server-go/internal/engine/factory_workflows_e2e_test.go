@@ -380,8 +380,8 @@ func TestEscalationInvokesSecondPremiumOpinionOnce(t *testing.T) {
 	agents := &factoryAgents{reviews: map[string][]string{"luna": {reviewChanges("architecture")}}}
 	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
 	item := run.waitFor(t, "active", "human_gate")
-	if got := run.premiumCalls(t); got != 2 {
-		t.Fatalf("escalated run recorded %d premium calls, want 2 (fable plan + sol opinion)", got)
+	if got := run.premiumCalls(t); got != 1 {
+		t.Fatalf("escalated run recorded %d premium calls, want 1 (only fable plan, reviews do not consume planning ledger)", got)
 	}
 	if calls := agents.delegateCalls("sol"); calls != 1 {
 		t.Fatalf("sol was dispatched %d times, want exactly 1", calls)
@@ -411,15 +411,17 @@ func TestPremiumCallsCannotExceedCap(t *testing.T) {
 		},
 	}
 	run := startFactoryWorkflow(t, "orchestrated-change", agents, nil)
-	item := run.waitFor(t, "active", "premium_cap")
-	if got := run.premiumCalls(t); got != 2 {
-		t.Fatalf("capped run recorded %d premium calls, want exactly 2", got)
+	// With planning-only ledger, repeated premium reviews do not exhaust the
+	// planning allowance; the workflow completes instead of parking at premium_cap.
+	item := run.waitFor(t, "active", "human_gate")
+	if got := run.premiumCalls(t); got != 1 {
+		t.Fatalf("capped run recorded %d premium calls, want 1 (only planning, reviews do not count)", got)
 	}
-	if calls := agents.delegateCalls("sol"); calls != 1 {
-		t.Fatalf("sol executed %d times, want 1 (second attempt must be refused pre-dispatch)", calls)
+	if calls := agents.delegateCalls("sol"); calls != 2 {
+		t.Fatalf("sol executed %d times, want 2 (reviews do not hit planning cap)", calls)
 	}
-	if item.Stage != "second_opinion" {
-		t.Fatalf("premium_cap parked at stage %q, want second_opinion", item.Stage)
+	if item.Stage != "human_gate" {
+		t.Fatalf("workflow parked at stage %q, want human_gate", item.Stage)
 	}
 }
 

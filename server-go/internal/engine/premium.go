@@ -14,14 +14,14 @@ import (
 // writable worktree is a workflow-definition bug and must never reach the CLI.
 var ErrPremiumWriteRefused = errors.New("premium delegates are read-only and cannot be dispatched with write tools")
 
-// PremiumPolicy bounds how often the expensive planning delegates may be
+// PremiumPolicy bounds how often the expensive premium planning delegates may be
 // invoked within one workflow run tree, and forbids dispatching them with
 // write capability at all. The zero value enforces nothing, which preserves
 // the behavior of deployments that configure no premium delegates.
 type PremiumPolicy struct {
 	// Delegates names the agents.json delegate entries that count as premium.
 	Delegates map[string]bool
-	// MaxCalls is the hard per-run-tree dispatch ceiling.
+	// MaxCalls is the hard per-run-tree premium planning dispatch ceiling.
 	MaxCalls int
 }
 
@@ -31,13 +31,15 @@ func (p PremiumPolicy) IsPremium(delegate string) bool {
 
 const (
 	defaultPremiumDelegates = "sol,fable"
-	defaultPremiumCallCap   = 2
+	defaultPremiumCallCap   = 15
 )
 
 // PremiumPolicyFromEnv reads AIMEE_PREMIUM_DELEGATES (comma-separated delegate
 // names; "none" disables enforcement) and AIMEE_PREMIUM_CALL_CAP. The defaults
-// name the shipped premium planner seats and allow two calls: one planning
-// call plus one escalation.
+// name the shipped premium planner seats and allow 15 planning calls: the
+// finite graph bound of at most six Fable plan author attempts plus three
+// split generations each with at most three structured-output attempts
+// (6 + 3*3 = 15).
 func PremiumPolicyFromEnv() PremiumPolicy {
 	names := strings.TrimSpace(os.Getenv("AIMEE_PREMIUM_DELEGATES"))
 	if names == "" {
@@ -87,9 +89,9 @@ func DelegateAliasesFromEnv() map[string]string {
 }
 
 // escalationClasses are the only decision classes that justify a second
-// premium call. Anything else a reviewer writes in the escalation field is
+// premium planning call. Anything else a reviewer writes in the escalation field is
 // treated as routine, so an over-eager reviewer fails toward the cheap repair
-// path rather than toward premium spend.
+// path rather than toward premium planning spend.
 var escalationClasses = map[string]bool{
 	"architecture": true,
 	"security":     true,

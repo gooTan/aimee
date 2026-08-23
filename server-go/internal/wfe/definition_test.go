@@ -159,3 +159,185 @@ func TestShippedWorkflowsNameAShippedRoundtable(t *testing.T) {
 		t.Fatal("no shipped roundtable gates found; this guard would pass vacuously")
 	}
 }
+
+func TestCanonicalBuildWorkflowBindings(t *testing.T) {
+	buildPath := filepath.Join("..", "..", "..", "config", "workflows", "build.yaml")
+	content, err := os.ReadFile(buildPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, err := ParseDefinition(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Name != "build" {
+		t.Fatalf("build workflow name=%q, want build", def.Name)
+	}
+	if def.Start != "draft" {
+		t.Fatalf("build start=%q, want draft", def.Start)
+	}
+	find := func(id string) (Node, bool) {
+		for _, n := range def.Nodes {
+			if n.ID == id {
+				return n, true
+			}
+		}
+		return Node{}, false
+	}
+	mustParamString := func(node Node, key string) string {
+		v, _ := node.Params[key].(string)
+		return v
+	}
+	mustParamBool := func(node Node, key string) bool {
+		v, _ := node.Params[key].(bool)
+		return v
+	}
+	mustParamInt := func(node Node, key string) int {
+		if v, ok := numericInt(node.Params[key]); ok {
+			return v
+		}
+		if v, ok := node.Params[key].(int); ok {
+			return v
+		}
+		return 0
+	}
+
+	feature, ok := find("feature")
+	if !ok {
+		t.Fatal("build missing node feature")
+	}
+	if feature.Next != "prep" {
+		t.Fatalf("feature.next=%q, want prep", feature.Next)
+	}
+	if feature.Block != "branch.open" {
+		t.Fatalf("feature block=%q, want branch.open", feature.Block)
+	}
+
+	prep, ok := find("prep")
+	if !ok {
+		t.Fatal("build missing node prep")
+	}
+	if prep.Block != "understand" {
+		t.Fatalf("prep block=%q, want understand", prep.Block)
+	}
+	if !mustParamBool(prep, "brief") {
+		t.Fatalf("prep brief=%v, want true", prep.Params["brief"])
+	}
+	if mustParamString(prep, "delegate") != "luna" {
+		t.Fatalf("prep delegate=%q, want luna", prep.Params["delegate"])
+	}
+	if mustParamInt(prep, "max_rounds") != 2 {
+		t.Fatalf("prep max_rounds=%v, want 2", prep.Params["max_rounds"])
+	}
+	if prep.Next != "plan" || prep.OnFail != "prep" {
+		t.Fatalf("prep edges next=%q on_fail=%q, want plan/prep", prep.Next, prep.OnFail)
+	}
+
+	plan, ok := find("plan")
+	if !ok {
+		t.Fatal("build missing node plan")
+	}
+	if plan.Block != "author.plan" {
+		t.Fatalf("plan block=%q, want author.plan", plan.Block)
+	}
+	if got := plan.In["proposal"]; got != "prep.out" {
+		t.Fatalf("plan proposal binding=%q, want prep.out", got)
+	}
+	if mustParamString(plan, "delegate") != "fable" {
+		t.Fatalf("plan delegate=%q, want fable", plan.Params["delegate"])
+	}
+	if mustParamString(plan, "persona") != "architect" {
+		t.Fatalf("plan persona=%q, want architect", plan.Params["persona"])
+	}
+	if !mustParamBool(plan, "require_brief") {
+		t.Fatalf("plan require_brief=%v, want true", plan.Params["require_brief"])
+	}
+	if mustParamInt(plan, "max_rounds") != 6 {
+		t.Fatalf("plan max_rounds=%v, want 6", plan.Params["max_rounds"])
+	}
+	if plan.Next != "plan_gate" || plan.OnFail != "prep" {
+		t.Fatalf("plan edges next=%q on_fail=%q, want plan_gate/prep", plan.Next, plan.OnFail)
+	}
+
+	planGate, ok := find("plan_gate")
+	if !ok {
+		t.Fatal("build missing plan_gate")
+	}
+	if mustParamString(planGate, "roundtable") != "plan" {
+		t.Fatalf("plan_gate roundtable=%q, want plan", planGate.Params["roundtable"])
+	}
+	if mustParamInt(planGate, "max_rounds") != 6 {
+		t.Fatalf("plan_gate max_rounds=%v, want 6", planGate.Params["max_rounds"])
+	}
+	if planGate.OnPass != "split" || planGate.OnFail != "plan" {
+		t.Fatalf("plan_gate edges on_pass=%q on_fail=%q, want split/plan", planGate.OnPass, planGate.OnFail)
+	}
+	if !strings.Contains(mustParamString(planGate, "focus"), "does this implementation plan") {
+		t.Fatalf("plan_gate focus missing: %v", planGate.Params["focus"])
+	}
+
+	split, ok := find("split")
+	if !ok {
+		t.Fatal("build missing split")
+	}
+	if split.Block != "split" {
+		t.Fatalf("split block=%q, want split", split.Block)
+	}
+	if mustParamString(split, "delegate") != "fable" {
+		t.Fatalf("split delegate=%q, want fable", split.Params["delegate"])
+	}
+	if mustParamInt(split, "max_rounds") != 3 {
+		t.Fatalf("split max_rounds=%v, want 3", split.Params["max_rounds"])
+	}
+	if split.Next != "slices" || split.OnFail != "split" {
+		t.Fatalf("split edges next=%q on_fail=%q, want slices/split", split.Next, split.OnFail)
+	}
+
+	acceptGate, ok := find("accept_gate")
+	if !ok {
+		t.Fatal("build missing accept_gate")
+	}
+	if mustParamString(acceptGate, "roundtable") != "implementation" {
+		t.Fatalf("accept_gate roundtable=%q, want implementation", acceptGate.Params["roundtable"])
+	}
+
+	docGate, ok := find("doc_gate")
+	if !ok {
+		t.Fatal("build missing doc_gate")
+	}
+	if mustParamString(docGate, "roundtable") != "documentation" {
+		t.Fatalf("doc_gate roundtable=%q, want documentation", docGate.Params["roundtable"])
+	}
+
+	// Slice workflow: rt_gate must name implementation and impl must not pin a delegate.
+	sliceContent, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "workflows", "slice.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sliceDef, err := ParseDefinition(sliceContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sliceGate Node
+	found := false
+	for _, n := range sliceDef.Nodes {
+		if n.ID == "rt_gate" {
+			sliceGate = n
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("slice missing rt_gate")
+	}
+	if got, _ := sliceGate.Params["roundtable"].(string); got != "implementation" {
+		t.Fatalf("slice rt_gate roundtable=%q, want implementation", sliceGate.Params["roundtable"])
+	}
+	for _, n := range sliceDef.Nodes {
+		if n.ID == "impl" {
+			if _, has := n.Params["delegate"]; has {
+				t.Fatalf("slice impl must not pin a delegate; native runner owns routing, got %v", n.Params["delegate"])
+			}
+		}
+	}
+}

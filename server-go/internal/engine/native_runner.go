@@ -182,16 +182,23 @@ func (r *NativeRunner) applyDelegateAlias(itemID string, request *DelegateReques
 }
 
 // admitPremium is the one place a premium delegate can pass on its way to a
-// provider. It refuses write capability outright and records the dispatch in
-// the durable per-run-tree ledger before anything is spent; the ledger insert
-// is atomic against the cap so concurrent siblings cannot overshoot it.
-// Replay-only steps re-consume durable results and must not double-count.
+// provider. It refuses write capability outright and records the premium
+// planning dispatch in the durable per-run-tree planning ledger before
+// anything is spent; the ledger insert is atomic against the planning cap so
+// concurrent siblings cannot overshoot it. Only role draft consumes planning
+// ledger capacity; a premium review/chairman/analysis/explain call is allowed
+// read-only but does not increment the premium planning ledger so repeated
+// panels cannot exhaust the planning allowance.
+// Replay-only draft steps re-consume durable results and must not double-count.
 func (r *NativeRunner) admitPremium(ctx context.Context, step StepRequest, request DelegateRequest) error {
 	if !r.premium.IsPremium(request.Delegate) {
 		return nil
 	}
 	if request.Tools || request.Role == "code" {
 		return fmt.Errorf("%w: delegate %q role %q", ErrPremiumWriteRefused, request.Delegate, request.Role)
+	}
+	if request.Role != "draft" {
+		return nil
 	}
 	if step.ReplayOnly {
 		return nil

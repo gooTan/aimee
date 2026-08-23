@@ -35,24 +35,35 @@ nodes:
     block: branch.open
     params:
       base: trunk
+    next: prep
+  - id: prep
+    block: understand
+    params:
+      brief: true
+      delegate: luna
+      max_rounds: 2
     next: plan
+    on_fail: prep
   # Author the implementation plan from the admitted proposal.
   # Bound repeated authoring. Review findings feed the next plan pass.
   - id: plan
     block: author.plan
     in:
-      proposal: draft.out
+      proposal: prep.out
     params:
-      max_rounds: 60
+      delegate: fable
+      persona: architect
+      require_brief: true
+      max_rounds: 6
     next: plan_gate
-    on_fail: plan
+    on_fail: prep
   # Review the plan against the proposal. Requested changes return to plan.
   - id: plan_gate
     block: gate.roundtable
     in:
       src: plan.out
     params:
-      roundtable: default
+      roundtable: plan
       panel:
         required:
           - security
@@ -72,6 +83,9 @@ nodes:
     block: split
     in:
       plan: plan.out
+    params:
+      delegate: fable
+      max_rounds: 3
     next: slices
     # Regenerate packets when split requests another pass.
     on_fail: split
@@ -99,7 +113,7 @@ nodes:
     in:
       src: accept_freeze.out
     params:
-      roundtable: default
+      roundtable: implementation
       panel:
         required:
           - security
@@ -130,7 +144,7 @@ nodes:
     in:
       src: doc_freeze.out
     params:
-      roundtable: default
+      roundtable: documentation
       panel:
         required:
           - architect

@@ -1,0 +1,13 @@
+{
+  "name": "plan",
+  "seats": [
+    {"model": "codex:gpt-5.6-sol", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "qa"}
+  ],
+  "chairman": "codex:gpt-5.6-sol",
+  "chairman_fallback": "antigravity",
+  "chairman_enabled": true,
+  "min_successful": 2,
+  "deadline_ms": 600000,
+  "discussion": false
+}

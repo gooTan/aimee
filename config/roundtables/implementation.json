@@ -1,0 +1,14 @@
+{
+  "name": "implementation",
+  "seats": [
+    {"model": "codex:gpt-5.6-sol", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "qa"},
+    {"model": "claude:claude-fable-5", "persona": "architect", "optional": true}
+  ],
+  "chairman": "claude:claude-fable-5",
+  "chairman_fallback": "codex:gpt-5.6-sol",
+  "chairman_enabled": true,
+  "min_successful": 2,
+  "deadline_ms": 600000,
+  "discussion": false
+}

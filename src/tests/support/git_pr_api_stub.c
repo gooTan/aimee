@@ -6,6 +6,7 @@
 #include "modules/git/git_pr_api.h"
 #include "tests/support/git_pr_api_stub.h"
 
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -176,7 +177,7 @@ int git_pr_info_via_api_slug(const char *principal, const char *slug, int number
 }
 
 int git_pr_create_via_api(const char *principal, const char *repo_dir, const char *title,
-                          const char *body, char *out, size_t out_cap, char *err, size_t errlen)
+                           const char *body, char *out, size_t out_cap, char *err, size_t errlen)
 {
    (void)principal;
    (void)repo_dir;
@@ -187,4 +188,145 @@ int git_pr_create_via_api(const char *principal, const char *repo_dir, const cha
    if (err && errlen)
       snprintf(err, errlen, "pr api unavailable (stub)");
    return -1;
+}
+
+int git_repo_fork_via_api_slug(const char *principal, const char *slug, char *out, size_t out_cap,
+                               char *err, size_t errlen)
+{
+   (void)principal;
+   (void)slug;
+   if (out && out_cap)
+      out[0] = '\0';
+   if (err && errlen)
+      snprintf(err, errlen, "pr api unavailable (stub)");
+   return -1;
+}
+
+static int stub_host_is_github(const char *s, const char *e)
+{
+   size_t n = (size_t)(e - s);
+   char h[64];
+   if (n == 0 || n >= sizeof(h))
+      return 0;
+   for (size_t i = 0; i < n; i++)
+      h[i] = (char)tolower((unsigned char)s[i]);
+   h[n] = '\0';
+   return strcmp(h, "github.com") == 0 || strcmp(h, "www.github.com") == 0;
+}
+
+static int stub_gh_name_ok(const char *s, size_t n)
+{
+   if (n == 0 || !isalnum((unsigned char)s[0]))
+      return 0;
+   for (size_t i = 0; i < n; i++)
+      if (!isalnum((unsigned char)s[i]) && s[i] != '-' && s[i] != '_' && s[i] != '.')
+         return 0;
+   return 1;
+}
+
+static int stub_parse_github_slug(const char *url, char *owner, size_t ocap, char *repo, size_t rcap)
+{
+   const char *host, *path = NULL;
+   const char *scheme = strstr(url, "://");
+   if (scheme)
+   {
+      host = scheme + 3;
+      const char *slash = strchr(host, '/');
+      const char *at = strchr(host, '@');
+      if (at && (!slash || at < slash))
+         host = at + 1;
+      const char *hend = host;
+      while (*hend && *hend != '/' && *hend != ':')
+         hend++;
+      if (!stub_host_is_github(host, hend))
+         return -1;
+      const char *q = hend;
+      if (*q == ':')
+         while (*q && *q != '/')
+            q++;
+      if (*q != '/')
+         return -1;
+      path = q + 1;
+   }
+   else
+   {
+      const char *colon = strchr(url, ':');
+      if (!colon)
+         return -1;
+      const char *at = strchr(url, '@');
+      host = (at && at < colon) ? at + 1 : url;
+      if (!stub_host_is_github(host, colon))
+         return -1;
+      path = colon + 1;
+   }
+   while (*path == '/')
+      path++;
+   const char *slash = strchr(path, '/');
+   if (!slash)
+      return -1;
+   size_t ol = (size_t)(slash - path);
+   const char *r = slash + 1;
+   size_t rl = strlen(r);
+   if (rl > 4 && strcmp(r + rl - 4, ".git") == 0)
+      rl -= 4;
+   if (ol >= ocap || rl >= rcap || !stub_gh_name_ok(path, ol) || !stub_gh_name_ok(r, rl))
+      return -1;
+   memcpy(owner, path, ol);
+   owner[ol] = '\0';
+   memcpy(repo, r, rl);
+   repo[rl] = '\0';
+   return 0;
+}
+
+int git_pr_canonical_github_url(const char *url, char *out, size_t out_cap, char *err, size_t errlen)
+{
+   if (out && out_cap)
+      out[0] = '\0';
+   if (err && errlen)
+      err[0] = '\0';
+   if (!url || !url[0])
+   {
+      snprintf(err, errlen, "requires a github.com url");
+      return -1;
+   }
+   const char *scheme = strstr(url, "://");
+   if (scheme)
+   {
+      size_t slen = (size_t)(scheme - url);
+      if (slen == 4 || slen == 5)
+      {
+         char sbuf[8];
+         if (slen < sizeof(sbuf))
+         {
+            for (size_t i = 0; i < slen; i++)
+               sbuf[i] = (char)tolower((unsigned char)url[i]);
+            sbuf[slen] = '\0';
+            if (strcmp(sbuf, "http") == 0 || strcmp(sbuf, "https") == 0)
+            {
+               const char *auth = scheme + 3;
+               const char *slash = strchr(auth, '/');
+               const char *at = strchr(auth, '@');
+               if (at && (!slash || at < slash))
+               {
+                  snprintf(err, errlen, "github url must not contain credentials");
+                  return -1;
+               }
+            }
+         }
+      }
+   }
+   char owner[128], repo[128];
+   if (stub_parse_github_slug(url, owner, sizeof(owner), repo, sizeof(repo)) != 0)
+   {
+      snprintf(err, errlen, "requires a github.com url");
+      return -1;
+   }
+   if ((size_t)snprintf(out, out_cap, "https://github.com/%s/%s.git", owner, repo) >= out_cap)
+   {
+      snprintf(err, errlen, "url too long");
+      if (out && out_cap)
+         out[0] = '\0';
+      return -1;
+   }
+   return 0;
 }

@@ -1093,3 +1093,21 @@ cJSON *handle_git_pr(cJSON *args)
    return mcp_text("error: unknown action. Use "
                    "create/view/list/edit/checks/watch/merge_status/merge/wait/ready");
 }
+
+cJSON *handle_git_fork(cJSON *args)
+{
+   cJSON *jrepo = cJSON_GetObjectItemCaseSensitive(args, "repo");
+   if (!cJSON_IsString(jrepo) || !jrepo->valuestring[0])
+      return mcp_text("error: 'repo' parameter is required (owner/repo)");
+   const char *repo = jrepo->valuestring;
+   const char *slash = strchr(repo, '/');
+   if (!slash || slash == repo || !slash[1] || strchr(slash + 1, '/'))
+      return mcp_text("error: 'repo' must be in owner/repo form");
+   char out[1024] = "", err[512] = "";
+   if (git_repo_fork_via_api_slug(agent_get_request_vault_principal(), repo, out, sizeof(out), err,
+                                  sizeof(err)) != 0)
+      return mcp_error("error: %s", err[0] ? err : "repo fork failed");
+   char result[1152];
+   snprintf(result, sizeof(result), "forked: %s", out);
+   return mcp_text(result);
+}

@@ -23,6 +23,7 @@ cJSON *handle_git_fetch(cJSON *args);
 cJSON *handle_git_reset(cJSON *args);
 cJSON *handle_git_restore(cJSON *args);
 cJSON *handle_git_issue(cJSON *args);
+cJSON *handle_git_fork(cJSON *args);
 
 /* Bring one line of history into another. Each takes the target ref (`ref`, or
  * `base` for rebase) to start, or action=continue/abort/skip to drive one that
@@ -96,6 +97,12 @@ int mcp_git_get_worktree(void);
  * thread-local run_cmd CWD (mcp_chdir_git_root) is honored either way. Drop-in
  * for run_cmd(cmd, &rc) at the mcp_git call sites. */
 char *mcp_git_run(const char *cmd, int *exit_code);
+
+/* Build the explicit-destination git push command for a canonical GitHub URL.
+ * Returns 0 on success, -1 on null/empty inputs or truncation. Shell-escapes
+ * URL and branch itself. */
+int mcp_git_build_explicit_push_command(char *out, size_t out_cap, const char *canonical_url,
+                                        const char *branch, int force, int tags);
 
 /* Git helper utilities shared between mcp_git_query.c and mcp_git_write.c. */
 /* Would merging HEAD into `base` conflict? 1 yes (conflicting paths appended to

@@ -3093,6 +3093,225 @@ static void test_switch_requires_a_ref(void)
    teardown_git_repo();
 }
 
+static void test_git_fork_missing_repo(void)
+{
+   cJSON *args = cJSON_CreateObject();
+   cJSON *resp = handle_git_fork(args);
+   char *text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   assert(strstr(text, "repo") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "repo", "");
+   resp = handle_git_fork(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "repo", "badformat");
+   resp = handle_git_fork(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   assert(strstr(text, "owner/repo") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "repo", "a/b/c");
+   resp = handle_git_fork(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+}
+
+static void test_git_push_explicit_rejects_bad_urls(void)
+{
+   setup_git_repo();
+   assert(system("git checkout -q -b rej-feature") == 0);
+
+   const char *bad_urls[] = {
+       "/tmp/local.git",
+       "file:///tmp/foo",
+       "/absolute/path/to/repo.git",
+       "https://github.com.evil.com/acme/widgets",
+       "https://github.com.evil/acme/widgets",
+       "https://user@github.com/acme/widgets.git",
+       "https://token:hunter2@github.com/acme/widgets",
+       "https://github.com/acme", /* missing repo */
+       "git@evil.com:acme/widgets.git",
+       "-o",
+       NULL};
+   for (int i = 0; bad_urls[i]; i++)
+   {
+      cJSON *args = cJSON_CreateObject();
+      cJSON_AddStringToObject(args, "remote_url", bad_urls[i]);
+      cJSON *resp = handle_git_push(args);
+      char *text = get_mcp_text(resp);
+      assert(text != NULL);
+      assert(strstr(text, "error") != NULL);
+      cJSON_Delete(resp);
+      cJSON_Delete(args);
+   }
+
+   teardown_git_repo();
+}
+
+static void test_git_push_explicit_builder(void)
+{
+   char cmd[2048];
+
+   /* Canonical URL and refspec, no -u */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "spy-feature",
+                                              0, 0) == 0);
+   assert(strstr(cmd, "https://github.com/acme/widgets.git") != NULL);
+   assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
+   assert(strstr(cmd, "-u") == NULL);
+   assert(strstr(cmd, "git push") == cmd);
+   assert(strstr(cmd, "2>&1") != NULL);
+
+   /* Force flag */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "spy-feature",
+                                              1, 0) == 0);
+   assert(strstr(cmd, "--force-with-lease") != NULL);
+   assert(strstr(cmd, "--tags") == NULL);
+   assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
+
+   /* Tags flag */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "spy-feature",
+                                              0, 1) == 0);
+   assert(strstr(cmd, "--tags") != NULL);
+   assert(strstr(cmd, "--force-with-lease") == NULL);
+
+   /* Both flags */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "spy-feature",
+                                              1, 1) == 0);
+   assert(strstr(cmd, "--force-with-lease") != NULL);
+   assert(strstr(cmd, "--tags") != NULL);
+   assert(strstr(cmd, "https://github.com/acme/widgets.git") != NULL);
+   assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
+
+   /* Branch shell escaping: single quote in branch name */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "a'b", 0,
+                                              0) == 0);
+   /* shell_escape turns ' into '\'' -> command must contain that escaped sequence */
+   assert(strstr(cmd, "'\\''") != NULL);
+   assert(strstr(cmd, "a'b:a'b") == NULL);
+
+   /* Branch with spaces/semicolon must be quoted safely */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git",
+                                              "my branch; rm -rf /", 0, 0) == 0);
+   assert(strstr(cmd, "my branch; rm -rf /") != NULL);
+   assert(strstr(cmd, "'my branch; rm -rf /:my branch; rm -rf /'") != NULL);
+
+   /* URL shell escaping: single quote in canonical URL */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/wi'd.git", "branch", 0,
+                                              0) == 0);
+   assert(strstr(cmd, "'\\''") != NULL);
+
+   /* URL with space (should be shell-escaped but still quoted) */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/with space.git", "branch",
+                                              0, 0) == 0);
+   assert(strstr(cmd, "with space") != NULL);
+
+   /* Small-buffer / null / empty input failure */
+   char small[10];
+   assert(mcp_git_build_explicit_push_command(small, sizeof(small),
+                                              "https://github.com/acme/widgets.git", "mybranch",
+                                              0, 0) == -1);
+   char tiny[20];
+   assert(mcp_git_build_explicit_push_command(tiny, sizeof(tiny),
+                                              "https://github.com/acme/widgets.git", "mybranch",
+                                              0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(NULL, 0, "https://github.com/acme/widgets.git",
+                                              "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, 0, "https://github.com/acme/widgets.git",
+                                              "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), NULL, "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), "", "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", NULL, 0,
+                                              0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "", 0,
+                                              0) == -1);
+}
+
+static void test_git_push_mirror_rejects_new_options(void)
+{
+   setup_git_repo();
+   assert(system("git checkout -q -b mirror-reject") == 0);
+
+   cJSON *args = cJSON_CreateObject();
+   cJSON_AddBoolToObject(args, "mirror", 1);
+   cJSON_AddStringToObject(args, "remote_url", "https://example.com/foo.git");
+   cJSON *resp = handle_git_push(args);
+   char *text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   assert(strstr(text, "mirror") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddBoolToObject(args, "mirror", 1);
+   cJSON_AddBoolToObject(args, "tags", 1);
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddBoolToObject(args, "mirror", 1);
+   cJSON_AddStringToObject(args, "remote_url", "https://example.com/foo.git");
+   cJSON_AddBoolToObject(args, "tags", 1);
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   /* remote_url validation */
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "remote_url", "");
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddNumberToObject(args, "remote_url", 123);
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   teardown_git_repo();
+}
+
 /* --- PR title/body derivation --- */
 
 /* One commit: the PR is that commit. No model call, no invented prose. */
@@ -3911,6 +4130,12 @@ int main(void)
    test_pr_ready_stops_at_the_failing_step();
    test_pr_ready_runs_sync_then_push();
    test_pr_unknown_action_lists_ready();
+
+   /* Fork and explicit push (canonicalization spy tests) */
+   test_git_fork_missing_repo();
+   test_git_push_explicit_rejects_bad_urls();
+   test_git_push_explicit_builder();
+   test_git_push_mirror_rejects_new_options();
 
    printf("all tests passed\n");
    return 0;

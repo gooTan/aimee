@@ -340,6 +340,86 @@ int main(void)
    assert(git_pr_list_open_via_api_slug(NULL, SLUG, 4, rows, &count, err, sizeof(err)) == -1);
    assert(strstr(err, "could not be reached") != NULL);
 
+   /* --- repo_fork ------------------------------------------------------ */
+
+   char fork_out[512];
+   module_bus_stub_reply(
+       "{\"status\":202,\"fork_full_name\":\"me/widgets\",\"fork_url\":\"https://github.com/me/widgets\"}");
+   assert(git_repo_fork_via_api_slug(NULL, SLUG, fork_out, sizeof(fork_out), err, sizeof(err)) == 0);
+   assert(strcmp(fork_out, "https://github.com/me/widgets") == 0);
+
+   /* Fallback to full_name when html_url is absent */
+   module_bus_stub_reply("{\"status\":202,\"fork_full_name\":\"me/widgets\"}");
+   assert(git_repo_fork_via_api_slug(NULL, SLUG, fork_out, sizeof(fork_out), err, sizeof(err)) == 0);
+   assert(strcmp(fork_out, "me/widgets") == 0);
+
+   /* Malformed: no fork identity */
+   module_bus_stub_reply("{\"status\":202}");
+   assert(git_repo_fork_via_api_slug(NULL, SLUG, fork_out, sizeof(fork_out), err, sizeof(err)) == -1);
+   assert(strstr(err, "unreadable") != NULL);
+
+   /* Missing fork identity (empty strings) */
+   module_bus_stub_reply("{\"status\":202,\"fork_full_name\":\"\",\"fork_url\":\"\"}");
+   assert(git_repo_fork_via_api_slug(NULL, SLUG, fork_out, sizeof(fork_out), err, sizeof(err)) == -1);
+
+   /* Forge error surfaced */
+   module_bus_stub_reply("{\"status\":422,\"error\":\"repo fork: Fork already exists (HTTP 422)\"}");
+   assert(git_repo_fork_via_api_slug(NULL, SLUG, fork_out, sizeof(fork_out), err, sizeof(err)) == -1);
+   assert(strstr(err, "already exists") != NULL);
+
+   /* Unreachable module */
+   module_bus_stub_absent();
+   assert(git_repo_fork_via_api_slug(NULL, SLUG, fork_out, sizeof(fork_out), err, sizeof(err)) == -1);
+   assert(strstr(err, "could not be reached") != NULL);
+
+   /* Invalid slug is refused before any bus call */
+   module_bus_stub_reply("{\"status\":202,\"fork_url\":\"u\"}");
+   before = module_bus_stub_calls();
+   assert(git_repo_fork_via_api_slug(NULL, "badslug", fork_out, sizeof(fork_out), err, sizeof(err)) ==
+          -1);
+   assert(module_bus_stub_calls() == before);
+
+   /* --- canonical github url helper ------------------------------------ */
+
+   char canon[256];
+   /* HTTPS forms canonicalize to the same https://github.com/...git URL */
+   assert(git_pr_canonical_github_url("https://github.com/acme/widgets", canon, sizeof(canon), err,
+                                      sizeof(err)) == 0);
+   assert(strcmp(canon, "https://github.com/acme/widgets.git") == 0);
+   assert(git_pr_canonical_github_url("https://github.com/acme/widgets.git", canon, sizeof(canon), err,
+                                      sizeof(err)) == 0);
+   assert(strcmp(canon, "https://github.com/acme/widgets.git") == 0);
+   assert(git_pr_canonical_github_url("https://www.github.com/acme/widgets.git", canon,
+                                      sizeof(canon), err, sizeof(err)) == 0);
+   assert(strcmp(canon, "https://github.com/acme/widgets.git") == 0);
+
+   /* SSH/scq forms also canonicalize */
+   assert(git_pr_canonical_github_url("git@github.com:acme/widgets.git", canon, sizeof(canon), err,
+                                      sizeof(err)) == 0);
+   assert(strcmp(canon, "https://github.com/acme/widgets.git") == 0);
+   assert(git_pr_canonical_github_url("git@github.com:acme/widgets", canon, sizeof(canon), err,
+                                      sizeof(err)) == 0);
+   assert(strcmp(canon, "https://github.com/acme/widgets.git") == 0);
+   assert(git_pr_canonical_github_url("ssh://git@github.com/acme/widgets.git", canon, sizeof(canon),
+                                      err, sizeof(err)) == 0);
+   assert(strcmp(canon, "https://github.com/acme/widgets.git") == 0);
+
+   /* Hostile lookalike host, local path, and malformed slug must fail */
+   assert(git_pr_canonical_github_url("https://github.com.evil.com/acme/widgets", canon,
+                                      sizeof(canon), err, sizeof(err)) == -1);
+   assert(err[0] != '\0');
+   assert(git_pr_canonical_github_url("/tmp/local.git", canon, sizeof(canon), err, sizeof(err)) == -1);
+   assert(git_pr_canonical_github_url("https://github.com/acme", canon, sizeof(canon), err,
+                                      sizeof(err)) == -1);
+   assert(git_pr_canonical_github_url("https://github.com/acme/", canon, sizeof(canon), err,
+                                      sizeof(err)) == -1);
+   assert(git_pr_canonical_github_url("https://user@github.com/acme/widgets.git", canon,
+                                      sizeof(canon), err, sizeof(err)) == -1);
+   /* Truncation is rejected */
+   assert(git_pr_canonical_github_url("https://github.com/acme/widgets.git", canon, 10, err,
+                                      sizeof(err)) == -1);
+   assert(strstr(err, "too long") != NULL);
+
    printf("git_pr_stage: all tests passed\n");
    return 0;
 }

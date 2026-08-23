@@ -449,6 +449,62 @@ int git_pr_https_origin_url(const char *repo_dir, char *out, size_t out_cap, cha
    return 0;
 }
 
+int git_pr_canonical_github_url(const char *url, char *out, size_t out_cap, char *err, size_t errlen)
+{
+   if (out && out_cap)
+      out[0] = '\0';
+   if (err && errlen)
+      err[0] = '\0';
+   if (!url || !url[0])
+   {
+      snprintf(err, errlen, "requires a github.com url");
+      return -1;
+   }
+   /* Reject userinfo on http/https URLs (credential in URL).  The existing
+    * parse_github_slug tolerates user@ for ssh/scp origins, which is
+    * legitimate for those transports, so only inspect http/https. */
+   const char *scheme = strstr(url, "://");
+   if (scheme)
+   {
+      size_t slen = (size_t)(scheme - url);
+      if (slen == 4 || slen == 5)
+      {
+         char sbuf[8];
+         if (slen < sizeof(sbuf))
+         {
+            for (size_t i = 0; i < slen; i++)
+               sbuf[i] = (char)tolower((unsigned char)url[i]);
+            sbuf[slen] = '\0';
+            if (strcmp(sbuf, "http") == 0 || strcmp(sbuf, "https") == 0)
+            {
+               const char *auth = scheme + 3;
+               const char *slash = strchr(auth, '/');
+               const char *at = strchr(auth, '@');
+               if (at && (!slash || at < slash))
+               {
+                  snprintf(err, errlen, "github url must not contain credentials");
+                  return -1;
+               }
+            }
+         }
+      }
+   }
+   char owner[128], repo[128];
+   if (parse_github_slug(url, owner, sizeof(owner), repo, sizeof(repo)) != 0)
+   {
+      snprintf(err, errlen, "requires a github.com url");
+      return -1;
+   }
+   if ((size_t)snprintf(out, out_cap, "https://github.com/%s/%s.git", owner, repo) >= out_cap)
+   {
+      snprintf(err, errlen, "url too long");
+      if (out && out_cap)
+         out[0] = '\0';
+      return -1;
+   }
+   return 0;
+}
+
 int git_pr_create_via_api_ex(const char *principal, const char *repo_dir, const char *head_in,
                              const char *base_in, const char *title, const char *body, char *out,
                              size_t out_cap, char *err, size_t errlen)
@@ -1547,4 +1603,48 @@ int git_pr_merge_via_api_slug_ex(const char *principal, const char *slug, int nu
    }
    cJSON_Delete(reply);
    return res;
+}
+
+int git_repo_fork_via_api_slug(const char *principal, const char *slug, char *out, size_t out_cap,
+                               char *err, size_t errlen)
+{
+   if (out && out_cap)
+      out[0] = '\0';
+   if (err && errlen)
+      err[0] = '\0';
+
+   gh_ctx_t cx;
+   if (gh_ctx_resolve_slug(principal, slug, &cx, err, errlen) != 0)
+      return -1;
+
+   cJSON *reply = forge_stage(&cx, "repo_fork", NULL);
+   gh_ctx_done(&cx);
+   if (!reply)
+   {
+      snprintf(err, errlen, "repo fork: the git module could not be reached");
+      return -1;
+   }
+   const cJSON *message = cJSON_GetObjectItemCaseSensitive(reply, "error");
+   if (cJSON_IsString(message) && message->valuestring)
+   {
+      snprintf(err, errlen, "%s", message->valuestring);
+      cJSON_Delete(reply);
+      return -1;
+   }
+   const cJSON *full_name = cJSON_GetObjectItemCaseSensitive(reply, "fork_full_name");
+   const cJSON *fork_url = cJSON_GetObjectItemCaseSensitive(reply, "fork_url");
+   const char *url = NULL;
+   if (cJSON_IsString(fork_url) && fork_url->valuestring && fork_url->valuestring[0])
+      url = fork_url->valuestring;
+   else if (cJSON_IsString(full_name) && full_name->valuestring && full_name->valuestring[0])
+      url = full_name->valuestring;
+   if (!url || !url[0])
+   {
+      snprintf(err, errlen, "repo fork: unreadable response");
+      cJSON_Delete(reply);
+      return -1;
+   }
+   snprintf(out, out_cap, "%s", url);
+   cJSON_Delete(reply);
+   return 0;
 }

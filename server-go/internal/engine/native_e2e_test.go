@@ -97,6 +97,9 @@ func (*e2eForge) Push(ctx context.Context, _, workdir, branch string) error {
 }
 
 func (f *e2eForge) Open(_ context.Context, _ string, _ string, head, base string, spec PullRequestSpec) (PullRequest, error) {
+	if !strings.HasPrefix(head, "aimee/") {
+		return PullRequest{}, fmt.Errorf("refuse unmanaged PR head %q", head)
+	}
 	f.mu.Lock()
 	f.opens = append(f.opens, spec)
 	f.mu.Unlock()

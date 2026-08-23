@@ -1892,7 +1892,7 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	if err != nil {
 		return StepResult{}, err
 	}
-	workdir, _, err := r.worktrees.Ensure(ctx, item, item.ParentID == "")
+	workdir, branch, err := r.worktrees.Ensure(ctx, item, item.ParentID == "")
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -1959,15 +1959,15 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	var pr PullRequest
 	if lease {
 		if f, ok := r.forge.(expectedOpenForge); ok {
-			pr, err = f.OpenExpected(ctx, item.Repo, workdir, head, base, expected, spec)
+			pr, err = f.OpenExpected(ctx, item.Repo, workdir, branch, base, expected, spec)
 		} else {
 			// Test and offline forge implementations predate the optional lease
 			// seam. Keep their interactive behavior; the production HTTP forge
 			// implements OpenExpected and cannot bypass the lease.
-			pr, err = r.forge.Open(ctx, item.Repo, workdir, head, base, spec)
+			pr, err = r.forge.Open(ctx, item.Repo, workdir, branch, base, spec)
 		}
 	} else {
-		pr, err = r.forge.Open(ctx, item.Repo, workdir, head, base, spec)
+		pr, err = r.forge.Open(ctx, item.Repo, workdir, branch, base, spec)
 	}
 	if err != nil {
 		return StepResult{}, err

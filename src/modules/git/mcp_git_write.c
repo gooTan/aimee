@@ -380,8 +380,8 @@ int mcp_git_build_explicit_push_command(char *out, size_t out_cap, const char *c
    int n;
    if (force && tags)
    {
-      n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' '%s' 2>&1", esc_url,
-                   esc_branch, esc_branch, esc_tag);
+      n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' '%s' 2>&1", esc_url, esc_branch,
+                   esc_branch, esc_tag);
    }
    else
    {
@@ -474,8 +474,8 @@ cJSON *handle_git_push(cJSON *args)
    if (has_remote_url)
    {
       char cerr[256];
-      if (git_pr_canonical_github_url(jremote_url->valuestring, canonical_url, sizeof(canonical_url),
-                                      cerr, sizeof(cerr)) != 0)
+      if (git_pr_canonical_github_url(jremote_url->valuestring, canonical_url,
+                                      sizeof(canonical_url), cerr, sizeof(cerr)) != 0)
       {
          char buf[512];
          snprintf(buf, sizeof(buf), "error: %s", cerr[0] ? cerr : "invalid remote_url");
@@ -531,15 +531,16 @@ cJSON *handle_git_push(cJSON *args)
 
    if (has_explicit)
    {
-      if (mcp_git_build_explicit_push_command(cmd, sizeof(cmd), canonical_url, branch, force, tags) !=
-          0)
+      if (mcp_git_build_explicit_push_command(cmd, sizeof(cmd), canonical_url, branch, force,
+                                              tags) != 0)
          return mcp_text("error: cannot build explicit push command");
    }
    else if (mcp_git_get_worktree())
    {
       /* Push the owned branch to origin with explicit refspec */
       if (force && tags)
-         snprintf(cmd, sizeof(cmd), "git push --force-with-lease --tags -u origin '%s' 2>&1", branch);
+         snprintf(cmd, sizeof(cmd), "git push --force-with-lease --tags -u origin '%s' 2>&1",
+                  branch);
       else if (force)
          snprintf(cmd, sizeof(cmd), "git push --force-with-lease -u origin '%s' 2>&1", branch);
       else if (tags)

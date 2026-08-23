@@ -3138,18 +3138,17 @@ static void test_git_push_explicit_rejects_bad_urls(void)
    setup_git_repo();
    assert(system("git checkout -q -b rej-feature") == 0);
 
-   const char *bad_urls[] = {
-       "/tmp/local.git",
-       "file:///tmp/foo",
-       "/absolute/path/to/repo.git",
-       "https://github.com.evil.com/acme/widgets",
-       "https://github.com.evil/acme/widgets",
-       "https://user@github.com/acme/widgets.git",
-       "https://token:hunter2@github.com/acme/widgets",
-       "https://github.com/acme", /* missing repo */
-       "git@evil.com:acme/widgets.git",
-       "-o",
-       NULL};
+   const char *bad_urls[] = {"/tmp/local.git",
+                             "file:///tmp/foo",
+                             "/absolute/path/to/repo.git",
+                             "https://github.com.evil.com/acme/widgets",
+                             "https://github.com.evil/acme/widgets",
+                             "https://user@github.com/acme/widgets.git",
+                             "https://token:hunter2@github.com/acme/widgets",
+                             "https://github.com/acme", /* missing repo */
+                             "git@evil.com:acme/widgets.git",
+                             "-o",
+                             NULL};
    for (int i = 0; bad_urls[i]; i++)
    {
       cJSON *args = cJSON_CreateObject();
@@ -3170,9 +3169,8 @@ static void test_git_push_explicit_builder(void)
    char cmd[2048];
 
    /* Canonical URL and refspec, no -u */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "spy-feature",
-                                              0, 0) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 0, 0) == 0);
    assert(strstr(cmd, "https://github.com/acme/widgets.git") != NULL);
    assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
    assert(strstr(cmd, "-u") == NULL);
@@ -3180,26 +3178,23 @@ static void test_git_push_explicit_builder(void)
    assert(strstr(cmd, "2>&1") != NULL);
 
    /* Force flag – generic lease, no tags, no forced tag refspec */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "spy-feature",
-                                              1, 0) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 1, 0) == 0);
    assert(strstr(cmd, "--force-with-lease") != NULL);
    assert(strstr(cmd, "--tags") == NULL);
    assert(strstr(cmd, "+refs/tags/*:refs/tags/*") == NULL);
    assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
 
    /* Tags flag – generic --tags, no lease, no forced tag refspec */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "spy-feature",
-                                              0, 1) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 0, 1) == 0);
    assert(strstr(cmd, "--tags") != NULL);
    assert(strstr(cmd, "--force-with-lease") == NULL);
    assert(strstr(cmd, "+refs/tags/*:refs/tags/*") == NULL);
 
    /* Both flags – branch-scoped lease + forced tag refspec, no generic --tags or bare --force */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "spy-feature",
-                                              1, 1) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 1, 1) == 0);
    assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
    assert(strstr(cmd, "spy-feature") != NULL);
    assert(strstr(cmd, "+refs/tags/*:refs/tags/*") != NULL);
@@ -3219,9 +3214,8 @@ static void test_git_push_explicit_builder(void)
    assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
 
    /* Branch shell escaping: single quote in branch name */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "a'b", 0,
-                                              0) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "a'b", 0, 0) == 0);
    /* shell_escape turns ' into '\'' -> command must contain that escaped sequence */
    assert(strstr(cmd, "'\\''") != NULL);
    assert(strstr(cmd, "a'b:a'b") == NULL);
@@ -3234,9 +3228,8 @@ static void test_git_push_explicit_builder(void)
    assert(strstr(cmd, "'my branch; rm -rf /:my branch; rm -rf /'") != NULL);
 
    /* Branch escaping remains safe in scoped lease and tag refspec (force+tags) */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "a'b", 1,
-                                              1) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "a'b", 1, 1) == 0);
    assert(strstr(cmd, "'\\''") != NULL);
    assert(strstr(cmd, "a'b:a'b") == NULL);
    assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
@@ -3255,38 +3248,32 @@ static void test_git_push_explicit_builder(void)
    assert(strstr(cmd, "my branch; rm -rf /") != NULL);
 
    /* URL shell escaping: single quote in canonical URL */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/wi'd.git", "branch", 0,
-                                              0) == 0);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), "https://github.com/acme/wi'd.git",
+                                              "branch", 0, 0) == 0);
    assert(strstr(cmd, "'\\''") != NULL);
 
    /* URL with space (should be shell-escaped but still quoted) */
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/with space.git", "branch",
-                                              0, 0) == 0);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/with space.git", "branch", 0, 0) == 0);
    assert(strstr(cmd, "with space") != NULL);
 
    /* Small-buffer / null / empty input failure */
    char small[10];
-   assert(mcp_git_build_explicit_push_command(small, sizeof(small),
-                                              "https://github.com/acme/widgets.git", "mybranch",
-                                              0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(
+              small, sizeof(small), "https://github.com/acme/widgets.git", "mybranch", 0, 0) == -1);
    char tiny[20];
-   assert(mcp_git_build_explicit_push_command(tiny, sizeof(tiny),
-                                              "https://github.com/acme/widgets.git", "mybranch",
-                                              0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(
+              tiny, sizeof(tiny), "https://github.com/acme/widgets.git", "mybranch", 0, 0) == -1);
    assert(mcp_git_build_explicit_push_command(NULL, 0, "https://github.com/acme/widgets.git",
                                               "mybranch", 0, 0) == -1);
    assert(mcp_git_build_explicit_push_command(cmd, 0, "https://github.com/acme/widgets.git",
                                               "mybranch", 0, 0) == -1);
    assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), NULL, "mybranch", 0, 0) == -1);
    assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), "", "mybranch", 0, 0) == -1);
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", NULL, 0,
-                                              0) == -1);
-   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
-                                              "https://github.com/acme/widgets.git", "", 0,
-                                              0) == -1);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", NULL, 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "", 0, 0) == -1);
 }
 
 static void test_git_push_mirror_rejects_new_options(void)

@@ -449,7 +449,8 @@ int git_pr_https_origin_url(const char *repo_dir, char *out, size_t out_cap, cha
    return 0;
 }
 
-int git_pr_canonical_github_url(const char *url, char *out, size_t out_cap, char *err, size_t errlen)
+int git_pr_canonical_github_url(const char *url, char *out, size_t out_cap, char *err,
+                                size_t errlen)
 {
    if (out && out_cap)
       out[0] = '\0';

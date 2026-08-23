@@ -327,24 +327,11 @@ def go_process_shared_sources(module_id: str) -> list[str]:
     """
     if module_id not in {"delegates", "roundtable"}:
         return []
-    sources = [
+    return sorted(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "server-go/delegate").glob("*.go")
         if not path.name.endswith("_test.go")
-    ]
-    if module_id == "roundtable":
-        sources.extend(
-            path.relative_to(ROOT).as_posix()
-            for path in (ROOT / "server-go/modules/delegates").glob("*.go")
-            if not path.name.endswith("_test.go")
-        )
-    if module_id == "delegates":
-        sources.extend(
-            path.relative_to(ROOT).as_posix()
-            for path in (ROOT / "server-go/modules/delegates/testdata").glob("*")
-            if path.is_file()
-        )
-    return sorted(sources)
+    )
 
 
 def go_xsys_version() -> str:

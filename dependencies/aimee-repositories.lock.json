@@ -29,13 +29,13 @@
       "repository": "https://github.com/RakuenSoftware/aimee-module-config.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "2c641ee15ba9fdc5cf146455939707a85eea1bae",
+      "commit": "67f8e5c072e6021bd6d0f79cf8bbc579a24fc585",
       "execution": "core",
       "placements": [
         "server",
         "kb"
       ],
-      "source_sha256": "11bac56c658e16e3ccf543b3acf978f8839a09e38b4d7447de28952ade4e2a0e"
+      "source_sha256": "8f46b0580267929b00c13f9fdd7cf71c75b43857f9c6f7b9c474235b7796144d"
     },
     {
       "id": "ir",
@@ -161,12 +161,12 @@
       "repository": "https://github.com/RakuenSoftware/aimee-module-delegates.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "d01ca6cd991d3001cade7b013c858817bfc2253f",
+      "commit": "90e35dc986e0d40ba6edb690aba19dff04282a70",
       "execution": "process",
       "placements": [
         "server"
       ],
-      "source_sha256": "fcc97ee43b5aa0ffe85e790629750d80c2dac49f67649ed240ef6f73cc9d70fa",
+      "source_sha256": "5b98ddfc1048cc26be0e1d75a14378f4cf3a7cb208bad43f2e4a0926d2736cb8",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 10,
@@ -387,12 +387,12 @@
       "repository": "https://github.com/RakuenSoftware/aimee-module-roundtable.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "26ef3eac503bf016a189ceeed19c73352d73dd36",
+      "commit": "9528fe662d24d5bae6454c0249ba8927b27b92b2",
       "execution": "process",
       "placements": [
         "server"
       ],
-      "source_sha256": "6a702d27d826174c4d881b5500dde628c6a6aed8e60f786a297564ee7cee3c62",
+      "source_sha256": "7f631a842b1d36300f639701a614ebb53ec5d53422d41f3e20e55ff83a5266e7",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 21,

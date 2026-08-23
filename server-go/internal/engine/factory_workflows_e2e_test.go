@@ -293,8 +293,8 @@ func TestQuickChangeUsesZeroPremiumCalls(t *testing.T) {
 			t.Fatalf("quick-change dispatched %s %d times, want 0", name, calls)
 		}
 	}
-	if calls := agents.delegateCalls("deepseek"); calls != 1 {
-		t.Fatalf("deepseek implemented %d times, want 1", calls)
+	if calls := agents.delegateCalls("muse"); calls != 1 {
+		t.Fatalf("muse implemented %d times, want 1", calls)
 	}
 	if calls := agents.delegateCalls("luna"); calls != 2 {
 		t.Fatalf("luna prepared+reviewed %d times, want 2", calls)
@@ -356,8 +356,8 @@ func TestRoutineVerifierFailureRepairsWithoutPremium(t *testing.T) {
 	if calls := agents.delegateCalls("sol"); calls != 0 {
 		t.Fatalf("routine verifier failure dispatched sol %d times", calls)
 	}
-	if calls := agents.delegateCalls("deepseek"); calls < 2 {
-		t.Fatalf("deepseek repaired %d times, want at least 2 (initial + repair)", calls)
+	if calls := agents.delegateCalls("muse"); calls < 2 {
+		t.Fatalf("muse repaired %d times, want at least 2 (initial + repair)", calls)
 	}
 }
 
@@ -371,8 +371,8 @@ func TestRoutineReviewFindingsReturnToImplementerWithoutPremium(t *testing.T) {
 	if calls := agents.delegateCalls("sol"); calls != 0 {
 		t.Fatalf("routine review finding dispatched sol %d times", calls)
 	}
-	if calls := agents.delegateCalls("deepseek"); calls < 2 {
-		t.Fatalf("deepseek repaired %d times, want at least 2", calls)
+	if calls := agents.delegateCalls("muse"); calls < 2 {
+		t.Fatalf("muse repaired %d times, want at least 2", calls)
 	}
 }
 
@@ -556,7 +556,7 @@ func TestProWorkflowSolDiscardsGeminiFalsePositives(t *testing.T) {
 	agents := &factoryAgents{reviews: map[string][]string{"antigravity": {reviewChanges("")}}}
 	run := startFactoryWorkflow(t, "orchestrated-change-pro", agents, nil)
 	run.waitFor(t, "active", "human_gate")
-	if calls := agents.delegateCalls("deepseek"); calls != 1 {
+	if calls := agents.delegateCalls("muse"); calls != 1 {
 		t.Fatalf("discarded finding still triggered %d implementations, want 1", calls)
 	}
 	verifyPromptSeen := false
@@ -581,7 +581,7 @@ func TestProWorkflowSolDiscardsGeminiFalsePositives(t *testing.T) {
 }
 
 func TestProWorkflowSolConfirmedFindingsDriveRepair(t *testing.T) {
-	// Gemini finds a problem, sol confirms it (returns changes), deepseek
+	// Gemini finds a problem, sol confirms it (returns changes), muse
 	// repairs, and the repaired diff climbs the whole ladder again before the
 	// PR opens.
 	agents := &factoryAgents{reviews: map[string][]string{
@@ -600,8 +600,8 @@ func TestProWorkflowSolConfirmedFindingsDriveRepair(t *testing.T) {
 			t.Fatalf("review ladder = %v, want %v", got, want)
 		}
 	}
-	if calls := agents.delegateCalls("deepseek"); calls != 2 {
-		t.Fatalf("deepseek implemented %d times, want 2 (initial + confirmed-finding repair)", calls)
+	if calls := agents.delegateCalls("muse"); calls != 2 {
+		t.Fatalf("muse implemented %d times, want 2 (initial + confirmed-finding repair)", calls)
 	}
 	if count := run.premiumCalls(t); count != 1 {
 		t.Fatalf("repair loop changed the premium ledger: %d, want 1", count)
@@ -610,12 +610,12 @@ func TestProWorkflowSolConfirmedFindingsDriveRepair(t *testing.T) {
 	// job, and the broad implement-the-plan framing must be gone.
 	var implPrompts []string
 	for _, request := range agents.recorded() {
-		if request.Delegate == "deepseek" {
+		if request.Delegate == "muse" {
 			implPrompts = append(implPrompts, request.Prompt)
 		}
 	}
 	if len(implPrompts) != 2 {
-		t.Fatalf("recorded %d deepseek prompts, want 2", len(implPrompts))
+		t.Fatalf("recorded %d muse prompts, want 2", len(implPrompts))
 	}
 	if !strings.Contains(implPrompts[0], "Implement the complete approved task") {
 		t.Fatalf("initial dispatch lost the implementation framing:\n%s", implPrompts[0])
@@ -648,8 +648,8 @@ func TestProWorkflowSolOwnFindingsRestartTheLadder(t *testing.T) {
 			t.Fatalf("review ladder = %v, want %v", got, want)
 		}
 	}
-	if calls := agents.delegateCalls("deepseek"); calls != 2 {
-		t.Fatalf("deepseek implemented %d times, want 2", calls)
+	if calls := agents.delegateCalls("muse"); calls != 2 {
+		t.Fatalf("muse implemented %d times, want 2", calls)
 	}
 	if calls := agents.delegateCalls("sol"); calls != 0 {
 		t.Fatalf("the ledgered sol escalation seat ran %d times, want 0", calls)
@@ -721,7 +721,7 @@ func TestReviewApproveWithNitsAdvancesAndRecordsFeedback(t *testing.T) {
 	run := startFactoryWorkflow(t, "quick-change", agents, nil)
 	run.waitFor(t, "active", "human_gate")
 	// The nit did not hold the gate: no repair round happened.
-	if calls := agents.delegateCalls("deepseek"); calls != 1 {
+	if calls := agents.delegateCalls("muse"); calls != 1 {
 		t.Fatalf("a nit triggered %d implementations, want 1", calls)
 	}
 	// But the commentary survived as recorded feedback for delivery surfaces.
@@ -794,12 +794,12 @@ func TestHumanGateChangesDecisionRoutesFindingsToImplementer(t *testing.T) {
 		t.Fatal(err)
 	}
 	item = run.waitFor(t, "active", "human_gate")
-	if calls := agents.delegateCalls("deepseek"); calls != 2 {
-		t.Fatalf("deepseek ran %d times, want 2 (initial + human-requested repair)", calls)
+	if calls := agents.delegateCalls("muse"); calls != 2 {
+		t.Fatalf("muse ran %d times, want 2 (initial + human-requested repair)", calls)
 	}
 	var repairPrompt string
 	for _, request := range agents.recorded() {
-		if request.Delegate == "deepseek" {
+		if request.Delegate == "muse" {
 			repairPrompt = request.Prompt
 		}
 	}

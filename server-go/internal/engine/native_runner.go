@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	delegateapi "github.com/JBailes/aimee/server-go/delegate"
 	"github.com/JBailes/aimee/server-go/internal/db1"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
 	roundtablecfg "github.com/JBailes/aimee/server-go/modules/roundtable/panel"
@@ -167,10 +168,12 @@ func (r *NativeRunner) applyDelegateAlias(itemID string, request *DelegateReques
 		return
 	}
 	key := strings.ToLower(strings.TrimSpace(request.Delegate))
-	if config, err := r.artifacts.RunConfig(itemID); err == nil {
-		if to, ok := config.DelegateAliases[key]; ok && to != "" {
-			request.Delegate = to
-			return
+	if r.artifacts != nil {
+		if config, err := r.artifacts.RunConfig(itemID); err == nil {
+			if to, ok := config.DelegateAliases[key]; ok && to != "" {
+				request.Delegate = to
+				return
+			}
 		}
 	}
 	if to, ok := r.aliases[key]; ok {
@@ -824,6 +827,25 @@ func packetImplementationKind(item db1.WorkItem, proposal string) (string, error
 	return "general", nil
 }
 
+func isMutateAvailabilityFallback(class delegateapi.AvailabilityClass) bool {
+	switch class {
+	case delegateapi.AvailabilityClassQuotaRateLimit, delegateapi.AvailabilityClassCapacity,
+		delegateapi.AvailabilityClassCapacityDeadline, delegateapi.AvailabilityClassAuthenticationSession,
+		delegateapi.AvailabilityClassProviderCLIUnavailable, delegateapi.AvailabilityClassStartDeadline:
+		return true
+	default:
+		return false
+	}
+}
+
+func delegateAttemptCost(result DelegateResult, err error) (float64, bool) {
+	var exec *delegateapi.DelegateExecutionError
+	if errors.As(err, &exec) {
+		return exec.CostUSD, !exec.CostKnown
+	}
+	return result.CostUSD, result.CostUnknown
+}
+
 // repairDelegatePrompt frames a review-driven repair round as a bounded task.
 // Small implementation models execute best against a closed instruction set:
 // re-sending the full "implement the plan" framing on a repair invites a
@@ -844,9 +866,12 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		if err != nil {
 			return StepResult{}, err
 		}
-		persona = "engineer"
 		if kind == "ui" {
+			delegate = "opus-ui"
 			persona = "ui"
+		} else {
+			delegate = "muse"
+			persona = "engineer"
 		}
 	}
 	workdir, branch, err := r.worktrees.Ensure(ctx, req.WorkItem, req.WorkItem.ParentID == "")
@@ -963,7 +988,49 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	baseHead, baseHeadErr := gitText(ctx, workdir, "rev-parse", "HEAD")
 	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: delegate, Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 	if err != nil {
-		return StepResult{}, err
+		effectiveAvail := result.AvailabilityClass
+		if effectiveAvail == "" {
+			effectiveAvail = delegateapi.AvailabilityClassOf(err)
+		}
+		effectiveStarted := result.ResponseStarted
+		if !effectiveStarted {
+			var execErr *delegateapi.DelegateExecutionError
+			if errors.As(err, &execErr) && execErr.ResponseStarted {
+				effectiveStarted = true
+			}
+		}
+		if !docs && delegate == "muse" && !req.ReplayOnly && !effectiveStarted && isMutateAvailabilityFallback(effectiveAvail) {
+			primaryCost, primaryUnknown := delegateAttemptCost(result, err)
+			lunaResult, lunaErr := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: "luna", Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
+			if lunaErr != nil {
+				lunaCost, lunaUnknown := delegateAttemptCost(lunaResult, lunaErr)
+				combinedCost := cost + primaryCost + lunaCost
+				combinedUnknown := costUnknown || primaryUnknown || lunaUnknown
+				lunaAvail := delegateapi.AvailabilityClassOf(lunaErr)
+				if lunaAvail == "" {
+					lunaAvail = lunaResult.AvailabilityClass
+				}
+				lunaStarted := lunaResult.ResponseStarted
+				var lunaExec *delegateapi.DelegateExecutionError
+				if !lunaStarted && errors.As(lunaErr, &lunaExec) {
+					lunaStarted = lunaExec.ResponseStarted
+				}
+				return StepResult{}, &delegateapi.DelegateExecutionError{
+					Err:               lunaErr,
+					Dispatched:        true,
+					CostKnown:         !combinedUnknown,
+					CostUSD:           combinedCost,
+					AvailabilityClass: lunaAvail,
+					ResponseStarted:   lunaStarted,
+				}
+			}
+			cost += primaryCost
+			costUnknown = costUnknown || primaryUnknown
+			result = lunaResult
+			err = nil
+		} else {
+			return StepResult{}, err
+		}
 	}
 	cost += result.CostUSD
 	costUnknown = costUnknown || result.CostUnknown

@@ -1576,15 +1576,206 @@ func TestImplementationKindRoutesBeforeDispatch(t *testing.T) {
 	agents := &rejectDelegateAgents{}
 	runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
 	for _, test := range []struct {
-		name    string
-		kind    string
-		persona string
+		name         string
+		version      int
+		proposal     string
+		wantDelegate string
+		wantPersona  string
 	}{
-		{name: "general", kind: "general", persona: "engineer"},
-		{name: "ui", kind: "ui", persona: "ui"},
+		{name: "general", version: 2, proposal: `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`, wantDelegate: "muse", wantPersona: "engineer"},
+		{name: "ui", version: 2, proposal: `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"ui"}`, wantDelegate: "opus-ui", wantPersona: "ui"},
+		{name: "legacy", version: 0, proposal: "not a packet", wantDelegate: "muse", wantPersona: "engineer"},
+		{name: "v1", version: 1, proposal: "not a packet", wantDelegate: "muse", wantPersona: "engineer"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			id := "wi_route_" + test.name
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
+				ID: id, Repo: repo, ProposalPath: id, WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: test.version,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = runner.mutate(t.Context(), StepRequest{
+				WorkItem: item,
+				Node:     wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal: test.proposal,
+			}, false)
+			if err == nil {
+				t.Fatal("expected recording delegate failure")
+			}
+			if agents.last.Persona != test.wantPersona || agents.last.Delegate != test.wantDelegate {
+				t.Fatalf("dispatch=%+v err=%v, want persona=%q delegate=%q", agents.last, err, test.wantPersona, test.wantDelegate)
+			}
+		})
+	}
+}
+
+type mutateFallbackAgents struct {
+	mu       sync.Mutex
+	requests []DelegateRequest
+	avail    delegate.AvailabilityClass
+	started  bool
+	costs    []float64
+	unknowns []bool
+	errs     []error
+}
+
+func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) (DelegateResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	idx := len(a.requests)
+	a.requests = append(a.requests, req)
+	cost := 0.0
+	unknown := false
+	var avail delegate.AvailabilityClass
+	started := a.started
+	var err error
+	if idx < len(a.costs) {
+		cost = a.costs[idx]
+	}
+	if idx < len(a.unknowns) {
+		unknown = a.unknowns[idx]
+	}
+	if idx == 0 {
+		avail = a.avail
+	}
+	if idx < len(a.errs) {
+		err = a.errs[idx]
+	}
+	result := DelegateResult{AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
+	if err != nil {
+		return result, err
+	}
+	return DelegateResult{Response: "ok", CostUSD: cost, CostUnknown: unknown}, nil
+}
+
+func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {
+	classes := []delegate.AvailabilityClass{
+		delegate.AvailabilityClassQuotaRateLimit,
+		delegate.AvailabilityClassCapacity,
+		delegate.AvailabilityClassCapacityDeadline,
+		delegate.AvailabilityClassAuthenticationSession,
+		delegate.AvailabilityClassProviderCLIUnavailable,
+		delegate.AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(string(class), func(t *testing.T) {
+			repo, _ := setupSliceRepo(t)
+			gitRun(t, repo, "remote", "add", "origin", repo)
+			gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+			gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+			store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agents := &mutateFallbackAgents{
+				avail:    class,
+				started:  false,
+				costs:    []float64{1.5, 2.5},
+				unknowns: []bool{false, false},
+				errs:     []error{errors.New("muse unavailable"), errors.New("luna also unavailable")},
+			}
+			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
+				ID: "wi_fallback_" + string(class), Repo: repo, ProposalPath: "p", WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), "wi_fallback_"+string(class))
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
+			_, err = runner.mutate(t.Context(), StepRequest{
+				WorkItem: item,
+				Node:     wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal: proposal,
+			}, false)
+			if err == nil {
+				t.Fatal("expected fallback error")
+			}
+			agents.mu.Lock()
+			reqs := append([]DelegateRequest(nil), agents.requests...)
+			agents.mu.Unlock()
+			if len(reqs) != 2 {
+				t.Fatalf("requests=%d, want 2 for class %q", len(reqs), class)
+			}
+			if reqs[0].Delegate != "muse" || reqs[0].Persona != "engineer" {
+				t.Fatalf("primary dispatch=%+v, want muse/engineer", reqs[0])
+			}
+			if reqs[1].Delegate != "luna" || reqs[1].Persona != "engineer" {
+				t.Fatalf("fallback dispatch=%+v, want luna/engineer", reqs[1])
+			}
+			if reqs[0].Prompt != reqs[1].Prompt || reqs[0].Workdir != reqs[1].Workdir || reqs[0].Role != reqs[1].Role || reqs[0].Tools != reqs[1].Tools {
+				t.Fatalf("luna request not identical except delegate: primary=%+v fallback=%+v", reqs[0], reqs[1])
+			}
+			var execErr *delegate.DelegateExecutionError
+			if !errors.As(err, &execErr) {
+				t.Fatalf("fallback error is not DelegateExecutionError: %v", err)
+			}
+			if execErr.CostUSD != 4.0 {
+				t.Fatalf("combined cost=%v, want 4.0 (1.5+2.5)", execErr.CostUSD)
+			}
+			if execErr.CostKnown == false {
+				t.Fatalf("combined cost should be known when both attempts known")
+			}
+		})
+	}
+}
+
+func TestMuseFallbackNotTriggered(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		avail     delegate.AvailabilityClass
+		started   bool
+		replay    bool
+		wantCalls int
+	}{
+		{name: "unclassified", kind: "general", avail: delegate.AvailabilityClassNone, started: false, replay: false, wantCalls: 1},
+		{name: "response-started", kind: "general", avail: delegate.AvailabilityClassCapacity, started: true, replay: false, wantCalls: 1},
+		{name: "replay-only", kind: "general", avail: delegate.AvailabilityClassCapacity, started: false, replay: true, wantCalls: 1},
+		{name: "ui-opus", kind: "ui", avail: delegate.AvailabilityClassCapacity, started: false, replay: false, wantCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := setupSliceRepo(t)
+			gitRun(t, repo, "remote", "add", "origin", repo)
+			gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+			gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+			store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agents := &mutateFallbackAgents{
+				avail:   tc.avail,
+				started: tc.started,
+				costs:   []float64{1.0},
+				errs:    []error{errors.New("primary failed")},
+			}
+			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+			id := "wi_nofallback_" + tc.name
 			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
 				ID: id, Repo: repo, ProposalPath: id, WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2,
 			}); err != nil {
@@ -1594,17 +1785,103 @@ func TestImplementationKindRoutesBeforeDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"` + test.kind + `"}`
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"` + tc.kind + `"}`
 			_, err = runner.mutate(t.Context(), StepRequest{
-				WorkItem: item,
-				Node:     wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
-				Proposal: proposal,
+				WorkItem:   item,
+				Node:       wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal:   proposal,
+				ReplayOnly: tc.replay,
 			}, false)
 			if err == nil {
-				t.Fatal("expected recording delegate failure")
+				t.Fatal("expected primary error")
 			}
-			if agents.last.Persona != test.persona || agents.last.Delegate != "configured" {
-				t.Fatalf("dispatch=%+v err=%v, want persona=%q delegate=configured", agents.last, err, test.persona)
+			agents.mu.Lock()
+			calls := len(agents.requests)
+			agents.mu.Unlock()
+			if calls != tc.wantCalls {
+				t.Fatalf("calls=%d, want %d for case %q", calls, tc.wantCalls, tc.name)
+			}
+			if tc.name == "ui-opus" && agents.requests[0].Delegate != "opus-ui" {
+				t.Fatalf("ui dispatch=%+v, want opus-ui", agents.requests[0])
+			}
+			if tc.name != "ui-opus" && tc.name != "unclassified" && agents.requests[0].Delegate != "muse" {
+				t.Fatalf("dispatch=%+v, want muse", agents.requests[0])
+			}
+		})
+	}
+}
+
+func TestMuseFallbackCostUnknownPropagates(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		unknowns    []bool
+		execPrimary bool
+	}{
+		{name: "primary-result-unknown", unknowns: []bool{true, false}},
+		{name: "luna-result-unknown", unknowns: []bool{false, true}},
+		{name: "primary-exec-zero-unknown", unknowns: []bool{false, false}, execPrimary: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := setupSliceRepo(t)
+			gitRun(t, repo, "remote", "add", "origin", repo)
+			gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+			gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+			store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var errs []error
+			if tc.execPrimary {
+				errs = []error{
+					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable"), CostUSD: 0, CostKnown: false, AvailabilityClass: delegate.AvailabilityClassCapacity},
+					errors.New("luna also unavailable"),
+				}
+			} else {
+				errs = []error{errors.New("muse unavailable"), errors.New("luna also unavailable")}
+			}
+			costs := []float64{1.2, 2.3}
+			if tc.execPrimary {
+				costs[0] = 0
+			}
+			agents := &mutateFallbackAgents{
+				avail:    delegate.AvailabilityClassCapacity,
+				started:  false,
+				costs:    costs,
+				unknowns: tc.unknowns,
+				errs:     errs,
+			}
+			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+			id := "wi_fallback_unknown_" + tc.name
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: id, Repo: repo, ProposalPath: "p", WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
+			_, err = runner.mutate(t.Context(), StepRequest{WorkItem: item, Node: wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}}, Proposal: proposal}, false)
+			if err == nil {
+				t.Fatal("expected fallback error")
+			}
+			var execErr *delegate.DelegateExecutionError
+			if !errors.As(err, &execErr) {
+				t.Fatalf("fallback error not DelegateExecutionError: %v", err)
+			}
+			if execErr.CostKnown {
+				t.Fatalf("CostKnown=true for %q, want false when either attempt unknown", tc.name)
+			}
+			if !errors.Is(execErr.Err, errs[1]) {
+				t.Fatalf("fallback Err does not preserve lunaErr for errors.Is: %v", execErr.Err)
 			}
 		})
 	}

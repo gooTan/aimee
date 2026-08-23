@@ -6,24 +6,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JBailes/aimee/server-go/delegate"
 	roundtablecfg "github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
 type recordingPlaneAgents struct {
-	requests []DelegateRequest
-	err      error
+	requests     []DelegateRequest
+	err          error
+	availability delegate.AvailabilityClass
 }
 
 func (a *recordingPlaneAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
 	a.requests = append(a.requests, request)
-	return DelegateResult{Response: "ok", Participant: "p"}, a.err
+	return DelegateResult{Response: "ok", Participant: "p", AvailabilityClass: a.availability}, a.err
 }
 
 func (a *recordingPlaneAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
 	a.requests = append(a.requests, requests...)
 	out := make([]DelegateGroupResult, len(requests))
 	for i := range out {
-		out[i] = DelegateGroupResult{Response: "ok", Participant: "p", Err: a.err}
+		out[i] = DelegateGroupResult{Response: "ok", Participant: "p", AvailabilityClass: a.availability, Err: a.err}
 	}
 	return out
 }
@@ -85,6 +87,17 @@ func TestPanelDelegatesClassifyAndRedactTheirFailures(t *testing.T) {
 	}
 	if result.FailureDetail == "" {
 		t.Fatal("failure reached the panel with no detail to report")
+	}
+}
+
+func TestPanelDelegatesForwardAvailabilityClass(t *testing.T) {
+	agents := &recordingPlaneAgents{err: errors.New("provider unavailable"), availability: delegate.AvailabilityClassProviderUnavailable}
+	plane := panelDelegates{runner: &NativeRunner{agents: agents}}
+	if got := plane.Group(context.Background(), testSeatRun(), []roundtablecfg.SeatRequest{{Persona: "qa"}})[0].AvailabilityClass; got != delegate.AvailabilityClassProviderUnavailable {
+		t.Fatalf("group lost availability class: %q", got)
+	}
+	if got := plane.One(context.Background(), testSeatRun(), roundtablecfg.SeatRequest{Persona: "qa"}).AvailabilityClass; got != delegate.AvailabilityClassProviderUnavailable {
+		t.Fatalf("single lost availability class: %q", got)
 	}
 }
 

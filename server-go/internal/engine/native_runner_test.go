@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JBailes/aimee/server-go/delegate"
 	appconfig "github.com/JBailes/aimee/server-go/internal/config"
 	"github.com/JBailes/aimee/server-go/internal/db1"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
@@ -447,7 +448,7 @@ func testDelegateGroup(ctx context.Context, requests []DelegateRequest, run func
 			if err == nil && requests[i].Role == roundtableDelegateRole {
 				result.Response = withTestRoundtableIdentity(result.Response, requests[i])
 			}
-			out[i].Response, out[i].CostUSD, out[i].Err = result.Response, result.CostUSD, err
+			out[i].Response, out[i].CostUSD, out[i].AvailabilityClass, out[i].Err = result.Response, result.CostUSD, result.AvailabilityClass, err
 			if out[i].Err == nil {
 				out[i].Participant = fmt.Sprintf("test-participant:%d", i)
 			}
@@ -545,6 +546,8 @@ type deadlineDiscussionAgents struct{}
 
 type chairmanFailureAgents struct{}
 
+type optionalFableFailureAgents struct{}
+
 type chairmanDeadlineAgents struct{}
 
 func chairmanApprovalFor(request DelegateRequest) string {
@@ -593,7 +596,14 @@ func (deadlineDiscussionAgents) Delegate(ctx context.Context, request DelegateRe
 
 func (chairmanFailureAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
 	if request.Persona == "chairman" {
-		return DelegateResult{}, errors.New("chairman unavailable")
+		return DelegateResult{AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}, fmt.Errorf("%s chairman unavailable", request.Delegate)
+	}
+	return DelegateResult{Response: `{"artifact_stage":"plan","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`}, nil
+}
+
+func (optionalFableFailureAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
+	if request.Persona == "architect" {
+		return DelegateResult{}, errors.New("fable unavailable")
 	}
 	return DelegateResult{Response: `{"artifact_stage":"plan","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`}, nil
 }
@@ -668,6 +678,10 @@ func (a deadlineDiscussionAgents) DelegateGroup(ctx context.Context, requests []
 }
 
 func (a chairmanFailureAgents) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	return testDelegateGroup(ctx, requests, a.Delegate)
+}
+
+func (a optionalFableFailureAgents) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
 	return testDelegateGroup(ctx, requests, a.Delegate)
 }
 
@@ -817,9 +831,36 @@ func TestConfiguredRoundtableHonorsMinimumWhenASeatIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestConfiguredRoundtableOptionalSeatFailureDoesNotBlockRequiredQuorum(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"name":"default","seats":[{"model":"sol","persona":"reviewer"},{"model":"antigravity","persona":"reviewer"},{"model":"fable","persona":"architect","optional":true}],"min_successful":2}`
+	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := roundtablecfg.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := withPanel(&NativeRunner{agents: optionalFableFailureAgents{}}, store)
+	reviewed := wfe.Artifact{Type: "plan", Content: []byte("complete implementation plan")}
+	reviewed.Hash = wfe.Hash(reviewed.Content)
+	result, err := runner.roundtable(context.Background(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi", Repo: "/repo", Worktree: "/worktree"},
+		Node:     wfe.Node{ID: "gate", Block: "gate.roundtable", Params: map[string]any{"roundtable": "default"}},
+		Proposal: "implement the requested change", Inputs: map[string]wfe.Artifact{"src": reviewed},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced || result.Roundtable == nil || !result.Roundtable.Approved || !result.Roundtable.Degraded ||
+		result.Roundtable.ParticipantsTotal != 3 || result.Roundtable.ParticipantsUsed != 2 || result.Roundtable.ParticipantsFailed != 1 {
+		t.Fatalf("optional seat failure blocked required quorum: %+v", result)
+	}
+}
+
 func TestConfiguredRoundtableUsesOverallDeadlineWithoutCancellingSlowHealthySeat(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"minimax","persona":"qa"}],"min_successful":1,"discussion":true,"chairman":"codex","chairman_enabled":true,"deadline_ms":120}`
+	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"minimax","persona":"qa"}],"min_successful":1,"discussion":true,"chairman":"codex","chairman_fallback":"minimax","chairman_enabled":true,"deadline_ms":120}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +940,7 @@ func TestConfiguredRoundtableReportsEveryPhaseDeadline(t *testing.T) {
 		},
 		{
 			name:      "chairman",
-			preset:    `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_enabled":true,"deadline_ms":80}`,
+			preset:    `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_fallback":"codex","chairman_enabled":true,"deadline_ms":80}`,
 			agents:    chairmanDeadlineAgents{},
 			wantPause: "roundtable_chairman",
 		},
@@ -934,7 +975,7 @@ func TestConfiguredRoundtableReportsEveryPhaseDeadline(t *testing.T) {
 
 func TestConfiguredRoundtableChairmanFailureIsVisiblyDegraded(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"kimi","chairman_enabled":true,"deadline_ms":100}`
+	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"kimi","chairman_fallback":"codex","chairman_enabled":true,"deadline_ms":100}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +994,8 @@ func TestConfiguredRoundtableChairmanFailureIsVisiblyDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != StepPending || result.PauseReason != "roundtable_chairman" || result.Roundtable == nil || !result.Roundtable.Degraded {
+	if result.Status != StepPending || result.PauseReason != "roundtable_chairman" || result.Roundtable == nil || !result.Roundtable.Degraded ||
+		!strings.Contains(result.Detail, "kimi") || !strings.Contains(result.Detail, "codex") {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -973,7 +1015,7 @@ func (a *budgetExhaustionAgents) DelegateGroup(ctx context.Context, requests []D
 
 func TestRoundtableDoesNotLaunchChairmanAfterCostExhaustion(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_enabled":true}`
+	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_fallback":"codex","chairman_enabled":true}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1762,7 +1804,7 @@ func chairmanTestRoundtable(t *testing.T) *roundtablecfg.Store {
 	t.Helper()
 	dir := t.TempDir()
 	body := `{"name":"default","seats":[{"model":"","persona":"qa"},{"model":"","persona":"reviewer"}],` +
-		`"min_successful":2,"chairman":"$random","chairman_enabled":true}`
+		`"min_successful":2,"chairman":"$random","chairman_fallback":"$random","chairman_enabled":true}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

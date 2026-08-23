@@ -151,6 +151,68 @@ func TestDispatchBoundaryClassifiesBusAndReplyFailures(t *testing.T) {
 			t.Fatalf("post-dispatch reply %q classified as %#v", postDispatch, err)
 		}
 	}
+	deadlineCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	deadlineClient := &BusClient{caller: &recordingCaller{}, deadline: time.Second}
+	result, err := deadlineClient.Delegate(deadlineCtx, request)
+	if err == nil || result.AvailabilityClass != AvailabilityClassStartDeadline {
+		t.Fatalf("pre-dispatch deadline was not classified: result=%+v err=%v", result, err)
+	}
+	transportDeadline := &BusClient{caller: &recordingCaller{err: bus.ErrModuleCallDeadline}, deadline: time.Second}
+	result, err = transportDeadline.Delegate(t.Context(), request)
+	if err == nil || result.AvailabilityClass != AvailabilityClassNone {
+		t.Fatalf("post-dispatch reply loss was classified as retryable: result=%+v err=%v", result, err)
+	}
+}
+
+func TestClassifyAvailability(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		began bool
+		want  AvailabilityClass
+	}{
+		{name: "quota", err: errors.New("provider quota exceeded"), want: AvailabilityClassQuotaRateLimit},
+		{name: "rate limit diagnostic", err: errors.New("aimee_err=rate_limit"), want: AvailabilityClassQuotaRateLimit},
+		{name: "capacity", err: ErrDelegateCapacity, want: AvailabilityClassCapacity},
+		{name: "capacity deadline diagnostic", err: errors.New("aimee_err=capacity_deadline"), want: AvailabilityClassCapacity},
+		{name: "authentication", err: errors.New("authentication failed"), want: AvailabilityClassAuthentication},
+		{name: "session outage", err: errors.New("session unavailable"), want: AvailabilityClassAuthentication},
+		{name: "provider", err: errors.New("provider unavailable"), want: AvailabilityClassProviderUnavailable},
+		{name: "missing cli", err: errors.New("no enabled delegate CLI is configured"), want: AvailabilityClassProviderUnavailable},
+		{name: "deadline", err: ErrDelegateExecutionDeadline, want: AvailabilityClassStartDeadline},
+		{name: "response started", err: errors.New("quota exceeded"), began: true},
+		{name: "replay", err: ErrDelegateReplayUnavailable},
+		{name: "terminal", err: ErrDelegateTerminal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyAvailability(tc.err, tc.began); got != tc.want {
+				t.Fatalf("ClassifyAvailability(%v, %v) = %q, want %q", tc.err, tc.began, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDelegateCarriesAvailabilityClass(t *testing.T) {
+	client := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
+		Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}
+	result, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
+	if err == nil || result.AvailabilityClass != AvailabilityClassProviderUnavailable {
+		t.Fatalf("single delegate lost availability class: result=%+v err=%v", result, err)
+	}
+
+	group := &BusClient{caller: &groupRoutingCaller{planError: "quota exceeded"}, deadline: time.Second}
+	results := group.DelegateGroup(t.Context(), []DelegateRequest{{Role: "review", Persona: "qa", Prompt: "review"}})
+	if len(results) != 1 || results[0].AvailabilityClass != AvailabilityClassQuotaRateLimit {
+		t.Fatalf("group planning lost availability class: %+v", results)
+	}
+
+	partial := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
+		Response: "partial output", Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}
+	result, err = partial.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
+	if err == nil || result.AvailabilityClass != AvailabilityClassNone {
+		t.Fatalf("partial response was classified as unavailable: result=%+v err=%v", result, err)
+	}
 }
 
 func TestDelegateGroupPlansDiversityAndKeepsParticipantContinuityLocal(t *testing.T) {

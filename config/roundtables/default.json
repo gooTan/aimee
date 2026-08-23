@@ -1,11 +1,12 @@
 {
   "name": "default",
   "seats": [
-    {"model": "$random", "persona": "architect"},
-    {"model": "$random", "persona": "reviewer"},
-    {"model": "$random", "persona": "qa"}
+    {"model": "sol", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "reviewer"},
+    {"model": "fable", "persona": "architect", "optional": true}
   ],
-  "chairman": "$random",
+  "chairman": "antigravity",
+  "chairman_fallback": "sol",
   "chairman_enabled": true,
   "min_successful": 2,
   "deadline_ms": 600000,

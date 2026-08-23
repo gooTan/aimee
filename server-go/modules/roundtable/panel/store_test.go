@@ -20,7 +20,7 @@ func writePreset(t *testing.T, dir string, p preset) {
 
 func TestConfiguredRoundtablePreservesExactSeatSpecifications(t *testing.T) {
 	dir := t.TempDir()
-	writePreset(t, dir, preset{Name: "large", MinSuccessful: 2, Discussion: true, DeadlineMS: 12345, Chairman: "$random", ChairmanEnabled: true, Seats: []presetSeat{
+	writePreset(t, dir, preset{Name: "large", MinSuccessful: 2, Discussion: true, DeadlineMS: 12345, Chairman: "$random", ChairmanFallback: "codex", ChairmanEnabled: true, Seats: []presetSeat{
 		{Selector: "$random", Persona: "security"},
 		{Selector: "codex", Persona: "qa"},
 		{Selector: "$random", Persona: "architect"},
@@ -30,20 +30,83 @@ func TestConfiguredRoundtablePreservesExactSeatSpecifications(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !panel.Acquired || panel.Name != "large" || len(panel.Seats) != 3 || panel.MinSuccessful != 2 || !panel.Discussion || panel.DeadlineMS != 12345 || !panel.ChairmanEnabled || panel.Chairman != "$random" {
+	if !panel.Acquired || panel.Name != "large" || len(panel.Seats) != 3 || panel.MinSuccessful != 2 || !panel.Discussion || panel.DeadlineMS != 12345 || !panel.ChairmanEnabled || panel.Chairman != "$random" || panel.ChairmanFallback != "codex" {
 		t.Fatalf("panel=%+v", panel)
 	}
-	if panel.Seats[0].Selector != "$random" || panel.Seats[1].Selector != "codex" || panel.Seats[2].Selector != "$random" {
+	if panel.Seats[0].Selector != "$random" || panel.Seats[1].Selector != "codex" || panel.Seats[2].Selector != "$random" || panel.Seats[2].Optional {
 		t.Fatalf("roundtable altered opaque delegate seat specifications: %+v", panel.Seats)
 	}
 }
 
-func TestEnabledChairmanRequiresSpecification(t *testing.T) {
+func TestOptionalSeatsDoNotRaiseDefaultQuorum(t *testing.T) {
 	dir := t.TempDir()
-	writePreset(t, dir, preset{Name: "missing", ChairmanEnabled: true, Seats: []presetSeat{{Selector: "$random"}}})
+	writePreset(t, dir, preset{Name: "optional", Seats: []presetSeat{
+		{Selector: "sol", Persona: "reviewer"},
+		{Selector: "antigravity", Persona: "reviewer"},
+		{Selector: "fable", Persona: "architect", Optional: true},
+	}})
 	store, _ := NewStore(dir)
-	if _, err := store.Resolve("missing", nil, nil); err == nil {
-		t.Fatal("enabled chairman silently accepted without a delegate specification")
+	resolved, err := store.Resolve("optional", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.MinSuccessful != 2 || !resolved.Seats[2].Optional {
+		t.Fatalf("optional seat changed quorum: %+v", resolved)
+	}
+}
+
+func TestMinimumCannotExceedRequiredSeats(t *testing.T) {
+	dir := t.TempDir()
+	writePreset(t, dir, preset{Name: "invalid", MinSuccessful: 2, Seats: []presetSeat{
+		{Selector: "sol"}, {Selector: "fable", Optional: true},
+	}})
+	store, _ := NewStore(dir)
+	if _, err := store.Resolve("invalid", nil, nil); err == nil {
+		t.Fatal("minimum above required seats was accepted")
+	}
+}
+
+func TestOptionalAndChairmanOverlaysPreserveConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	writePreset(t, dir, preset{Name: "overlay", Chairman: " antigravity ", ChairmanFallback: " sol ", ChairmanEnabled: true, Seats: []presetSeat{
+		{Optional: true},
+	}})
+	store, _ := NewStore(dir)
+	resolved, err := store.Resolve("overlay", []string{"reviewer"}, map[string]string{"reviewer": "fable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Seats[0].Persona != "reviewer" || resolved.Seats[0].Selector != "fable" || !resolved.Seats[0].Optional || resolved.Chairman != "antigravity" || resolved.ChairmanFallback != "sol" {
+		t.Fatalf("overlay lost optional or chairman configuration: %+v", resolved)
+	}
+}
+
+func TestEnabledChairmanRequiresSpecification(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		chairman         string
+		chairmanFallback string
+	}{
+		{name: "missing-primary", chairmanFallback: "sol"},
+		{name: "missing-fallback", chairman: "antigravity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writePreset(t, dir, preset{Name: tc.name, Chairman: tc.chairman, ChairmanFallback: tc.chairmanFallback, ChairmanEnabled: true, Seats: []presetSeat{{Selector: "$random"}}})
+			store, _ := NewStore(dir)
+			if _, err := store.Resolve(tc.name, nil, nil); err == nil {
+				t.Fatal("enabled chairman silently accepted without both delegate specifications")
+			}
+		})
+	}
+}
+
+func TestDisabledChairmanDoesNotValidateSelectors(t *testing.T) {
+	dir := t.TempDir()
+	writePreset(t, dir, preset{Name: "disabled", Chairman: "   ", ChairmanFallback: "   ", Seats: []presetSeat{{Selector: "$random"}}})
+	store, _ := NewStore(dir)
+	if _, err := store.Resolve("disabled", nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

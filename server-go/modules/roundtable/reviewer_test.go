@@ -161,7 +161,7 @@ func TestSeatFailureCategoriesNameTheTransportCause(t *testing.T) {
 			t.Fatalf("seatFailureCategory(%v) = %q, want %q", tc.err, got, tc.want)
 		}
 	}
-	result := seatResult("", "", 0, false, delegate.ErrDelegateReplayUnavailable)
+	result := seatResult("", "", 0, false, delegate.AvailabilityClassNone, delegate.ErrDelegateReplayUnavailable)
 	if !result.ReplayLost {
 		t.Fatal("a lost replay was not marked, so the caller would park instead of recovering")
 	}
@@ -170,8 +170,16 @@ func TestSeatFailureCategoriesNameTheTransportCause(t *testing.T) {
 	}
 }
 
+func TestSeatBusForwardsAvailabilityClass(t *testing.T) {
+	result := seatResult("", "", 0, false, delegate.AvailabilityClassProviderUnavailable, errors.New("provider unavailable"))
+	if result.AvailabilityClass != delegate.AvailabilityClassProviderUnavailable || result.ReplayLost {
+		t.Fatalf("availability class was not forwarded independently: %+v", result)
+	}
+}
+
 func TestSeatFailureDetailIsRedacted(t *testing.T) {
 	result := seatResult("", "", 0, false,
+		delegate.AvailabilityClassNone,
 		errorString("launch failed: authorization: bearer sk-live-secret-value"))
 	if strings.Contains(result.FailureDetail, "sk-live-secret-value") {
 		t.Fatalf("credential survived into a durable seat failure: %q", result.FailureDetail)

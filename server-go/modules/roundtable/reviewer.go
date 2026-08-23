@@ -149,9 +149,9 @@ func (s seatBus) request(run panel.Run, seat panel.SeatRequest) delegate.Delegat
 	}
 }
 
-func seatResult(participant, response string, cost float64, costUnknown bool, err error) panel.SeatResult {
+func seatResult(participant, response string, cost float64, costUnknown bool, availability delegate.AvailabilityClass, err error) panel.SeatResult {
 	out := panel.SeatResult{Participant: participant, Response: response,
-		CostUSD: cost, CostUnknown: costUnknown, Err: err}
+		CostUSD: cost, CostUnknown: costUnknown, AvailabilityClass: availability, Err: err}
 	if err == nil {
 		return out
 	}
@@ -201,7 +201,7 @@ func (s seatBus) Group(ctx context.Context, run panel.Run, seats []panel.SeatReq
 		}
 	}
 	for i, call := range s.client.DelegateGroup(ctx, requests) {
-		out[i] = seatResult(call.Participant, call.Response, call.CostUSD, call.CostUnknown, call.Err)
+		out[i] = seatResult(call.Participant, call.Response, call.CostUSD, call.CostUnknown, call.AvailabilityClass, call.Err)
 	}
 	return out
 }
@@ -210,5 +210,5 @@ func (s seatBus) One(ctx context.Context, run panel.Run, seat panel.SeatRequest)
 	request := s.request(run, seat)
 	request.MaxCostUSD = run.CostLimitUSD
 	result, err := s.client.Delegate(ctx, request)
-	return seatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, err)
+	return seatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, result.AvailabilityClass, err)
 }

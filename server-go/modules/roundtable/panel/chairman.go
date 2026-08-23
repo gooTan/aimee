@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/JBailes/aimee/server-go/delegate"
 )
 
 type chairmanPacket struct {
@@ -35,13 +37,88 @@ func chairmanResponseNote(response string) string {
 	return fmt.Sprintf(" (%d bytes, begins %q)", len(trimmed), excerpt)
 }
 
-// runPanelChairman is an optional, single post-synthesis review. The configured
+type chairmanAttemptResult struct {
+	final        panelResponse
+	response     string
+	err          error
+	detail       string
+	availability delegate.AvailabilityClass
+	cost         float64
+	costUnknown  bool
+}
+
+func chairmanAvailabilityAllowed(class delegate.AvailabilityClass) bool {
+	switch class {
+	case delegate.AvailabilityClassQuotaRateLimit, delegate.AvailabilityClassCapacity,
+		delegate.AvailabilityClassAuthentication, delegate.AvailabilityClassProviderUnavailable,
+		delegate.AvailabilityClassStartDeadline:
+		return true
+	default:
+		return false
+	}
+}
+
+func runChairmanAttempt(ctx context.Context, delegates Delegates, run Run, request SeatRequest, reviewed Artifact, artifactStage string) chairmanAttemptResult {
+	result := delegates.One(ctx, run, request)
+	out := chairmanAttemptResult{response: result.Response, err: result.Err,
+		detail: result.FailureDetail, availability: result.AvailabilityClass,
+		cost: result.CostUSD, costUnknown: result.CostUnknown}
+	if result.Err != nil {
+		return out
+	}
+	final, parseErr := parsePanelResponse(result.Response, nil)
+	if parseErr == nil {
+		parseErr = panelVerdictError(final)
+	}
+	if parseErr == nil {
+		out.final = final
+		return out
+	}
+
+	// Malformed output gets one repair attempt. A failure during that repair is
+	// final and must not launch fallback work.
+	repair := request
+	repair.Prompt = panelResponseRepairPrompt(run.ID, reviewed.Hash, artifactStage, result.Response)
+	repair.DurableSlot = request.DurableSlot + ":repair:1"
+	repaired := delegates.One(ctx, run, repair)
+	out.cost += repaired.CostUSD
+	out.costUnknown = out.costUnknown || repaired.CostUnknown
+	if repaired.Err != nil {
+		out.err = repaired.Err
+		out.detail = repaired.FailureDetail
+		out.availability = ""
+		return out
+	}
+	out.response = repaired.Response
+	final, parseErr = parsePanelResponse(repaired.Response, nil)
+	if parseErr == nil {
+		parseErr = panelVerdictError(final)
+	}
+	if parseErr != nil {
+		out.err = fmt.Errorf("chairman returned no structured verdict after repair: %w%s", parseErr, chairmanResponseNote(repaired.Response))
+		out.availability = ""
+		return out
+	}
+	out.final = final
+	return out
+}
+
+func chairmanUnavailableDetail(label string, attempt chairmanAttemptResult) string {
+	class := string(attempt.availability)
+	if class == "" {
+		class = "unclassified"
+	}
+	detail := strings.TrimSpace(attempt.detail)
+	if detail == "" && attempt.err != nil {
+		detail = attempt.err.Error()
+	}
+	return fmt.Sprintf("%s chairman unavailable (%s): %s", label, class, detail)
+}
+
+// RunChairman is an optional, single post-synthesis review. The configured
 // chairman receives the original request, artifact, independent reports, and
-// deterministic feedback, then submits the final structured verdict. Failure is
-// visible to the workflow; there is no roster-wide fallback or fabricated vote.
-// The trailing bool reports a "blocked" verdict: the ORIGINAL REQUEST cannot be
-// implemented as written, so the caller must park for a human instead of looping
-// the author over an artifact that can never satisfy it.
+// deterministic feedback, then submits the final structured verdict. Only an
+// explicit pre-response availability class may launch the configured fallback.
 func RunChairman(ctx context.Context, delegates Delegates, run Run, panel Panel, analysis Analysis, feedback ReviewFeedback, cost float64, costUnknown bool, artifactStage string) (ReviewFeedback, int, float64, bool, string, bool) {
 	reviewed := run.Reviewed
 	if reviewed.Hash == "" {
@@ -58,41 +135,27 @@ func RunChairman(ctx context.Context, delegates Delegates, run Run, panel Panel,
 	request := SeatRequest{Role: delegateRole, Persona: "chairman", Selector: panel.Chairman,
 		Prompt: prompt, Tools: true, MaxTurnsCap: delegateMaxTurnsCap,
 		DurableSlot: chairmanDurableSlot(run), ArtifactStage: artifactStage, ArtifactHash: reviewed.Hash}
-	result := delegates.One(ctx, run, request)
-	err := result.Err
-	cost += result.CostUSD
-	costUnknown = costUnknown || result.CostUnknown
-	if err != nil {
-		return feedback, analysis.Approvals, cost, costUnknown, "chairman failed: " + err.Error(), false
-	}
-	final, parseErr := parsePanelResponse(result.Response, nil)
-	if parseErr == nil {
-		parseErr = panelVerdictError(final)
-	}
-	// An analysis seat gets one repair attempt before its answer is written off.
-	// The chairman had none, so a single unparseable reply discarded the whole
-	// paid panel round and parked the gate for the scheduler to re-run from the
-	// top. Give it the same one attempt, on the same participant.
-	if parseErr != nil {
-		repair := request
-		repair.Prompt = panelResponseRepairPrompt(run.ID, reviewed.Hash, artifactStage, result.Response)
-		repair.DurableSlot = chairmanDurableSlot(run) + ":repair:1"
-		repaired := delegates.One(ctx, run, repair)
-		repairErr := repaired.Err
-		cost += repaired.CostUSD
-		costUnknown = costUnknown || repaired.CostUnknown
-		if repairErr != nil {
-			return feedback, analysis.Approvals, cost, costUnknown, "chairman failed: " + repairErr.Error(), false
-		}
-		final, parseErr = parsePanelResponse(repaired.Response, nil)
-		if parseErr == nil {
-			parseErr = panelVerdictError(final)
-		}
-		if parseErr != nil {
-			return feedback, analysis.Approvals, cost, costUnknown,
-				"chairman returned no structured verdict after repair: " + parseErr.Error() + chairmanResponseNote(repaired.Response), false
+	attempt := runChairmanAttempt(ctx, delegates, run, request, reviewed, artifactStage)
+	cost += attempt.cost
+	costUnknown = costUnknown || attempt.costUnknown
+	if attempt.err != nil {
+		if chairmanAvailabilityAllowed(attempt.availability) && !run.ReplayOnly && strings.TrimSpace(panel.ChairmanFallback) != "" {
+			fallback := request
+			fallback.Selector = panel.ChairmanFallback
+			fallback.DurableSlot = chairmanDurableSlot(run) + ":fallback"
+			fallbackAttempt := runChairmanAttempt(ctx, delegates, run, fallback, reviewed, artifactStage)
+			cost += fallbackAttempt.cost
+			costUnknown = costUnknown || fallbackAttempt.costUnknown
+			if fallbackAttempt.err != nil {
+				return feedback, analysis.Approvals, cost, costUnknown,
+					chairmanUnavailableDetail("primary", attempt) + "; " + chairmanUnavailableDetail("fallback", fallbackAttempt), false
+			}
+			attempt = fallbackAttempt
+		} else {
+			return feedback, analysis.Approvals, cost, costUnknown, "chairman failed: " + attempt.err.Error(), false
 		}
 	}
+	final := attempt.final
 	if final.RunID != run.ID || final.ArtifactHash != reviewed.Hash {
 		return feedback, analysis.Approvals, cost, costUnknown, "chairman returned mismatched run or artifact identity", false
 	}

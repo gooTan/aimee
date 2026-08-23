@@ -1,6 +1,10 @@
 package panel
 
-import "context"
+import (
+	"context"
+
+	"github.com/JBailes/aimee/server-go/delegate"
+)
 
 // Run is the identity and budget a review executes under. The panel needs these
 // to key durable delegate slots, bound spend and reach the worktree; it needs
@@ -91,6 +95,9 @@ type SeatResult struct {
 	// ReplayLost marks a seat whose durable result is gone. Retrying cannot fix
 	// that, so the caller must reach reservation recovery rather than park.
 	ReplayLost bool
+	// AvailabilityClass is the transport-owned retry class. It is independent
+	// of FailureCategory and remains empty for replay loss and ordinary failures.
+	AvailabilityClass delegate.AvailabilityClass
 }
 
 // Delegates is the resource plane a panel convenes over.

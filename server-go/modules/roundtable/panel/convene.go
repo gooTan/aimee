@@ -27,7 +27,7 @@ func Convene(ctx context.Context, delegates Delegates, run Run, panel Panel, foc
 	reviewed := run.Reviewed
 	seats := make([]Seat, 0, len(panel.Seats))
 	for i, seat := range panel.Seats {
-		seats = append(seats, Seat{Persona: seat.Persona, Selector: seat.Selector, Ordinal: i})
+		seats = append(seats, Seat{Persona: seat.Persona, Selector: seat.Selector, Optional: seat.Optional, Ordinal: i})
 	}
 	// A review with no original request cannot do the one job this panel exists
 	// for. Every scope rule below -- "adding work the request did not ask for is

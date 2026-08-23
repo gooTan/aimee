@@ -712,44 +712,42 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 
 func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
 	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed"}
+	fail := func(err error, detail string) delegatecontract.InvocationResult {
+		result.Error = detail
+		result.AvailabilityClass = delegatecontract.ClassifyAvailability(err, false)
+		return result
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	registry, err := r.load()
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	agent, err := selectAgent(registry, request.Model, request.Role, request.Persona)
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	result.Agent = agent.Name
 	release, err := r.limiter(agent).acquire(ctx)
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	defer release()
 	if RoleIsWrite(request.Role) && strings.TrimSpace(request.Workdir) == "" {
-		result.Error = "write-capable delegate requires an isolated worktree"
-		return result
+		return fail(errors.New("write-capable delegate requires an isolated worktree"), "write-capable delegate requires an isolated worktree")
 	}
 	if request.Workdir != "" {
 		if !filepath.IsAbs(request.Workdir) {
-			result.Error = "delegate workdir must be absolute"
-			return result
+			return fail(errors.New("delegate workdir must be absolute"), "delegate workdir must be absolute")
 		}
 		if _, err := os.Lstat(filepath.Join(request.Workdir, ".git")); err != nil {
-			result.Error = "delegate workdir is not a git checkout"
-			return result
+			return fail(err, "delegate workdir is not a git checkout")
 		}
 	}
 	argv, err := executorArgv(agent, request)
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	prompt := request.Prompt
 	if persona := strings.TrimSpace(request.Persona); persona != "" {
@@ -759,8 +757,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	defer runCancel()
 	cmd, closeCommand, err := executorCommand(runCtx, argv)
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	defer closeCommand()
 	if request.Workdir != "" {
@@ -774,8 +771,11 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		cmd.Stdout = monitor
 	}
 	if err := cmd.Run(); err != nil {
+		response := finalOutput(agent.CLIKind, output.BytesCopy())
 		if monitor.Exceeded() {
-			result.Error = fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
+			detail := fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
+			result.Error = detail
+			result.AvailabilityClass = delegatecontract.ClassifyAvailability(errors.New(detail), response != "")
 			return result
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -783,6 +783,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			if detail := strings.TrimSpace(output.String()); detail != "" {
 				result.Error += ": " + delegatecontract.SafeDiagnostic(detail)
 			}
+			result.AvailabilityClass = delegatecontract.ClassifyAvailability(delegatecontract.ErrDelegateExecutionDeadline, response != "")
 			return result
 		}
 		detail := strings.TrimSpace(output.String())
@@ -790,12 +791,12 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			detail = err.Error()
 		}
 		result.Error = delegatecontract.SafeDiagnostic(detail)
+		result.AvailabilityClass = delegatecontract.ClassifyAvailability(err, response != "")
 		return result
 	}
 	response := finalOutput(agent.CLIKind, output.BytesCopy())
 	if response == "" {
-		result.Error = "delegate CLI returned no final response"
-		return result
+		return fail(errors.New("delegate CLI returned no final response"), "delegate CLI returned no final response")
 	}
 	result.Status, result.Response = "done", response
 	return result

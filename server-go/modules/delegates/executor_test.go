@@ -264,9 +264,36 @@ func TestRegistryExecutorTypesCallerDeadlineAsExecutionDeadline(t *testing.T) {
 	defer cancel()
 	result := executor.Execute(ctx, delegatecontract.Invocation{Version: 2, Role: "code",
 		Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
-	if result.Status != "failed" || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassStartDeadline || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
 		delegatecontract.IsCapacityDeadline(errors.New(result.Error)) {
 		t.Fatalf("caller deadline was not typed as an execution deadline: %+v", result)
+	}
+}
+
+func TestRegistryExecutorDoesNotClassifyFailureAfterResponseBegins(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "partial-delegate")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf partial-output\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "helper", "cli_kind": "generic", "cli_cmd": script, "roles": []string{"code"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "code", Persona: "engineer", Prompt: "work", Workdir: workdir})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassNone {
+		t.Fatalf("partial response was classified as unavailable: %+v", result)
 	}
 }
 

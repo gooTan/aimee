@@ -51,12 +51,13 @@ type DelegateRequest struct {
 }
 
 type DelegateResult struct {
-	Response    string
-	Agent       string
-	Participant string
-	CostUSD     float64
-	CostUnknown bool
-	Partial     bool
+	Response          string
+	Agent             string
+	Participant       string
+	CostUSD           float64
+	CostUnknown       bool
+	Partial           bool
+	AvailabilityClass AvailabilityClass
 }
 
 type AgentClient interface {
@@ -64,11 +65,12 @@ type AgentClient interface {
 }
 
 type DelegateGroupResult struct {
-	Participant string
-	Response    string
-	CostUSD     float64
-	CostUnknown bool
-	Err         error
+	Participant       string
+	Response          string
+	CostUSD           float64
+	CostUnknown       bool
+	AvailabilityClass AvailabilityClass
+	Err               error
 }
 
 type DelegateGroupClient interface {
@@ -84,6 +86,28 @@ var (
 	ErrDelegateCapacity             = errors.New("delegate capacity unavailable [aimee_err=concurrency_limit]")
 	ErrDelegateCapacityDeadline     = errors.New("delegate capacity wait deadline exceeded [aimee_err=capacity_deadline]")
 	ErrDelegateExecutionDeadline    = errors.New("delegate execution deadline exceeded [aimee_err=execution_deadline]")
+)
+
+// AvailabilityClass is the transport-owned recovery class for a delegate
+// failure. Empty means the failure is not safe to retry by selecting another
+// provider/profile.
+type AvailabilityClass string
+
+const (
+	AvailabilityClassNone                AvailabilityClass = ""
+	AvailabilityClassQuotaRateLimit      AvailabilityClass = "quota_rate_limit"
+	AvailabilityClassCapacity            AvailabilityClass = "capacity"
+	AvailabilityClassAuthentication      AvailabilityClass = "authentication"
+	AvailabilityClassProviderUnavailable AvailabilityClass = "provider_unavailable"
+	AvailabilityClassStartDeadline       AvailabilityClass = "start_deadline"
+
+	// Short aliases keep callers readable while the wire names remain explicit.
+	AvailabilityNone                = AvailabilityClassNone
+	AvailabilityQuotaRateLimit      = AvailabilityClassQuotaRateLimit
+	AvailabilityCapacity            = AvailabilityClassCapacity
+	AvailabilityAuthentication      = AvailabilityClassAuthentication
+	AvailabilityProviderUnavailable = AvailabilityClassProviderUnavailable
+	AvailabilityStartDeadline       = AvailabilityClassStartDeadline
 )
 
 type DelegateExecutionError struct {
@@ -113,13 +137,14 @@ type Invocation struct {
 }
 
 type InvocationResult struct {
-	Version   int     `json:"version"`
-	Status    string  `json:"status"`
-	Response  string  `json:"response,omitempty"`
-	Agent     string  `json:"agent,omitempty"`
-	Error     string  `json:"error,omitempty"`
-	CostUSD   float64 `json:"cost_usd,omitempty"`
-	CostKnown bool    `json:"cost_known"`
+	Version           int               `json:"version"`
+	Status            string            `json:"status"`
+	Response          string            `json:"response,omitempty"`
+	Agent             string            `json:"agent,omitempty"`
+	Error             string            `json:"error,omitempty"`
+	CostUSD           float64           `json:"cost_usd,omitempty"`
+	CostKnown         bool              `json:"cost_known"`
+	AvailabilityClass AvailabilityClass `json:"availability_class,omitempty"`
 }
 
 // GroupPlan carries only delegate-selection inputs. Participant continuity is
@@ -194,7 +219,8 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 	if contextDeadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(contextDeadline)
 		if remaining <= 0 {
-			return DelegateResult{}, errors.Join(ErrDelegateTerminal, context.DeadlineExceeded)
+			err := errors.Join(ErrDelegateTerminal, context.DeadlineExceeded)
+			return DelegateResult{AvailabilityClass: ClassifyAvailability(err, false)}, err
 		}
 		if remaining < deadline {
 			deadline = remaining
@@ -220,7 +246,7 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) ||
 			errors.Is(err, bus.ErrModuleCallRejected) ||
 			errors.Is(err, bus.ErrModuleCallNotDispatched) {
-			return DelegateResult{}, err
+			return DelegateResult{AvailabilityClass: ClassifyAvailability(err, false)}, err
 		}
 		// Once handed to the bus, loss of the reply cannot prove the provider did
 		// not run. Preserve that uncertainty at the caller's billing boundary.
@@ -248,7 +274,12 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if !IsCapacityBackpressure(failure) && !IsCapacityDeadline(failure) && !IsExecutionDeadline(failure) {
 			failure = fmt.Errorf("%w: %s", ErrDelegateTerminal, detail)
 		}
-		return DelegateResult{}, &DelegateExecutionError{Err: failure,
+		responseStarted := strings.TrimSpace(result.Response) != ""
+		availability := ClassifyAvailability(failure, responseStarted)
+		if !responseStarted {
+			availability = firstNonemptyAvailability(result.AvailabilityClass, availability)
+		}
+		return DelegateResult{AvailabilityClass: availability}, &DelegateExecutionError{Err: failure,
 			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD}
 	}
 	participant := request.Participant
@@ -256,7 +287,8 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		participant = result.Agent
 	}
 	return DelegateResult{Response: result.Response, Agent: result.Agent, Participant: participant,
-		CostUSD: result.CostUSD, CostUnknown: !result.CostKnown}, nil
+		CostUSD: result.CostUSD, CostUnknown: !result.CostKnown,
+		AvailabilityClass: result.AvailabilityClass}, nil
 }
 
 func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
@@ -301,8 +333,9 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 	}
 	if err != nil {
 		err = classifyDelegateError(err)
+		availability := ClassifyAvailability(err, false)
 		for i := range out {
-			out[i] = DelegateGroupResult{Participant: requests[i].Participant, Err: err}
+			out[i] = DelegateGroupResult{Participant: requests[i].Participant, AvailabilityClass: availability, Err: err}
 		}
 		return out
 	}
@@ -311,7 +344,8 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 		go func(i int) {
 			result, err := c.Delegate(ctx, planned[i])
 			out[i] = DelegateGroupResult{Participant: result.Participant, Response: result.Response,
-				CostUSD: result.CostUSD, CostUnknown: result.CostUnknown, Err: err}
+				CostUSD: result.CostUSD, CostUnknown: result.CostUnknown,
+				AvailabilityClass: result.AvailabilityClass, Err: err}
 			done <- i
 		}(i)
 	}
@@ -365,6 +399,64 @@ func IsCapacityDeadline(err error) bool {
 func IsExecutionDeadline(err error) bool {
 	return err != nil && (errors.Is(err, ErrDelegateExecutionDeadline) ||
 		strings.Contains(err.Error(), "aimee_err=execution_deadline"))
+}
+
+func firstNonemptyAvailability(values ...AvailabilityClass) AvailabilityClass {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// ClassifyAvailability maps only failures that are safe to retry with another
+// provider/profile. Once a usable response exists, the provider may have done
+// work even if the terminal status is failed, so the class must stay empty.
+func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
+	if err == nil || responseStarted || errors.Is(err, ErrDelegateReplayUnavailable) {
+		return ""
+	}
+	if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) {
+		return AvailabilityClassProviderUnavailable
+	}
+	if errors.Is(err, ErrDelegateCapacity) || IsCapacityDeadline(err) {
+		return AvailabilityClassCapacity
+	}
+	detail := strings.ToLower(err.Error())
+	if strings.Contains(detail, "aimee_err=concurrency_limit") ||
+		strings.Contains(detail, "capacity unavailable") || strings.Contains(detail, "capacity saturated") {
+		return AvailabilityClassCapacity
+	}
+	if strings.Contains(detail, "quota") || strings.Contains(detail, "rate limit") ||
+		strings.Contains(detail, "rate-limit") || strings.Contains(detail, "rate_limit") ||
+		strings.Contains(detail, "rate_limited") || strings.Contains(detail, "rate limited") ||
+		strings.Contains(detail, "too many requests") || strings.Contains(detail, "429") ||
+		strings.Contains(detail, "credits exhausted") || strings.Contains(detail, "throttled") {
+		return AvailabilityClassQuotaRateLimit
+	}
+	if strings.Contains(detail, "authentication") || strings.Contains(detail, "unauthorized") ||
+		strings.Contains(detail, "invalid api key") || strings.Contains(detail, "api key") ||
+		strings.Contains(detail, "login required") || strings.Contains(detail, "session expired") ||
+		strings.Contains(detail, "session unavailable") || strings.Contains(detail, "session is unavailable") || strings.Contains(detail, "session outage") ||
+		strings.Contains(detail, "session not found") || strings.Contains(detail, "no active session") ||
+		strings.Contains(detail, "token expired") || strings.Contains(detail, "invalid token") ||
+		strings.Contains(detail, "credentials") {
+		return AvailabilityClassAuthentication
+	}
+	if strings.Contains(detail, "provider unavailable") || strings.Contains(detail, "provider is unavailable") ||
+		strings.Contains(detail, "provider not found") || strings.Contains(detail, "cli unavailable") ||
+		strings.Contains(detail, "command not found") || strings.Contains(detail, "executable file not found") ||
+		strings.Contains(detail, "no such file or directory") || strings.Contains(detail, "not installed") ||
+		strings.Contains(detail, "missing provider") || strings.Contains(detail, "no enabled delegate cli") ||
+		strings.Contains(detail, "no enabled cli") || strings.Contains(detail, "not an enabled cli agent") ||
+		strings.Contains(detail, "cli not found") || strings.Contains(detail, "provider not configured") {
+		return AvailabilityClassProviderUnavailable
+	}
+	if IsExecutionDeadline(err) || errors.Is(err, context.DeadlineExceeded) || strings.Contains(detail, "execution deadline exceeded") {
+		return AvailabilityClassStartDeadline
+	}
+	return ""
 }
 
 // classifyDelegateError preserves the specific typed deadline sentinel even

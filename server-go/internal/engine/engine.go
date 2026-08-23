@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,10 +73,6 @@ type StepResult struct {
 type Runner interface {
 	Run(context.Context, StepRequest) (StepResult, error)
 }
-
-// maxRunnerFailuresWithoutProgress bounds consecutive runner-failure parks at
-// one stage before the item is parked for a human instead of auto-resumed.
-const maxRunnerFailuresWithoutProgress = 8
 
 // maxCapacityWaitsWithoutProgress bounds how long a stage waits out provider
 // capacity before giving up. Capacity backpressure is self-clearing, so this is
@@ -257,7 +254,12 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 		}
 		reason := "runner_unavailable"
 		capacity := isCapacityBackpressure(err)
-		if errors.Is(err, ErrGitIdentityMissing) {
+		if errors.Is(err, ErrForgePublication) {
+			// Publication failures are operator-actionable and must not enter the
+			// runner backoff/redispatch loop. The typed error and full detail are
+			// retained by ParkRunnerFailureWithSignature.
+			reason = "publication_failed"
+		} else if errors.Is(err, ErrGitIdentityMissing) {
 			// This cannot heal on the scheduler's five-second runner backoff. Park
 			// until an operator seals the documented install-time identity and
 			// explicitly resumes the run.
@@ -268,16 +270,10 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 			// longer backoff instead of burning the runner-failure bound.
 			reason = "capacity_backpressure"
 		}
-		// A stage that keeps failing without ever advancing is not a transient
-		// outage: stop auto-resuming it and park for a human. Without this an
-		// endlessly-failing delegate retries on the transient backoff forever.
-		bound, counter := maxRunnerFailuresWithoutProgress, e.db.RunnerFailuresSinceProgress
 		if capacity {
-			bound, counter = maxCapacityWaitsWithoutProgress, e.db.CapacityWaitsSinceProgress
-		}
-		if failures, ferr := counter(context.WithoutCancel(ctx), item.ID, item.Stage); ferr == nil &&
-			failures >= bound {
-			reason = "delegate_failed"
+			if waits, ferr := e.db.CapacityWaitsSinceProgress(context.WithoutCancel(ctx), item.ID, item.Stage); ferr == nil && waits >= maxCapacityWaitsWithoutProgress {
+				reason = "capacity_exhausted"
+			}
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			reason = "wall_cap"
@@ -291,11 +287,17 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 		// releases the pre-dispatch reservation, records measured cost, or marks
 		// ambiguous post-dispatch spend unresolved for durable replay.
 		retainBudget = true
-		detail := reason + ": " + safeDiagnostic(err.Error())
-		if parkErr := e.db.ParkRunnerFailure(context.WithoutCancel(ctx), item.ID, item.Stage, owner, reason, detail, dispatched, costKnown, actual); parkErr != nil {
+		diagnostic := safeDiagnostic(err.Error())
+		failureClass := runnerFailureClass(err, capacity)
+		detail := reason + ": " + diagnostic
+		if parkErr := e.db.ParkRunnerFailureWithSignature(context.WithoutCancel(ctx), item.ID, item.Stage, owner, reason, detail, failureClass, normalizeRunnerFailureDetail(diagnostic), item.WorkflowVersion, dispatched, costKnown, actual); parkErr != nil {
 			return out, parkErr
 		}
-		out.Parked, out.PauseReason = true, reason
+		parked, readErr := e.db.WorkItem(context.WithoutCancel(ctx), item.ID)
+		if readErr != nil {
+			return out, readErr
+		}
+		out.Parked, out.PauseReason = true, parked.PauseReason
 		return out, nil
 	}
 	// A completed runner may already have incurred provider spend. From here on
@@ -453,6 +455,20 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 		} else {
 			detail = reason + ": " + safeDiagnostic(detail)
 		}
+		// A base that moved during publication has already been integrated, but
+		// the resulting tree has not passed the acceptance freeze and review.
+		// Re-enter that existing path instead of parking final_pr and publishing
+		// an unreviewed merge on the next resume.
+		if reason == "base_changed_requires_review" {
+			if _, ok := def.Node("accept_freeze"); ok {
+				if err := e.db.Move(ctx, item.ID, node.ID, "accept_freeze", "base_integration", detail, "", step.CostUSD); err != nil {
+					return out, err
+				}
+				out.NextStage = "accept_freeze"
+				out.State = "active"
+				return out, nil
+			}
+		}
 		// The delegate has already run and its spend is reconciled; a cancelled
 		// park loses the transition and strands the reservation in 'actual',
 		// which the next replay can only park as replay_unrecoverable.
@@ -473,6 +489,42 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 		return out, e.parkAfterSpend(ctx, item, "invalid_runner_result",
 			fmt.Errorf("unknown step status %q", step.Status), step.CostUSD)
 	}
+}
+
+func runnerFailureClass(err error, capacity bool) string {
+	switch {
+	case capacity:
+		return "capacity"
+	case errors.Is(err, ErrDelegateCapacityDeadline):
+		return "capacity_deadline"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "execution_deadline"
+	case errors.Is(err, ErrDelegateTerminal):
+		return "delegate_terminal"
+	case errors.Is(err, ErrDelegateReplayUnavailable):
+		return "replay_unavailable"
+	default:
+		return "runner_error"
+	}
+}
+
+var (
+	ansiEscape   = regexp.MustCompile(`\x1b\[[0-9;]*[[:alpha:]]`)
+	rfc3339Token = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b`)
+	uuidToken    = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+	pidToken     = regexp.MustCompile(`\bpid=\d+\b`)
+	retryToken   = regexp.MustCompile(`\bretry in \d+(?:\.\d+)?(?:ns|us|µs|ms|s|m)\b`)
+	tmpLeafToken = regexp.MustCompile(`/tmp/[^\s/]+`)
+)
+
+func normalizeRunnerFailureDetail(detail string) string {
+	detail = ansiEscape.ReplaceAllString(detail, "")
+	detail = rfc3339Token.ReplaceAllString(detail, "<timestamp>")
+	detail = uuidToken.ReplaceAllString(detail, "<uuid>")
+	detail = pidToken.ReplaceAllString(detail, "pid=<pid>")
+	detail = retryToken.ReplaceAllString(detail, "retry in <duration>")
+	detail = tmpLeafToken.ReplaceAllString(detail, "/tmp/<path>")
+	return strings.Join(strings.Fields(detail), " ")
 }
 
 func (e *Engine) parkOnError(ctx context.Context, item db1.WorkItem, reason string, cause error) error {

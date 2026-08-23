@@ -40,7 +40,7 @@ func TestChairmanReceivesFrozenDiffEvidenceContract(t *testing.T) {
 	artifact := run.Reviewed
 	agents := &discussionTestAgents{respond: func(request SeatRequest) (string, error) {
 		if !strings.Contains(request.Prompt, "patch does not embed those logs or metadata") ||
-			!strings.Contains(request.Prompt, "use its tools to verify a material operational requirement") {
+			!strings.Contains(request.Prompt, "do not inspect the worktree or call tools") {
 			t.Fatalf("chairman did not receive frozen-diff evidence contract: %s", request.Prompt)
 		}
 		return fmt.Sprintf(`{"run_id":%q,"artifact_hash":%q,"artifact_stage":"frozen_diff","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`, run.ID, artifact.Hash), nil

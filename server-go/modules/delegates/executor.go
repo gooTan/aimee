@@ -44,23 +44,25 @@ func NewDefaultHandler() bus.ModuleHandler {
 }
 
 type agentEntry struct {
-	Name        string   `json:"name"`
-	Model       string   `json:"model"`
-	Backend     string   `json:"backend"`
-	Provider    string   `json:"provider"`
-	CLIKind     string   `json:"cli_kind"`
-	CLICmd      string   `json:"cli_cmd"`
-	Enabled     *bool    `json:"enabled"`
-	PrimaryOnly bool     `json:"primary_only"`
-	Roles       []string `json:"roles"`
-	Personas    []string `json:"personas"`
-	MaxParallel *int     `json:"max_parallel"`
-	Available   *bool    `json:"delegate_available"`
+	Name            string   `json:"name"`
+	Model           string   `json:"model"`
+	ReasoningEffort string   `json:"reasoning_effort"`
+	Backend         string   `json:"backend"`
+	Provider        string   `json:"provider"`
+	CLIKind         string   `json:"cli_kind"`
+	CLICmd          string   `json:"cli_cmd"`
+	Enabled         *bool    `json:"enabled"`
+	PrimaryOnly     bool     `json:"primary_only"`
+	Roles           []string `json:"roles"`
+	Personas        []string `json:"personas"`
+	MaxParallel     *int     `json:"max_parallel"`
+	Available       *bool    `json:"delegate_available"`
 }
 
 type agentRegistry struct {
 	DefaultAgent string       `json:"default_agent"`
 	Agents       []agentEntry `json:"agents"`
+	Models       []agentEntry `json:"models"`
 }
 
 // RegistryExecutor is the Go-owned delegate producer. It selects a configured
@@ -114,6 +116,9 @@ func (r *RegistryExecutor) load() (agentRegistry, error) {
 	var registry agentRegistry
 	if err := json.Unmarshal(body, &registry); err != nil {
 		return agentRegistry{}, fmt.Errorf("decode agent registry: %w", err)
+	}
+	if len(registry.Agents) == 0 {
+		registry.Agents = registry.Models
 	}
 	if len(registry.Agents) == 0 {
 		return agentRegistry{}, errors.New("agent registry has no agents")
@@ -424,6 +429,9 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 		if !request.Tools {
 			return nil, errors.New("codex CLI cannot guarantee a tools-disabled invocation")
 		}
+		if effort := strings.TrimSpace(agent.ReasoningEffort); effort != "" {
+			argv = append([]string{argv[0], "-c", "model_reasoning_effort=" + effort}, argv[1:]...)
+		}
 		argv = append(argv, "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never")
 		if RoleIsWrite(request.Role) {
 			argv = append(argv, "--sandbox", "workspace-write")
@@ -445,6 +453,24 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 			argv = append(argv, "--tools", "")
 		} else if !RoleIsWrite(request.Role) {
 			argv = append(argv, "--allowedTools", "Read", "Glob", "Grep")
+		}
+	case "agy":
+		argv = append(argv, "-p")
+		if request.Prompt != "" {
+			argv = append(argv, request.Prompt)
+		}
+		argv = append(argv, "--output-format", "stream-json", "--disable-slash-commands")
+		if agent.Model != "" {
+			argv = append(argv, "--model", agent.Model)
+		}
+	case "opencode":
+		argv = append(argv, "run")
+		if agent.Model != "" {
+			argv = append(argv, "--model", agent.Model)
+		}
+		argv = append(argv, "--format", "json", "--auto")
+		if request.Prompt != "" {
+			argv = append(argv, request.Prompt)
 		}
 	case "", "generic":
 		// A generic adapter consumes the prompt on stdin and writes its final
@@ -601,6 +627,26 @@ func finalOutput(kind string, output []byte) string {
 				}
 			}
 		}
+		if kind == "agy" && item["event"] == "result" {
+			if nested, ok := item["result"].(map[string]any); ok {
+				status, _ := nested["status"].(string)
+				if status == "" || status == "SUCCESS" {
+					if value, ok := nested["response"].(string); ok {
+						final = value
+					}
+				}
+			}
+		}
+		if kind == "opencode" && item["type"] == "text" {
+			if part, ok := item["part"].(map[string]any); ok {
+				if value, ok := part["text"].(string); ok {
+					if final != "" {
+						final += "\n"
+					}
+					final += value
+				}
+			}
+		}
 	}
 	return strings.TrimSpace(final)
 }
@@ -650,6 +696,9 @@ func runWatchdog(control io.Reader, argv []string, stdin io.Reader,
 	}()
 	select {
 	case err := <-done:
+		if err == nil {
+			waitForWatchdogDescendants(cmd.Process.Pid, producerGone)
+		}
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		reapWatchdogChildren()
 		if err == nil {
@@ -665,6 +714,43 @@ func runWatchdog(control io.Reader, argv []string, stdin io.Reader,
 		<-done
 		reapWatchdogChildren()
 		return 125
+	}
+}
+
+const (
+	watchdogDescendantPoll = 10 * time.Millisecond
+)
+
+// waitForWatchdogDescendants lets a successful CLI wrapper's descendants
+// finish naturally, while producer shutdown still interrupts the wait so the
+// caller can kill leaked descendants.
+func waitForWatchdogDescendants(pid int, producerGone <-chan struct{}) {
+	ticker := time.NewTicker(watchdogDescendantPoll)
+	defer ticker.Stop()
+	for {
+		reapWatchdogChildrenNonBlocking()
+		err := syscall.Kill(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		select {
+		case <-producerGone:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func reapWatchdogChildrenNonBlocking() {
+	for {
+		var status syscall.WaitStatus
+		child, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+		if child == 0 || errors.Is(err, syscall.ECHILD) {
+			return
+		}
+		if err != nil && !errors.Is(err, syscall.EINTR) {
+			return
+		}
 	}
 }
 
@@ -746,14 +832,15 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			return result
 		}
 	}
+	prompt := request.Prompt
+	if persona := strings.TrimSpace(request.Persona); persona != "" {
+		prompt = "You are acting as " + persona + ".\n\n" + prompt
+	}
+	request.Prompt = prompt
 	argv, err := executorArgv(agent, request)
 	if err != nil {
 		result.Error = err.Error()
 		return result
-	}
-	prompt := request.Prompt
-	if persona := strings.TrimSpace(request.Persona); persona != "" {
-		prompt = "You are acting as " + persona + ".\n\n" + prompt
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
@@ -771,9 +858,10 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	monitor := newTurnMonitor(agent.CLIKind, request.MaxTurns, runCancel, output)
 	cmd.Stdout, cmd.Stderr = output, output
 	if request.MaxTurns > 0 {
-		cmd.Stdout = monitor
+		cmd.Stdout, cmd.Stderr = monitor, monitor
 	}
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	if runErr != nil {
 		if monitor.Exceeded() {
 			result.Error = fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
 			return result
@@ -787,7 +875,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		}
 		detail := strings.TrimSpace(output.String())
 		if detail == "" {
-			detail = err.Error()
+			detail = runErr.Error()
 		}
 		result.Error = delegatecontract.SafeDiagnostic(detail)
 		return result
@@ -795,6 +883,9 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	response := finalOutput(agent.CLIKind, output.BytesCopy())
 	if response == "" {
 		result.Error = "delegate CLI returned no final response"
+		if detail := strings.TrimSpace(output.String()); detail != "" {
+			result.Error += ": " + delegatecontract.SafeDiagnostic(detail)
+		}
 		return result
 	}
 	result.Status, result.Response = "done", response

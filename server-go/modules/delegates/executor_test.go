@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -133,7 +134,7 @@ func TestGroupPlanStageKeepsNonCapacityFailureAsTransportError(t *testing.T) {
 	}
 }
 
-func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
+func TestRegistryExecutorRunsArgvThroughWatchdogEntryPoint(t *testing.T) {
 	home := t.TempDir()
 	script := filepath.Join(home, "delegate-helper")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nread prompt\nprintf 'answer:%s' \"$prompt\"\n"), 0o700); err != nil {
@@ -157,8 +158,61 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	}
 	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 2, Role: "code",
 		Persona: "security", Prompt: "inspect", Workdir: workdir, Tools: true})
-	if result.Status != "done" || !strings.Contains(result.Response, "You are acting as security.") {
+	if result.Status != "done" || result.Agent != "helper" || !strings.Contains(result.Response, "You are acting as security.") {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRegistryExecutorKeepsMonitoredOutputOnOnePipe(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "delegate-helper")
+	scriptBody := "#!/bin/sh\n" +
+		"if [ \"$(readlink /proc/$$/fd/1)\" != \"$(readlink /proc/$$/fd/2)\" ]; then exit 0; fi\n" +
+		"printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"complete\"}}'\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{"agents": []map[string]any{{
+		"name": "helper", "model": "test", "cli_kind": "codex", "cli_cmd": script,
+		"roles": []string{"review"},
+	}}}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 2, Role: "review",
+		Persona: "reviewer", Model: "helper", Prompt: "inspect", Tools: true, MaxTurns: 24})
+	if result.Status != "done" || result.Response != "complete" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRegistryExecutorAcceptsModelsKey(t *testing.T) {
+	home := t.TempDir()
+	registry := map[string]any{"default_agent": "helper", "models": []map[string]any{{
+		"name": "helper", "model": "test", "cli_cmd": "/bin/true", "enabled": true,
+		"roles": []string{"review"},
+	}}}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := executor.PlanGroup(t.Context(), []delegatecontract.GroupPlanSeat{{
+		Role: "review", Persona: "reviewer", Model: "helper",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0] != "helper" {
+		t.Fatalf("models = %v, want [helper]", models)
 	}
 }
 
@@ -477,6 +531,133 @@ func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	tools := slices.Index(argv, "--tools")
 	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" {
 		t.Fatalf("claude tools-disabled argv = %q, %v", argv, err)
+	}
+}
+
+func TestNativeProviderCLIArgvAndFinalEvents(t *testing.T) {
+	request := delegatecontract.Invocation{Role: "review", Prompt: "check this", Tools: true}
+	for _, tc := range []struct {
+		name     string
+		agent    agentEntry
+		wantArgv []string
+		output   string
+		want     string
+	}{
+		{
+			name:     "codex-reasoning-medium",
+			agent:    agentEntry{CLIKind: "codex", CLICmd: "/home/midnight/.local/bin/codex", Model: "gpt-5.6-sol", ReasoningEffort: "medium"},
+			wantArgv: []string{"/home/midnight/.local/bin/codex", "-c", "model_reasoning_effort=medium", "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--model", "gpt-5.6-sol", "-"},
+			output:   "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"sol native\"}}\n",
+			want:     "sol native",
+		},
+		{
+			name:     "codex-reasoning-xhigh",
+			agent:    agentEntry{CLIKind: "codex", CLICmd: "/home/midnight/.local/bin/codex", Model: "gpt-5.6-luna", ReasoningEffort: "xhigh"},
+			wantArgv: []string{"/home/midnight/.local/bin/codex", "-c", "model_reasoning_effort=xhigh", "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--model", "gpt-5.6-luna", "-"},
+			output:   "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"luna native\"}}\n",
+			want:     "luna native",
+		},
+		{
+			name:     "agy",
+			agent:    agentEntry{CLIKind: "agy", CLICmd: "/home/midnight/.local/bin/agy", Model: "gemini-3.7-flash-high"},
+			wantArgv: []string{"/home/midnight/.local/bin/agy", "-p", "check this", "--output-format", "stream-json", "--disable-slash-commands", "--model", "gemini-3.7-flash-high"},
+			output:   "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"agy native\"}}\n",
+			want:     "agy native",
+		},
+		{
+			name:     "opencode",
+			agent:    agentEntry{CLIKind: "opencode", CLICmd: "/home/midnight/.local/bin/opencode", Model: "opencode-go/deepseek-v4-flash"},
+			wantArgv: []string{"/home/midnight/.local/bin/opencode", "run", "--model", "opencode-go/deepseek-v4-flash", "--format", "json", "--auto", "check this"},
+			output:   "{\"type\":\"text\",\"part\":{\"text\":\"opencode native\"}}\n",
+			want:     "opencode native",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argv, err := executorArgv(tc.agent, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(argv, tc.wantArgv) {
+				t.Fatalf("argv = %q, want %q", argv, tc.wantArgv)
+			}
+			if got := finalOutput(tc.agent.CLIKind, []byte(tc.output)); got != tc.want {
+				t.Fatalf("final output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatchdogDrainsSuccessfulDescendantBeforeCleanup(t *testing.T) {
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
+	defer controlWrite.Close()
+	outputRead, outputWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outputRead.Close()
+	done := make(chan int, 1)
+	go func() {
+		done <- runWatchdog(controlRead,
+			[]string{"/bin/sh", "-c", `(sleep 0.35; printf 'FINAL_EVENT\n') & exit 0`},
+			strings.NewReader(""), outputWrite, outputWrite)
+	}()
+	if code := <-done; code != 0 {
+		t.Fatalf("watchdog exit = %d", code)
+	}
+	if err := outputWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(outputRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(output)) != "FINAL_EVENT" {
+		t.Fatalf("descendant output = %q", output)
+	}
+}
+
+func TestWatchdogInterruptsSuccessfulDescendantDrainWhenProducerDies(t *testing.T) {
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
+	outputRead, outputWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outputRead.Close()
+	defer outputWrite.Close()
+	done := make(chan int, 1)
+	go func() {
+		done <- runWatchdog(controlRead,
+			[]string{"/bin/sh", "-c", `sleep 30 & child=$!; printf '%s\n' "$child"; exit 0`},
+			strings.NewReader(""), outputWrite, outputWrite)
+	}()
+	var child int
+	if _, err := fmt.Fscan(outputRead, &child); err != nil {
+		t.Fatal(err)
+	}
+	if child <= 0 {
+		t.Fatalf("invalid descendant pid %d", child)
+	}
+	if err := controlWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != 125 {
+			t.Fatalf("watchdog exit = %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog did not interrupt descendant drain")
+	}
+	if err := syscall.Kill(child, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("descendant %d survived producer death: %v", child, err)
 	}
 }
 

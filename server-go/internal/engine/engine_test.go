@@ -53,6 +53,80 @@ type scriptedRunner struct {
 	feedback   wfe.ReviewFeedback
 }
 
+type baseDriftRunner struct{}
+
+func (baseDriftRunner) Run(context.Context, StepRequest) (StepResult, error) {
+	return StepResult{Status: StepPending, PauseReason: "base_changed_requires_review",
+		Detail: "remote base advanced"}, nil
+}
+
+func TestPublicationBaseDriftReturnsToAcceptanceFreeze(t *testing.T) {
+	workflowDir := t.TempDir()
+	workflow := `name: base-drift
+start: final_pr
+nodes:
+  - id: accept_freeze
+    block: author.proposal
+    next: final_pr
+  - id: final_pr
+    block: pr.open
+    in:
+      src: accept_freeze.out
+    params:
+      base: default
+`
+	if err := os.WriteFile(filepath.Join(workflowDir, "base-drift.yaml"), []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(root, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := wfe.NewRegistry(workflowDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := registry.Pin("base-drift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.PutProposal("wi_drift", []byte("proposal\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.PutNodeArtifact("wi_drift", "accept_freeze", "diff", []byte("reviewed\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_drift", Repo: "repo",
+		ProposalPath: "proposal", WorkflowName: definition.Name, WorkflowVersion: definition.Version,
+		StartStage: definition.Start}); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(store, artifacts, workflowDir, baseDriftRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := engine.Advance(t.Context(), "wi_drift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.NextStage != "accept_freeze" || out.PauseReason != "" {
+		t.Fatalf("advance result=%+v, want active transition to accept_freeze", out)
+	}
+	item, err := store.WorkItem(t.Context(), "wi_drift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Stage != "accept_freeze" || item.PauseReason != "" {
+		t.Fatalf("item=%+v, want runnable accept_freeze", item)
+	}
+}
+
 func (r *scriptedRunner) Run(_ context.Context, req StepRequest) (StepResult, error) {
 	r.call++
 	if req.Proposal != r.proposal {
@@ -1236,6 +1310,63 @@ func (r *alwaysFailingRunner) Run(context.Context, StepRequest) (StepResult, err
 	return StepResult{}, &DelegateExecutionError{Err: ErrDelegateTerminal, Dispatched: true, CostKnown: true}
 }
 
+type failOnceRunner struct{ calls int }
+
+func (r *failOnceRunner) Run(context.Context, StepRequest) (StepResult, error) {
+	r.calls++
+	if r.calls == 1 {
+		return StepResult{}, &DelegateExecutionError{Err: ErrDelegateTerminal, Dispatched: true, CostKnown: true}
+	}
+	return StepResult{Status: StepAdvanced, Artifact: "recovered"}, nil
+}
+
+func TestRunnerFailureSucceedsOnSecondAttempt(t *testing.T) {
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "workflows")
+	if err := os.MkdirAll(workflowDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	definition := []byte("name: one\nstart: work\nnodes:\n  - id: work\n    block: author.proposal\n    next: done\n  - id: done\n    block: author.proposal\n")
+	if err := os.WriteFile(filepath.Join(workflowDir, "one.yaml"), definition, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	def, err := wfe.ParseDefinition(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := db1.Open(filepath.Join(root, "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(root, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := db1.CreateWorkItem{ID: "wi_fail_once", Repo: "repo", ProposalPath: "fail-once", WorkflowName: "one", WorkflowVersion: def.Version, StartStage: "work", MaxCostUSD: 100}
+	if err := store.CreateWorkItem(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.PutProposal(item.ID, []byte("proposal")); err != nil {
+		t.Fatal(err)
+	}
+	runner := &failOnceRunner{}
+	eng, err := New(store, artifacts, workflowDir, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := eng.Advance(t.Context(), item.ID); err != nil || out.PauseReason != "runner_unavailable" {
+		t.Fatalf("first attempt: out=%+v err=%v", out, err)
+	}
+	if resumed, err := store.ResumeTransient(t.Context(), "runner_unavailable", 0); err != nil || resumed != 1 {
+		t.Fatalf("resume: count=%d err=%v", resumed, err)
+	}
+	out, err := eng.Advance(t.Context(), item.ID)
+	if err != nil || out.Parked || out.NextStage != "done" || runner.calls != 2 {
+		t.Fatalf("second attempt did not advance: out=%+v calls=%d err=%v", out, runner.calls, err)
+	}
+}
+
 // A stage that keeps failing without advancing must stop auto-resuming and park
 // for a human rather than retrying on the transient backoff forever.
 func TestPersistentRunnerFailureParksForHuman(t *testing.T) {
@@ -1274,13 +1405,13 @@ func TestPersistentRunnerFailureParksForHuman(t *testing.T) {
 		t.Fatal(err)
 	}
 	var last AdvanceResult
-	for attempt := 0; attempt < maxRunnerFailuresWithoutProgress+2; attempt++ {
+	for attempt := 0; attempt < 4; attempt++ {
 		out, err := eng.Advance(t.Context(), item.ID)
 		if err != nil {
 			t.Fatalf("advance %d: %v", attempt, err)
 		}
 		last = out
-		if out.PauseReason == "delegate_failed" {
+		if out.PauseReason == "repeated_runner_failure" {
 			break
 		}
 		// Simulate the scheduler's transient resume so the next attempt runs.
@@ -1288,12 +1419,34 @@ func TestPersistentRunnerFailureParksForHuman(t *testing.T) {
 			t.Fatalf("resume %d: %v", attempt, err)
 		}
 	}
-	if last.PauseReason != "delegate_failed" {
+	if last.PauseReason != "repeated_runner_failure" {
 		t.Fatalf("persistent failure never parked for human: %+v after %d calls", last, runner.calls)
 	}
+	if runner.calls != 3 {
+		t.Fatalf("runner called %d times, want exactly 3", runner.calls)
+	}
 	got, err := store.WorkItem(t.Context(), item.ID)
-	if err != nil || got.PauseReason != "delegate_failed" {
-		t.Fatalf("item not parked delegate_failed: %+v err=%v", got, err)
+	if err != nil || got.PauseReason != "repeated_runner_failure" {
+		t.Fatalf("item not parked repeated_runner_failure: %+v err=%v", got, err)
+	}
+	events, err := store.Events(t.Context(), item.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail := events[len(events)-1].Detail; !strings.HasPrefix(detail, "repeated_runner_failure: ") || !strings.Contains(detail, ErrDelegateTerminal.Error()) {
+		t.Fatalf("breaker lost its diagnostic: %q", detail)
+	}
+}
+
+func TestRunnerFailureSignatureNormalizesVolatileValuesOnly(t *testing.T) {
+	first := normalizeRunnerFailureDetail("\x1b[31m2026-08-22T12:34:56Z pid=41 uuid=550e8400-e29b-41d4-a716-446655440000 retry in 30s /tmp/run-abc exit status 7\x1b[0m")
+	second := normalizeRunnerFailureDetail("2027-01-01T01:02:03Z pid=99 uuid=6ba7b810-9dad-11d1-80b4-00c04fd430c8 retry in 90ms /tmp/run-def exit status 7")
+	if first != second {
+		t.Fatalf("volatile values changed normalized detail: %q != %q", first, second)
+	}
+	third := normalizeRunnerFailureDetail("2027-01-01T01:02:03Z pid=99 uuid=6ba7b810-9dad-11d1-80b4-00c04fd430c8 retry in 90ms /tmp/run-def exit status 8")
+	if first == third {
+		t.Fatal("material exit status was erased from normalized detail")
 	}
 }
 
@@ -1346,16 +1499,22 @@ func TestCapacityBackpressureDoesNotParkForHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for attempt := 0; attempt < maxRunnerFailuresWithoutProgress+4; attempt++ {
+	for attempt := 0; attempt <= maxCapacityWaitsWithoutProgress; attempt++ {
 		out, err := eng.Advance(t.Context(), item.ID)
 		if err != nil {
 			t.Fatalf("advance %d: %v", attempt, err)
 		}
-		if out.PauseReason != "capacity_backpressure" {
-			t.Fatalf("attempt %d: capacity refusal parked %q, want capacity_backpressure", attempt, out.PauseReason)
+		want := "capacity_backpressure"
+		if attempt == maxCapacityWaitsWithoutProgress {
+			want = "capacity_exhausted"
 		}
-		if _, err := store.ResumeTransient(t.Context(), "capacity_backpressure", 0); err != nil {
-			t.Fatalf("resume %d: %v", attempt, err)
+		if out.PauseReason != want {
+			t.Fatalf("attempt %d: capacity refusal parked %q, want %s", attempt, out.PauseReason, want)
+		}
+		if attempt < maxCapacityWaitsWithoutProgress {
+			if _, err := store.ResumeTransient(t.Context(), "capacity_backpressure", 0); err != nil {
+				t.Fatalf("resume %d: %v", attempt, err)
+			}
 		}
 	}
 }

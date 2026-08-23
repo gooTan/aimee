@@ -2,6 +2,7 @@ package db1
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -76,6 +77,8 @@ CREATE TABLE IF NOT EXISTS lifecycle_work_item (
   override_count INTEGER NOT NULL DEFAULT 0,
   parent_id TEXT NOT NULL DEFAULT '',
   source_path TEXT NOT NULL DEFAULT '',
+  base_branch TEXT NOT NULL DEFAULT '',
+  base_sha TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(repo, proposal_path)
@@ -96,6 +99,14 @@ CREATE TABLE IF NOT EXISTS lifecycle_stage_attempt (
   work_item_id TEXT NOT NULL,
   stage TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (work_item_id, stage)
+);
+CREATE TABLE IF NOT EXISTS lifecycle_runner_failure (
+  work_item_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  signature TEXT NOT NULL,
+  failure_count INTEGER NOT NULL,
+  workflow_version TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (work_item_id, stage)
 );
 CREATE TABLE IF NOT EXISTS wfe_convergence (
@@ -137,6 +148,8 @@ CREATE TABLE IF NOT EXISTS lifecycle_delegate_job (
 		{"reservation_state", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_state TEXT NOT NULL DEFAULT ''`},
 		{"reservation_owner", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_owner TEXT NOT NULL DEFAULT ''`},
 		{"reservation_lease_until", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_lease_until TEXT NOT NULL DEFAULT ''`},
+		{"base_branch", `ALTER TABLE lifecycle_work_item ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''`},
+		{"base_sha", `ALTER TABLE lifecycle_work_item ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''`},
 	} {
 		has, err := s.hasWorkItemColumn(ctx, migration.column)
 		if err != nil {
@@ -265,6 +278,8 @@ type CreateWorkItem struct {
 	Submitter       string
 	ParentID        string
 	SourcePath      string
+	BaseBranch      string
+	BaseSHA         string
 	MaxCostUSD      float64
 }
 
@@ -310,9 +325,9 @@ func (s *Store) createWorkItem(ctx context.Context, in CreateWorkItem, cap int) 
 		inserted, err = tx.ExecContext(ctx, `
 INSERT INTO lifecycle_work_item
   (work_item_id, repo, proposal_path, workflow_name, workflow_version,
-   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.WorkflowName,
-			in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID, in.SourcePath, in.MaxCostUSD)
+   current_stage, mode, submitter, parent_id, source_path, base_branch, base_sha, work_item_max_cost_usd)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.WorkflowName,
+			in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID, in.SourcePath, in.BaseBranch, in.BaseSHA, in.MaxCostUSD)
 	} else {
 		// Parent eligibility and insertion are one SQLite statement. A concurrent
 		// StopTree therefore either includes this child or wins first and makes the
@@ -320,8 +335,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.W
 		inserted, err = tx.ExecContext(ctx, `
 INSERT INTO lifecycle_work_item
   (work_item_id, repo, proposal_path, workflow_name, workflow_version,
-   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+   current_stage, mode, submitter, parent_id, source_path, base_branch, base_sha, work_item_max_cost_usd)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parent.base_branch, parent.base_sha, ?
 FROM lifecycle_work_item parent
 WHERE parent.work_item_id=? AND parent.state='active'`, in.ID, in.Repo, in.ProposalPath,
 			in.WorkflowName, in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID,
@@ -367,6 +382,8 @@ type WorkItem struct {
 	ParentID          string  `json:"parent_id,omitempty"`
 	Worktree          string  `json:"worktree,omitempty"`
 	SourcePath        string  `json:"-"`
+	BaseBranch        string  `json:"base_branch,omitempty"`
+	BaseSHA           string  `json:"base_sha,omitempty"`
 	UpdatedAt         string  `json:"updated_at"`
 }
 
@@ -375,16 +392,68 @@ func (s *Store) WorkItem(ctx context.Context, id string) (WorkItem, error) {
 	err := s.db.QueryRowContext(ctx, `
 SELECT work_item_id, repo, proposal_path, workflow_name, workflow_version, current_stage,
        state, mode, pause_reason, content_hash, pr_ref, submitter, cum_cost_usd, reserved_cost_usd, reservation_state,
-       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, updated_at
+       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, base_branch, base_sha, updated_at
 FROM lifecycle_work_item WHERE work_item_id = ?`, id).Scan(
 		&item.ID, &item.Repo, &item.ProposalPath, &item.WorkflowName, &item.WorkflowVersion,
 		&item.Stage, &item.State, &item.Mode, &item.PauseReason, &item.ContentHash, &item.PRRef,
-		&item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD, &item.ReservationState, &item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath,
+		&item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD, &item.ReservationState, &item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.BaseBranch, &item.BaseSHA,
 		&item.UpdatedAt)
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("get work item: %w", err)
 	}
 	return item, nil
+}
+
+// RecordLifecycleEvent appends durable evidence used by publication policy.
+func (s *Store) RecordLifecycleEvent(ctx context.Context, workItemID, stage, kind, detail, contentHash string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail, content_hash)
+VALUES (?, ?, ?, 'go-wfe', ?, ?)`, workItemID, stage, kind, detail, contentHash)
+	return err
+}
+
+// PublicationLease returns the last successfully published remote SHA only when
+// an intentional base integration happened after that publication.
+func (s *Store) PublicationLease(ctx context.Context, workItemID string) (string, bool, error) {
+	var publicationID int64
+	var expected string
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, content_hash FROM lifecycle_event
+WHERE work_item_id=? AND kind='publication' AND detail='published'
+ORDER BY id DESC LIMIT 1`, workItemID).Scan(&publicationID, &expected)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	var integrationID int64
+	err = s.db.QueryRowContext(ctx, `
+SELECT id FROM lifecycle_event
+WHERE work_item_id=? AND kind='base_integration' AND id>?
+ORDER BY id DESC LIMIT 1`, workItemID, publicationID).Scan(&integrationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !shaContentHash(expected) {
+		return "", false, fmt.Errorf("invalid durable publication SHA %q", expected)
+	}
+	return expected, true, nil
+}
+
+func shaContentHash(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) WorkItemByProposal(ctx context.Context, repo, proposalPath string) (WorkItem, error) {
@@ -424,7 +493,7 @@ func (s *Store) WorkItems(ctx context.Context) ([]WorkItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT work_item_id, repo, proposal_path, workflow_name, workflow_version, current_stage,
        state, mode, pause_reason, content_hash, pr_ref, submitter, cum_cost_usd, reserved_cost_usd,
-       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, updated_at
+        work_item_max_cost_usd, override_count, parent_id, worktree, source_path, base_branch, base_sha, updated_at
 FROM lifecycle_work_item ORDER BY id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list work items: %w", err)
@@ -436,7 +505,7 @@ FROM lifecycle_work_item ORDER BY id DESC`)
 		if err := rows.Scan(&item.ID, &item.Repo, &item.ProposalPath, &item.WorkflowName,
 			&item.WorkflowVersion, &item.Stage, &item.State, &item.Mode, &item.PauseReason,
 			&item.ContentHash, &item.PRRef, &item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD,
-			&item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.UpdatedAt); err != nil {
+			&item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.BaseBranch, &item.BaseSHA, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan work item: %w", err)
 		}
 		items = append(items, item)
@@ -469,6 +538,31 @@ func (s *Store) SetPRRef(ctx context.Context, workItemID, prRef string) error {
 		return errors.New("work item not found")
 	}
 	return nil
+}
+
+// UpdateBase records an integrated remote base and its lifecycle evidence in one
+// transaction, so a replay cannot observe the new pin without the event.
+func (s *Store) UpdateBase(ctx context.Context, workItemID, branch, sha, stage string) error {
+	if branch == "" || !shaContentHash(sha) {
+		return errors.New("resolved base branch and SHA are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE lifecycle_work_item SET base_branch=?, base_sha=?, updated_at=datetime('now') WHERE work_item_id=?`, branch, sha, workItemID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return errors.New("work item not found")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail, content_hash) VALUES (?, ?, 'base_integration', 'go-wfe', ?, ?)`, workItemID, stage, "integrated "+branch, sha); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Children(ctx context.Context, parentID string) ([]WorkItem, error) {
@@ -838,6 +932,13 @@ WHERE work_item_id=? AND reservation_owner=? AND reservation_state IN ('reserved
 // commit actual spend, and ambiguous post-dispatch failures retain an unresolved
 // estimate for replay instead of pretending the estimate is actual cost.
 func (s *Store) ParkRunnerFailure(ctx context.Context, workItemID, stage, owner, reason, detail string, dispatched, costKnown bool, actual float64) error {
+	return s.ParkRunnerFailureWithSignature(ctx, workItemID, stage, owner, reason, detail, "runner_error", detail, "", dispatched, costKnown, actual)
+}
+
+// ParkRunnerFailureWithSignature atomically records the current failure streak,
+// reserves the third identical failure for a human, and applies the billing
+// transition. The signature row is deliberately one row per stage.
+func (s *Store) ParkRunnerFailureWithSignature(ctx context.Context, workItemID, stage, owner, reason, detail, failureClass, normalizedDetail, workflowVersion string, dispatched, costKnown bool, actual float64) error {
 	if workItemID == "" || stage == "" || owner == "" || reason == "" || actual < 0 ||
 		math.IsNaN(actual) || math.IsInf(actual, 0) {
 		return errors.New("complete runner failure coordinates and finite non-negative cost are required")
@@ -847,6 +948,36 @@ func (s *Store) ParkRunnerFailure(ctx context.Context, workItemID, stage, owner,
 		return err
 	}
 	defer tx.Rollback()
+	if normalizedDetail == "" {
+		normalizedDetail = detail
+	}
+	hashInput := workItemID + "\x00" + stage + "\x00" + workflowVersion + "\x00" + failureClass + "\x00" + normalizedDetail
+	signature := fmt.Sprintf("%x", sha256.Sum256([]byte(hashInput)))
+	var previousSignature string
+	var failureCount int
+	if failureClass != "capacity" {
+		err = tx.QueryRowContext(ctx, `SELECT signature,failure_count FROM lifecycle_runner_failure WHERE work_item_id=? AND stage=?`, workItemID, stage).Scan(&previousSignature, &failureCount)
+		if errors.Is(err, sql.ErrNoRows) || previousSignature != signature {
+			failureCount = 1
+		} else if err != nil {
+			return err
+		} else {
+			failureCount++
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO lifecycle_runner_failure(work_item_id,stage,signature,failure_count,workflow_version) VALUES(?,?,?,?,?)
+ON CONFLICT(work_item_id,stage) DO UPDATE SET signature=excluded.signature,failure_count=excluded.failure_count,workflow_version=excluded.workflow_version`, workItemID, stage, signature, failureCount, workflowVersion); err != nil {
+			return err
+		}
+		if failureCount >= 3 {
+			reason = "repeated_runner_failure"
+			if _, diagnostic, ok := strings.Cut(detail, ": "); ok {
+				detail = reason + ": " + diagnostic
+			}
+		}
+	}
 	state := ""
 	amount := 0.0
 	eventCost := 0.0
@@ -881,24 +1012,6 @@ WHERE work_item_id=? AND current_stage=? AND state='active' AND pause_reason='' 
 		return err
 	}
 	return tx.Commit()
-}
-
-// RunnerFailuresSinceProgress counts how many times this stage has parked on a
-// runner failure without any intervening forward progress. 'redispatch' is
-// deliberately NOT progress: a recovery that keeps re-dispatching work that
-// keeps failing is exactly the no-progress loop this bounds.
-// Capacity backpressure is excluded: the provider refused to start the work, so
-// the delegate never got a chance to fail. Those waits are bounded separately by
-// CapacityWaitsSinceProgress.
-func (s *Store) RunnerFailuresSinceProgress(ctx context.Context, workItemID, stage string) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM lifecycle_event
-WHERE work_item_id=? AND stage=? AND kind='pause'
-  AND detail NOT LIKE 'capacity_backpressure:%'
-  AND id > COALESCE((SELECT MAX(id) FROM lifecycle_event
-                     WHERE work_item_id=? AND kind IN ('advance','loop','create')), 0)`,
-		workItemID, stage, workItemID).Scan(&count)
-	return count, err
 }
 
 // CapacityWaitsSinceProgress counts how many times this stage has parked waiting
@@ -1076,6 +1189,9 @@ VALUES (?, ?, ?, 'go-wfe', ?, ?, ?)`, workItemID, fromStage, kind, detail, conte
 			return fmt.Errorf("clear completed stage attempts: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_runner_failure WHERE work_item_id=? AND stage=?`, workItemID, fromStage); err != nil {
+		return fmt.Errorf("clear runner failure breaker: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit stage transition: %w", err)
 	}
@@ -1120,6 +1236,11 @@ func (s *Store) RecordRetry(ctx context.Context, workItemID, stage, toStage, det
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO lifecycle_event (work_item_id,stage,kind,actor,detail,cost_usd) VALUES (?,?,?,'go-wfe',?,?)`, workItemID, stage, kind, detail, costUSD); err != nil {
 		return false, err
+	}
+	if kind == "loop" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_runner_failure WHERE work_item_id=? AND stage=?`, workItemID, stage); err != nil {
+			return false, err
+		}
 	}
 	return parked, tx.Commit()
 }
@@ -1228,8 +1349,8 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var stage, reason string
-	if err := tx.QueryRowContext(ctx, `SELECT current_stage, pause_reason FROM lifecycle_work_item WHERE work_item_id=? AND state='active'`, workItemID).Scan(&stage, &reason); err != nil {
+	var stage, reason, pausedStage string
+	if err := tx.QueryRowContext(ctx, `SELECT current_stage, pause_reason, paused_state FROM lifecycle_work_item WHERE work_item_id=? AND state='active'`, workItemID).Scan(&stage, &reason, &pausedStage); err != nil {
 		return fmt.Errorf("load resumable workflow: %w", err)
 	}
 	if reason == "" {
@@ -1237,7 +1358,7 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 	}
 	// delegate_failed parks explicitly for a human, so a human must be able to
 	// release it once the underlying delegate problem is addressed.
-	operatorReasons := map[string]bool{"manual": true, "wall_cap": true, "turn_cap": true, "retry_limit": true, "convergence_limit": true, "convergence_no_progress": true, "budget_cap": true, "fanout_limit": true, "workflow_definition_invalid": true, "workflow_block_unavailable": true, "delegate_failed": true, "replay_unrecoverable": true,
+	operatorReasons := map[string]bool{"manual": true, "wall_cap": true, "turn_cap": true, "retry_limit": true, "convergence_limit": true, "convergence_no_progress": true, "budget_cap": true, "fanout_limit": true, "workflow_definition_invalid": true, "workflow_block_unavailable": true, "delegate_failed": true, "repeated_runner_failure": true, "capacity_exhausted": true, "replay_unrecoverable": true, "publication_failed": true,
 		// A conflicting parent integration is deliberately aborted and parked with
 		// a clean worktree. An operator must resolve/commit the integration before
 		// releasing the item; no scheduler-owned transition can do that work.
@@ -1256,6 +1377,22 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 		// Keeping the exhausted value made the very next failed repair park again,
 		// effectively reducing recovery to one attempt per manual resume.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_stage_attempt WHERE work_item_id=? AND stage=?`, workItemID, stage); err != nil {
+			return err
+		}
+	}
+	if reason == "convergence_limit" || reason == "convergence_no_progress" {
+		if pausedStage == "" {
+			return errors.New("convergence park is missing its gate stage")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_stage_attempt WHERE work_item_id=? AND stage=?`, workItemID, pausedStage); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM wfe_convergence WHERE work_item_id=? AND gate=?`, workItemID, pausedStage); err != nil {
+			return err
+		}
+	}
+	if reason == "repeated_runner_failure" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_runner_failure WHERE work_item_id=? AND stage=?`, workItemID, stage); err != nil {
 			return err
 		}
 	}
@@ -1517,6 +1654,7 @@ func (s *Store) Delete(ctx context.Context, workItemID string) error {
 	for _, query := range []string{
 		`WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT w.work_item_id FROM lifecycle_work_item w JOIN tree t ON w.parent_id=t.id) DELETE FROM wfe_frozen_create WHERE work_item_id IN tree OR parent_id IN tree`,
 		`WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT w.work_item_id FROM lifecycle_work_item w JOIN tree t ON w.parent_id=t.id) DELETE FROM wfe_convergence WHERE work_item_id IN tree`,
+		`WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT w.work_item_id FROM lifecycle_work_item w JOIN tree t ON w.parent_id=t.id) DELETE FROM lifecycle_runner_failure WHERE work_item_id IN tree`,
 		`WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT w.work_item_id FROM lifecycle_work_item w JOIN tree t ON w.parent_id=t.id) DELETE FROM lifecycle_stage_attempt WHERE work_item_id IN tree`,
 		`WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT w.work_item_id FROM lifecycle_work_item w JOIN tree t ON w.parent_id=t.id) DELETE FROM lifecycle_event WHERE work_item_id IN tree`,
 		`WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT w.work_item_id FROM lifecycle_work_item w JOIN tree t ON w.parent_id=t.id) DELETE FROM lifecycle_work_item WHERE work_item_id IN tree`,
@@ -1566,6 +1704,37 @@ WHERE state='active' AND pause_reason=? AND updated_at <= ?`, reason, cutoff)
 	return count, nil
 }
 
+// ResumeChangedRunnerFailureBreakers releases only breakers whose pinned
+// workflow version no longer matches the durable work item version.
+func (s *Store) ResumeChangedRunnerFailureBreakers(ctx context.Context) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE lifecycle_work_item
+SET pause_reason='', paused_state='', updated_at=datetime('now')
+WHERE state='active' AND pause_reason='repeated_runner_failure' AND EXISTS (
+ SELECT 1 FROM lifecycle_runner_failure failure
+ WHERE failure.work_item_id=lifecycle_work_item.work_item_id
+   AND failure.stage=lifecycle_work_item.current_stage
+   AND failure.workflow_version<>lifecycle_work_item.workflow_version)`)
+	if err != nil {
+		return 0, err
+	}
+	resumed, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_runner_failure
+WHERE EXISTS (SELECT 1 FROM lifecycle_work_item item
+              WHERE item.work_item_id=lifecycle_runner_failure.work_item_id
+                AND item.workflow_version<>lifecycle_runner_failure.workflow_version)`); err != nil {
+		return 0, err
+	}
+	return resumed, tx.Commit()
+}
+
 func (s *Store) ResumeReadyParents(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE lifecycle_work_item AS parent
 SET pause_reason='', paused_state='', updated_at=datetime('now')
@@ -1607,6 +1776,9 @@ INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail, content_h
 VALUES (?, ?, 'terminal', 'go-wfe', ?, ?, ?)`, workItemID, stage, detail, contentHash,
 		costUSD); err != nil {
 		return fmt.Errorf("record terminal transition: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_runner_failure WHERE work_item_id=? AND stage=?`, workItemID, stage); err != nil {
+		return err
 	}
 	if state != "accepted" {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM wfe_frozen_create WHERE work_item_id=?`, workItemID); err != nil {

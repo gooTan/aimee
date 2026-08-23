@@ -1,5 +1,5 @@
 {
-  "name": "default",
+  "name": "plan",
   "seats": [
     {"model": "sol", "persona": "reviewer"},
     {"model": "antigravity", "persona": "qa"}

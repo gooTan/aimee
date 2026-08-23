@@ -11,7 +11,7 @@ func TestRoundtableStageGuidanceCoversEverySupportedStage(t *testing.T) {
 	tests := map[string]string{
 		"intent":      "acceptance criteria faithfully capture",
 		"plan":        "goal-only restatement",
-		"frozen_diff": "negative or unavailable lookup evidence",
+		"frozen_diff": "do not inspect the worktree or call tools",
 	}
 	for stage, marker := range tests {
 		if normalized, ok := normalizeRoundtableStage(stage); !ok || normalized != stage || !strings.Contains(roundtableStageGuidance(normalized), marker) {

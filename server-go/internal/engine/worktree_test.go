@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JBailes/aimee/server-go/internal/db1"
@@ -60,6 +61,65 @@ func TestParentUsesFeatureWorktreeAndChildBranchesFromIt(t *testing.T) {
 	}
 	if branch != "aimee/wi/wi_child" {
 		t.Fatalf("child branch=%s", branch)
+	}
+}
+
+func TestEnsureSharesRepositoryNodeModulesWithManagedWorktree(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@example", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@example")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-b", "trunk", repo)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "node_modules", ".bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "packages", "ui", "node_modules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "packages", "ui", "package.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", repo, "add", "README", "packages/ui/package.json")
+	run("-C", repo, "commit", "-m", "init")
+	run("-C", repo, "remote", "add", "origin", repo)
+	run("-C", repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+	run("-C", repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_node", Repo: repo, ProposalPath: "p", WorkflowName: "build", StartStage: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ := store.WorkItem(t.Context(), "wi_node")
+	worktree, _, err := manager.Ensure(t.Context(), item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(worktree, "node_modules"))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("managed worktree node_modules is not a symlink: info=%v err=%v", info, err)
+	}
+	info, err = os.Lstat(filepath.Join(worktree, "packages", "ui", "node_modules"))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("workspace package node_modules is not a symlink: info=%v err=%v", info, err)
+	}
+	status, err := exec.Command("git", "-C", worktree, "status", "--porcelain").CombinedOutput()
+	if err != nil || len(status) != 0 {
+		t.Fatalf("shared node_modules must remain outside the artifact: status=%q err=%v", status, err)
 	}
 }
 
@@ -373,6 +433,70 @@ func TestRepoIntegrationBranchUsesAdmittedCheckoutNotOriginHEAD(t *testing.T) {
 	}
 }
 
+func TestRootWorktreeStartsAtPinnedRemoteAndChildInheritsPin(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	repo := filepath.Join(root, "repo")
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@example",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@example")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run(root, "init", "--bare", "-b", "trunk", origin)
+	run(root, "clone", origin, repo)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "README")
+	run(repo, "commit", "-m", "initial")
+	run(repo, "push", "-u", "origin", "trunk")
+	oldSHA := strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "README")
+	run(repo, "commit", "-m", "advance")
+	run(repo, "push", "origin", "trunk")
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.AdmitRoot(ctx, db1.CreateWorkItem{ID: "wi_root", Repo: repo, ProposalPath: "root",
+		WorkflowName: "build", StartStage: "feature", BaseBranch: "trunk", BaseSHA: oldSHA}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(ctx, db1.CreateWorkItem{ID: "wi_root.child", Repo: repo, ProposalPath: "child",
+		WorkflowName: "slice", StartStage: "impl", ParentID: "wi_root"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootItem, _ := store.WorkItem(ctx, "wi_root")
+	rootTree, _, err := manager.Ensure(ctx, rootItem, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(gitRun(t, rootTree, "rev-parse", "HEAD")); got != oldSHA {
+		t.Fatalf("root worktree HEAD=%s, want pinned %s", got, oldSHA)
+	}
+	child, _ := store.WorkItem(ctx, "wi_root.child")
+	if child.BaseBranch != "trunk" || child.BaseSHA != oldSHA {
+		t.Fatalf("child pin=(%q,%q), want (trunk,%s)", child.BaseBranch, child.BaseSHA, oldSHA)
+	}
+	if _, _, err := manager.Ensure(ctx, rootItem, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A slice merges through the forge, which advances the REMOTE feature branch and
 // leaves the local ref where the run started. A later slice branched from that
 // stale local ref gets a tree missing the work earlier slices already landed, so
@@ -446,5 +570,156 @@ func TestSliceWorktreeBranchesFromMergedRemoteFeatureTip(t *testing.T) {
 	// delegate recreates that file and the merge conflicts terminally.
 	if _, statErr := os.Stat(filepath.Join(path, "slice-0.txt")); statErr != nil {
 		t.Fatalf("slice worktree branched from a stale base: %v", statErr)
+	}
+}
+
+func TestDependencyGraphControlsReuseAndFrozenInstall(t *testing.T) {
+	graphRepo := func(lock string, withModules bool) string {
+		dir := t.TempDir()
+		gitRun(t, dir, "init", "-b", "trunk")
+		files := map[string]string{
+			"pnpm-lock.yaml":           lock,
+			"pnpm-workspace.yaml":      "packages:\n  - packages/*\n",
+			"package.json":             `{"private":true}`,
+			"packages/ui/package.json": `{"name":"ui"}`,
+		}
+		for name, body := range files {
+			path := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gitRun(t, dir, "add", ".")
+		gitRun(t, dir, "commit", "-m", "graph")
+		if withModules {
+			for _, path := range []string{"node_modules", "packages/ui/node_modules"} {
+				if err := os.MkdirAll(filepath.Join(dir, path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return dir
+	}
+
+	source := graphRepo("lockfileVersion: '9.0'\n", true)
+	matching := graphRepo("lockfileVersion: '9.0'\n", false)
+	installs := 0
+	manager := &WorktreeManager{install: func(context.Context, string, ...string) ([]byte, error) {
+		installs++
+		return nil, nil
+	}}
+	if err := manager.prepareDependencies(t.Context(), "", source, matching); err != nil {
+		t.Fatal(err)
+	}
+	if installs != 0 {
+		t.Fatalf("matching graph ran installer %d time(s)", installs)
+	}
+	for _, path := range []string{"node_modules", "packages/ui/node_modules"} {
+		info, err := os.Lstat(filepath.Join(matching, path))
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("matching %s was not reused safely: %v", path, err)
+		}
+	}
+
+	mismatch := graphRepo("lockfileVersion: '8.0'\n", false)
+	if err := manager.prepareDependencies(t.Context(), "", source, mismatch); err != nil {
+		t.Fatal(err)
+	}
+	if installs != 1 {
+		t.Fatalf("mismatched graph installer calls=%d, want 1", installs)
+	}
+	if _, err := os.Lstat(filepath.Join(mismatch, "node_modules")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched graph shared source node_modules: %v", err)
+	}
+
+	manager.install = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("offline store lacks @scope/pkg@1.2.3"), errors.New("exit status 1")
+	}
+	failed := graphRepo("lockfileVersion: '7.0'\n", false)
+	err := manager.prepareDependencies(t.Context(), "", source, failed)
+	if err == nil || !strings.Contains(err.Error(), "offline store lacks @scope/pkg@1.2.3") {
+		t.Fatalf("frozen install diagnostic=%v", err)
+	}
+}
+
+func TestDependencyGraphChangeInvalidatesReadiness(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "source")
+	worktree := filepath.Join(root, "worktree")
+	for _, dir := range []string{repo, worktree} {
+		if err := os.MkdirAll(filepath.Join(dir, "packages/ui"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, dir, "init", "-b", "trunk")
+		for name, body := range map[string]string{
+			"pnpm-lock.yaml":           "lockfileVersion: '9.0'\n",
+			"pnpm-workspace.yaml":      "packages:\n  - packages/*\n",
+			"package.json":             `{"private":true}`,
+			"packages/ui/package.json": `{"name":"ui","version":"1"}`,
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gitRun(t, dir, "add", ".")
+		gitRun(t, dir, "commit", "-m", "graph")
+	}
+	if err := os.WriteFile(filepath.Join(repo, "pnpm-lock.yaml"), []byte("lockfileVersion: '8.0'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_graph", Repo: repo, ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	installs := 0
+	manager := &WorktreeManager{db: store, install: func(context.Context, string, ...string) ([]byte, error) { installs++; return nil, nil }}
+	if err := manager.prepareDependencies(t.Context(), "wi_graph", repo, worktree); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.prepareDependencies(t.Context(), "wi_graph", repo, worktree); err != nil {
+		t.Fatal(err)
+	}
+	if installs != 1 {
+		t.Fatalf("stable ready graph installed %d times, want 1", installs)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "packages/ui/package.json"), []byte(`{"name":"ui","version":"2"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.prepareDependencies(t.Context(), "wi_graph", repo, worktree); err != nil {
+		t.Fatal(err)
+	}
+	if installs != 2 {
+		t.Fatalf("changed graph installed %d times, want 2", installs)
+	}
+	item, err := store.WorkItem(t.Context(), "wi_graph")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&NativeRunner{db: store, worktrees: manager}).recordDependencyVerification(t.Context(), item, worktree, "verify"); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, exists, err := dependencyGraphFingerprint(worktree)
+	if err != nil || !exists {
+		t.Fatalf("fingerprint exists=%v err=%v", exists, err)
+	}
+	events, err := store.Events(t.Context(), "wi_graph", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, event := range events {
+		if event.ContentHash == fingerprint {
+			kinds[event.Kind] = true
+		}
+	}
+	if !kinds["dependency_graph"] || !kinds["verification"] {
+		t.Fatalf("matching readiness/verification evidence missing: %+v", kinds)
 	}
 }

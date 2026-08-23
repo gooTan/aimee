@@ -517,6 +517,7 @@ nodes:
 	runGit(t, repo, "config", "user.name", "Test")
 	runGit(t, repo, "add", ".")
 	runGit(t, repo, "commit", "-m", "proposal")
+	publishTestOrigin(t, repo)
 
 	body := []byte(`{"source":"proposals","proposal":"large","workspace":` +
 		strconv.Quote(repo) + `,"ref":"HEAD","pipeline":"build","mode":"autonomous"}`)
@@ -537,6 +538,11 @@ nodes:
 	}
 	if item.State != "active" || item.Stage != "plan" {
 		t.Fatalf("filed item=%+v", item)
+	}
+	branch := strings.TrimSpace(string(runGitOutput(t, repo, "branch", "--show-current")))
+	head := strings.TrimSpace(string(runGitOutput(t, repo, "rev-parse", "HEAD")))
+	if item.BaseBranch != branch || item.BaseSHA != head {
+		t.Fatalf("trigger admission pin=(%q,%q), want (%q,%q)", item.BaseBranch, item.BaseSHA, branch, head)
 	}
 	got, err := artifacts.Proposal(response.WorkItemID)
 	if err != nil {
@@ -611,6 +617,7 @@ func TestConfiguredTriggerScannerFilesPendingProposalWithoutManualFire(t *testin
 	runGit(t, repo, "config", "user.name", "Test")
 	runGit(t, repo, "add", ".")
 	runGit(t, repo, "commit", "-m", "proposal")
+	publishTestOrigin(t, repo)
 	configPath := filepath.Join(root, "aimee.yaml")
 	configText := "trigger:\n  max_concurrent: 2\ntrigger_rules:\n  - source: watch-dir\n    event: docs/proposals/pending\n    mode: autonomous\n    pipeline:\n      template: build\n      workspace: " + strconv.Quote(repo) + "\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
@@ -749,6 +756,29 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+func runGitOutput(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return output
+}
+
+func publishTestOrigin(t *testing.T, repo string) {
+	t.Helper()
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	runGit(t, filepath.Dir(bare), "init", "--bare", bare)
+	runGit(t, repo, "remote", "add", "origin", bare)
+	command := exec.Command("git", "-C", repo, "branch", "--show-current")
+	branch, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "push", "-u", "origin", strings.TrimSpace(string(branch)))
+}
+
 // trigger.max_concurrent = 0 is an operator saying "admit nothing". The store's
 // cap sentinel treats <=0 as unlimited (child slices depend on that), so the
 // admission paths must refuse a configured 0 explicitly — otherwise "pause
@@ -793,6 +823,7 @@ func TestManualFileSubmissionPreservesValidatedProposalSource(t *testing.T) {
 	}
 	runGit(t, root, "add", ".")
 	runGit(t, root, "commit", "-m", "proposal")
+	publishTestOrigin(t, root)
 	workflowDir := filepath.Join(root, "workflows")
 	if err := os.MkdirAll(workflowDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -829,6 +860,11 @@ func TestManualFileSubmissionPreservesValidatedProposalSource(t *testing.T) {
 	}
 	if item.SourcePath != "docs/proposals/pending/source-aware.md" {
 		t.Fatalf("source_path=%q", item.SourcePath)
+	}
+	branch := strings.TrimSpace(string(runGitOutput(t, root, "branch", "--show-current")))
+	head := strings.TrimSpace(string(runGitOutput(t, root, "rev-parse", "HEAD")))
+	if item.BaseBranch != branch || item.BaseSHA != head {
+		t.Fatalf("manual admission pin=(%q,%q), want (%q,%q)", item.BaseBranch, item.BaseSHA, branch, head)
 	}
 
 	body, err = json.Marshal(map[string]string{

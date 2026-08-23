@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/JBailes/aimee/server-go/delegate"
@@ -97,6 +99,7 @@ func (r *PanelReviewer) Review(ctx context.Context, request panel.ReviewRequest)
 		CostLimitUSD:     request.CostLimitUSD,
 		Workdir:          request.Workdir,
 		OriginalRequest:  original,
+		PriorFeedback:    request.PriorFeedback,
 		Reviewed: panel.Artifact{
 			Stage:   stage,
 			Content: request.Artifact,
@@ -125,6 +128,15 @@ func (r *PanelReviewer) Review(ctx context.Context, request panel.ReviewRequest)
 // told and never parses an error itself.
 type seatBus struct{ client *delegate.BusClient }
 
+func contextOnlyWorkdir() string {
+	dir := filepath.Join(os.TempDir(), "aimee-roundtable-context")
+	// The delegate boundary requires a checkout marker. Roundtable seats never
+	// inspect it; it only keeps context-only native CLIs away from repository
+	// instructions while their complete target travels in the prompt.
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o700)
+	return dir
+}
+
 func (s seatBus) request(run panel.Run, seat panel.SeatRequest) delegate.DelegateRequest {
 	return delegate.DelegateRequest{
 		Role:        seat.Role,
@@ -132,7 +144,10 @@ func (s seatBus) request(run panel.Run, seat panel.SeatRequest) delegate.Delegat
 		Delegate:    seat.Selector,
 		Participant: seat.Participant,
 		Prompt:      seat.Prompt,
-		Workdir:     run.Workdir,
+		// The prompt already carries the complete review target. Running from the
+		// repository would inject its agent instructions and encourage redundant
+		// searches, so context-only seats use the neutral system temp directory.
+		Workdir:     contextOnlyWorkdir(),
 		Tools:       seat.Tools,
 		MaxTurnsCap: seat.MaxTurnsCap,
 		DurableSlot: seat.DurableSlot,

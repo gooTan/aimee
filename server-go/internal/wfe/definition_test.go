@@ -74,6 +74,53 @@ func TestCurrentBuildWorkflowParses(t *testing.T) {
 	}
 }
 
+func TestSliceReviewFailuresRestartTheBoundedRepairCycle(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "config", "workflows", "slice.yaml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, err := ParseDefinition(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := map[string]struct {
+		block, next, onFail, delegate string
+	}{
+		"source":     {"author.proposal", "scope", "", ""},
+		"scope":      {"understand", "plan", "scope", "luna"},
+		"plan":       {"author.plan", "impl", "plan", "sol"},
+		"impl":       {"implement", "freeze", "scope", "luna"},
+		"freeze":     {"freeze", "sol_review", "", ""},
+		"sol_review": {"review", "rt_gate", "scope", "sol"},
+		"rt_gate":    {"gate.roundtable", "", "scope", ""},
+	}
+	for id, want := range wants {
+		node, ok := def.Node(id)
+		if !ok {
+			t.Fatalf("missing repair-cycle node %q", id)
+		}
+		if node.Block != want.block || node.Next != want.next || node.OnFail != want.onFail {
+			t.Fatalf("node %s=%+v, want block=%s next=%s on_fail=%s", id, node, want.block, want.next, want.onFail)
+		}
+		if want.delegate != "" && node.Params["delegate"] != want.delegate {
+			t.Fatalf("node %s delegate=%v, want %s", id, node.Params["delegate"], want.delegate)
+		}
+	}
+	plan, _ := def.Node("plan")
+	if plan.Params["mechanical"] != true || plan.Params["scout_artifact"] != "scope" || plan.Params["current_artifact"] != "freeze" {
+		t.Fatalf("planner is not bound to mechanical current-state repair: %+v", plan.Params)
+	}
+	review, _ := def.Node("sol_review")
+	if review.Params["require_code_review_skill"] != true || review.Params["max_rounds"] != 3 {
+		t.Fatalf("Sol review is not skill-bound and capped: %+v", review.Params)
+	}
+	roundtable, _ := def.Node("rt_gate")
+	if roundtable.Params["max_rounds"] != 3 {
+		t.Fatalf("roundtable is not capped at three: %+v", roundtable.Params)
+	}
+}
+
 func TestDefinitionRejectsMissingProducer(t *testing.T) {
 	_, err := ParseDefinition([]byte(`
 name: broken

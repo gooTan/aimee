@@ -60,6 +60,40 @@ type Forge interface {
 	Merge(context.Context, string, string, string) error
 }
 
+type expectedOpenForge interface {
+	OpenExpected(context.Context, string, string, string, string, string, PullRequestSpec) (PullRequest, error)
+}
+
+var (
+	ErrForgePublication      = errors.New("forge publication failed")
+	ErrForgeLeaseMismatch    = errors.New("forge lease mismatch")
+	ErrForgeNonFastForward   = errors.New("forge non-fast-forward")
+	ErrForgeUnverifiedCommit = errors.New("forge unverified commit")
+)
+
+type ForgePublicationError struct {
+	Code   string
+	Detail string
+}
+
+func (e *ForgePublicationError) Error() string { return e.Code + ": " + e.Detail }
+func (e *ForgePublicationError) Is(target error) bool {
+	if target == ErrForgePublication {
+		return true
+	}
+	switch e.Code {
+	case "lease_mismatch":
+		return target == ErrForgeLeaseMismatch
+	case "non_fast_forward":
+		return target == ErrForgeNonFastForward
+	case "unverified_commit":
+		return target == ErrForgeUnverifiedCommit
+	default:
+		return false
+	}
+}
+func (e *ForgePublicationError) Unwrap() error { return ErrForgePublication }
+
 type unavailableForge struct{}
 
 func (unavailableForge) Push(context.Context, string, string, string) error {
@@ -70,6 +104,14 @@ func (unavailableForge) Open(context.Context, string, string, string, string, Pu
 }
 
 func (f *HTTPForge) Push(ctx context.Context, repo, workdir, head string) error {
+	return f.push(ctx, repo, workdir, head, "")
+}
+
+func (f *HTTPForge) PushExpected(ctx context.Context, repo, workdir, head, expectedRemote string) error {
+	return f.push(ctx, repo, workdir, head, expectedRemote)
+}
+
+func (f *HTTPForge) push(ctx context.Context, repo, workdir, head, expectedRemote string) error {
 	if !managedBranch(head) {
 		return fmt.Errorf("refuse push of unmanaged branch %q", head)
 	}
@@ -82,7 +124,11 @@ func (f *HTTPForge) Push(ctx context.Context, repo, workdir, head string) error 
 		return errors.New("worktree origin does not match admitted repository")
 	}
 	var ignored map[string]any
-	return f.execute(ctx, map[string]any{"op": "push", "workdir": workdir, "head": head}, &ignored)
+	input := map[string]any{"op": "push", "workdir": workdir, "head": head}
+	if expectedRemote != "" {
+		input["expected_remote"] = expectedRemote
+	}
+	return f.execute(ctx, input, &ignored)
 }
 
 func (f *HTTPForge) Identity(ctx context.Context, workdir string) (GitIdentity, error) {
@@ -139,6 +185,14 @@ func NewHTTPForge(cfg HTTPForgeConfig) (*HTTPForge, error) {
 }
 
 func (f *HTTPForge) Open(ctx context.Context, repo, workdir, head, base string, spec PullRequestSpec) (PullRequest, error) {
+	return f.open(ctx, repo, workdir, head, base, "", spec)
+}
+
+func (f *HTTPForge) OpenExpected(ctx context.Context, repo, workdir, head, base, expectedRemote string, spec PullRequestSpec) (PullRequest, error) {
+	return f.open(ctx, repo, workdir, head, base, expectedRemote, spec)
+}
+
+func (f *HTTPForge) open(ctx context.Context, repo, workdir, head, base, expectedRemote string, spec PullRequestSpec) (PullRequest, error) {
 	if !managedBranch(head) {
 		return PullRequest{}, fmt.Errorf("refuse push of unmanaged branch %q", head)
 	}
@@ -162,9 +216,13 @@ func (f *HTTPForge) Open(ctx context.Context, repo, workdir, head, base string, 
 	var result struct {
 		URL string `json:"url"`
 	}
-	if err := f.execute(ctx, map[string]any{"op": "open", "workdir": workdir,
+	input := map[string]any{"op": "open", "workdir": workdir,
 		"head": head, "base": base, "title": spec.Title, "body": spec.Body,
-		"draft": spec.Draft}, &result); err != nil {
+		"draft": spec.Draft}
+	if expectedRemote != "" {
+		input["expected_remote"] = expectedRemote
+	}
+	if err := f.execute(ctx, input, &result); err != nil {
 		return PullRequest{}, err
 	}
 	if result.URL == "" {
@@ -240,11 +298,35 @@ func (f *HTTPForge) execute(ctx context.Context, input, output any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("forge resource %s: %s", strconv.Itoa(resp.StatusCode), safeDiagnostic(string(data)))
+	data, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return readErr
 	}
-	if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("decode forge response: %w", err)
+	}
+	var ok bool
+	_ = json.Unmarshal(envelope["ok"], &ok)
+	var code, responseError, detail string
+	_ = json.Unmarshal(envelope["code"], &code)
+	_ = json.Unmarshal(envelope["error"], &responseError)
+	_ = json.Unmarshal(envelope["detail"], &detail)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !ok {
+		if code == "" {
+			code = "publication_failed"
+		}
+
+		if detail == "" {
+			detail = responseError
+		}
+		return &ForgePublicationError{Code: code, Detail: safeDiagnostic(detail)}
+	}
+	result, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("encode forge response: %w", err)
+	}
+	if err := json.Unmarshal(result, output); err != nil {
 		return fmt.Errorf("decode forge response: %w", err)
 	}
 	return nil
@@ -273,7 +355,22 @@ func mergeErrIsConflict(err error) bool {
 }
 
 func managedBranch(branch string) bool {
-	return strings.HasPrefix(branch, "aimee/wi/wi_") || strings.HasPrefix(branch, "aimee/feat/wi_")
+	for _, prefix := range []string{"aimee/wi/wi_", "aimee/feat/wi_"} {
+		if !strings.HasPrefix(branch, prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(branch, prefix)
+		if suffix == "" || strings.Contains(suffix, "/") || strings.Contains(suffix, "..") {
+			return false
+		}
+		for _, c := range suffix {
+			if !(c == '_' || c == '.' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func pullNumber(ref string) (int, error) {

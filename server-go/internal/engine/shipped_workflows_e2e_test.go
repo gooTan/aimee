@@ -229,13 +229,25 @@ func assertShippedStagesVisited(t *testing.T, store *db1.Store, id string, defin
 	if err != nil {
 		t.Fatal(err)
 	}
-	visited := make(map[string]bool)
-	for _, event := range events {
-		visited[event.Stage] = true
-	}
+	nodes := make(map[string]wfe.Node, len(definition.Nodes))
 	for _, node := range definition.Nodes {
-		if !visited[node.ID] {
-			t.Errorf("workflow %s never visited stage %s; events=%+v", definition.Name, node.ID, events)
+		nodes[node.ID] = node
+	}
+	if len(events) == 0 || events[0].Stage != definition.Start {
+		t.Fatalf("workflow %s did not start at %s; events=%+v", definition.Name, definition.Start, events)
+	}
+	for i := 1; i < len(events); i++ {
+		from, to := events[i-1].Stage, events[i].Stage
+		if from == to {
+			continue
+		}
+		node, ok := nodes[from]
+		if !ok {
+			t.Fatalf("workflow %s emitted unknown stage %s; events=%+v", definition.Name, from, events)
+		}
+		reachable := to == node.Next || to == node.OnPass || to == node.OnFail
+		if !reachable {
+			t.Errorf("workflow %s moved from %s to unreachable stage %s; events=%+v", definition.Name, from, to, events)
 		}
 	}
 }

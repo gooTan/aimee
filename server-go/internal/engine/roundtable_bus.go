@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/JBailes/aimee/server-go/bus"
@@ -28,24 +27,16 @@ const (
 // spends the money, and the reply arrives correlated on the same bus -- there
 // is no polling and no second transport.
 type BusReviewer struct {
-	// mu serializes calls: a caller owns its client, because a Client has a
-	// single reply stream and sharing one across concurrent callers is exactly
-	// the mistake that deadlocked the C side.
-	mu      sync.Mutex
-	caller  *bus.ModuleCaller
+	caller  *bus.ConcurrentModuleCaller
 	timeout time.Duration
 }
 
-// NewBusReviewer attaches to the daemon's module bus as the WFE principal.
-func NewBusReviewer(ctx context.Context, socketPath string, principalClass, principalRef uint32,
-	timeout time.Duration) (*BusReviewer, error) {
-	client, err := bus.ConnectClient(ctx, socketPath, principalClass, principalRef)
-	if err != nil {
-		return nil, fmt.Errorf("attach to the module bus: %w", err)
-	}
-	caller, err := bus.NewModuleCaller(client)
-	if err != nil {
-		return nil, err
+// NewBusReviewer uses the WFE's existing concurrent module caller. The bus
+// admits one connection per principal, so attaching a second client for
+// roundtable would be rejected and disable reviews at startup.
+func NewBusReviewer(caller *bus.ConcurrentModuleCaller, timeout time.Duration) (*BusReviewer, error) {
+	if caller == nil {
+		return nil, errors.New("roundtable module caller is not configured")
 	}
 	if timeout <= 0 {
 		// A review runs a panel of live agents; the module enforces its own
@@ -65,15 +56,20 @@ func (r *BusReviewer) Review(ctx context.Context, request roundtablecfg.ReviewRe
 	if err != nil {
 		return roundtablecfg.RunResult{}, err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	reply, err := r.caller.Call(ctx, roundtablemod.EventReview, roundtablemod.StageReview, 0, r.timeout, body)
 	if err != nil {
 		return roundtablecfg.RunResult{}, fmt.Errorf("roundtable review over the bus: %w", err)
 	}
+	return decodeRoundtableReply(reply)
+}
+
+func decodeRoundtableReply(reply []byte) (roundtablecfg.RunResult, error) {
 	var result roundtablecfg.RunResult
 	if err := json.Unmarshal(reply, &result); err != nil {
 		return roundtablecfg.RunResult{}, fmt.Errorf("decode roundtable result: %w", err)
+	}
+	if result.PauseReason == "replay_unavailable" {
+		return result, fmt.Errorf("%s: %w", result.Detail, roundtablecfg.ErrReplayUnavailable)
 	}
 	return result, nil
 }

@@ -309,6 +309,7 @@ func TestImplementationPromptUsesNoOpForSiblingSatisfiedTask(t *testing.T) {
 		"work merged by a sibling",
 		"leave the worktree unchanged",
 		"do not manufacture cosmetic changes",
+		"Do not delegate or create nested worktrees",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("implementation prompt missing %q: %q", want, prompt)
@@ -1432,6 +1433,35 @@ func TestRoundtableSkipsReviewWhenArtifactIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestRoundtableCarriesPriorFeedbackToSeatsAndChairman(t *testing.T) {
+	agents := &recordingAgents{}
+	runner := withPanel(&NativeRunner{agents: agents}, chairmanTestRoundtable(t))
+	artifact := wfe.Artifact{Type: "frozen_diff", Content: []byte("diff --git a/auth.ts b/auth.ts\nrotated cookie is applied\n")}
+	artifact.Hash = wfe.Hash(artifact.Content)
+	result, err := runner.roundtable(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_repair", Worktree: "/worktree"},
+		Node:     wfe.Node{ID: "gate", Block: "gate.roundtable", Params: map[string]any{"roundtable": "default"}},
+		Proposal: "keep the current browser session valid after changing the password",
+		Inputs:   map[string]wfe.Artifact{"src": artifact},
+		Feedback: &wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: "previous-hash", Findings: []wfe.Finding{{
+			ID: "prior-cookie-rotation", Severity: "blocking", Recommendation: "apply the rotated session cookie",
+		}}},
+	})
+	if err != nil || (result.Status != StepAdvanced && result.PauseReason != "roundtable_chairman") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(agents.requests) < 3 {
+		t.Fatalf("requests=%d, want analysis seats and chairman", len(agents.requests))
+	}
+	for _, request := range agents.requests {
+		for _, want := range []string{"prior-cookie-rotation", "apply the rotated session cookie", "Do not reverse a prior remediation"} {
+			if !strings.Contains(request.Prompt, want) {
+				t.Fatalf("%s prompt omitted %q: %s", request.Persona, want, request.Prompt)
+			}
+		}
+	}
+}
+
 // A refinement loop regenerates byte-identical packets. The fanout generation
 // in the child id makes those children distinct rows, so the packet identity
 // recorded alongside them must be generation-scoped too. Keying it on the
@@ -1846,6 +1876,136 @@ func TestPlannerIsAskedForTheSmallestPlanThatSatisfiesTheRequest(t *testing.T) {
 		"technical debt", "Taking on documented technical debt is completely acceptable", "leaving it undocumented"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("planner prompt lacks its scope bound %q", want)
+		}
+	}
+}
+
+func TestMechanicalRepairPlanCarriesScoutDiffAndFindings(t *testing.T) {
+	valid := `{"schema_version":1,"steps":[{"order":1,"finding_id":"review-1","file":"auth.test.ts","location":"current-session test","edit":"Keep the current session valid and invalidate only otherSession.","expected_result":"The current session remains authenticated.","verification":["pnpm vitest auth.test.ts"]}]}`
+	agents := &recordingAgents{draftResponses: []string{valid}}
+	artifacts, err := wfe.NewArtifactStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.PutNodeArtifact("wi_repair", "scope", "intent", []byte("LUNA SCOUT RESULT")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.PutNodeArtifact("wi_repair", "freeze", "frozen_diff", []byte("CURRENT DIFF")); err != nil {
+		t.Fatal(err)
+	}
+	runner := &NativeRunner{agents: agents, artifacts: artifacts}
+	feedback := &wfe.ReviewFeedback{SchemaVersion: 1, Findings: []wfe.Finding{{ID: "review-1", Severity: "blocking", Summary: "current session is invalidated", Recommendation: "invalidate only other sessions"}}}
+	result, err := runner.author(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_repair", Repo: "/repo"},
+		Node: wfe.Node{ID: "plan", Params: map[string]any{
+			"mechanical": true, "delegate": "sol", "scout_artifact": "scope", "current_artifact": "freeze",
+		}},
+		Proposal: "repair password session handling",
+		Inputs:   map[string]wfe.Artifact{"proposal": {Type: "proposal", Content: []byte("repair password session handling")}},
+		Feedback: feedback,
+	}, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced || result.Artifact != valid {
+		t.Fatalf("result=%+v", result)
+	}
+	prompt := agents.requests[0].Prompt
+	if !agents.requests[0].Tools {
+		t.Fatal("native Codex mechanical planner was dispatched tools-disabled")
+	}
+	for _, want := range []string{"MECHANICAL", "LUNA SCOUT RESULT", "CURRENT DIFF", "review-1", "exact verification", "no choices"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("mechanical planner prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestMechanicalRepairPlanRejectsJudgmentWithoutVerification(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"steps":[{"order":1,"finding_id":"review-1","file":"auth.test.ts","location":"test","edit":"Improve it","expected_result":"works","verification":[]}]}`}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.author(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi", Repo: "/repo"},
+		Node:     wfe.Node{ID: "plan", Params: map[string]any{"mechanical": true}},
+		Inputs:   map[string]wfe.Artifact{"proposal": {Type: "intent", Content: []byte("scout")}},
+	}, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepChanges || !strings.Contains(result.Detail, "verification") {
+		t.Fatalf("invalid mechanical plan advanced: %+v", result)
+	}
+}
+
+func TestRepairScoutReceivesFrozenDiffAndStructuredFindings(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"status":"unconfirmed","summary":"inspect current implementation","rationale":"review requested changes","acceptance_criteria":["resolve review-1"]}`}}
+	artifacts, err := wfe.NewArtifactStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifacts.PutNodeArtifact("wi_repair", "freeze", "frozen_diff", []byte("FROZEN IMPLEMENTATION")); err != nil {
+		t.Fatal(err)
+	}
+	runner := &NativeRunner{agents: agents, artifacts: artifacts}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_repair", Repo: "/repo"},
+		Node:     wfe.Node{ID: "scope", Params: map[string]any{"delegate": "luna", "current_artifact": "freeze"}},
+		Proposal: "repair the feature",
+		Feedback: &wfe.ReviewFeedback{SchemaVersion: 1, Findings: []wfe.Finding{{ID: "review-1", Severity: "blocking", Recommendation: "preserve the current session"}}},
+	}, "intent")
+	if err != nil || result.Status != StepAdvanced {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	prompt := agents.requests[0].Prompt
+	if !agents.requests[0].Tools {
+		t.Fatal("native Codex scout was dispatched tools-disabled")
+	}
+	for _, want := range []string{"FROZEN IMPLEMENTATION", "review-1", "what is already implemented", "do not propose solutions yet"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("repair scout prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestRequiredCodeReviewSkillIsActuallyInvoked(t *testing.T) {
+	agents := &recordingAgents{reviewResponse: `{"verdict":"approve","findings":[]}`}
+	runner := &NativeRunner{agents: agents}
+	reviewed := wfe.Artifact{Type: "frozen_diff", Content: []byte("diff"), Hash: wfe.Hash([]byte("diff"))}
+	result, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "sol_review", Params: map[string]any{
+			"delegate": "sol", "require_code_review_skill": true,
+			"task": "Apply the repository code-review skill across the Standards and Spec axes.",
+		}},
+		Proposal: "implement the request", Inputs: map[string]wfe.Artifact{"src": reviewed},
+		Feedback: &wfe.ReviewFeedback{SchemaVersion: 1, Findings: []wfe.Finding{{
+			ID: "prior-1", Severity: "blocking", Recommendation: "apply the rotated session cookie",
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(agents.requests) != 2 {
+		t.Fatalf("code-review skill dispatched %d axes, want Standards and Spec", len(agents.requests))
+	}
+	for _, axis := range []string{"Standards", "Spec"} {
+		var request DelegateRequest
+		for _, candidate := range agents.requests {
+			if strings.Contains(candidate.Prompt, "You are the "+axis+" axis") {
+				request = candidate
+				break
+			}
+		}
+		if !request.Tools {
+			t.Fatalf("%s axis cannot launch through native Codex without its required capability flag", axis)
+		}
+		for _, want := range []string{"code-review skill", axis, "Do not delegate", "perform a wide search", "prior-1", "apply the rotated session cookie", "Do not reverse a prior remediation"} {
+			if !strings.Contains(request.Prompt, want) {
+				t.Fatalf("%s review prompt did not enforce %q: %s", axis, want, request.Prompt)
+			}
 		}
 	}
 }

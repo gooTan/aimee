@@ -90,6 +90,11 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	baseBranch, baseSHA, err := pinIntegrationBase(r.Context(), repo)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	id, err := mintWorkItemID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -108,7 +113,8 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.db.AdmitRoot(r.Context(), db1.CreateWorkItem{ID: id, Repo: repo,
 		ProposalPath: identity, WorkflowName: definition.Name, WorkflowVersion: definition.Version,
-		StartStage: start, Mode: "autonomous", Submitter: workflowPrincipal(r), SourcePath: sourcePath}, cap); err != nil {
+		StartStage: start, Mode: "autonomous", Submitter: workflowPrincipal(r), SourcePath: sourcePath,
+		BaseBranch: baseBranch, BaseSHA: baseSHA}, cap); err != nil {
 		_ = s.artifacts.DeleteWorkItem(id)
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			if existing, findErr := s.db.WorkItemByProposal(r.Context(), repo, identity); findErr == nil {

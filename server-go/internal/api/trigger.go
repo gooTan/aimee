@@ -440,10 +440,15 @@ func (s *Server) fileProposal(ctx context.Context, request triggerFireRequest) (
 		_ = s.artifacts.DeleteWorkItem(workItemID)
 		return "", "", fmt.Errorf("%w (admission paused: trigger.max_concurrent is 0)", db1.ErrAdmissionFull)
 	}
+	baseBranch, baseSHA, err := pinIntegrationBase(ctx, workspace)
+	if err != nil {
+		_ = s.artifacts.DeleteWorkItem(workItemID)
+		return "", "", err
+	}
 	if err := s.db.AdmitRoot(ctx, db1.CreateWorkItem{
 		ID: workItemID, Repo: workspace, ProposalPath: identity, WorkflowName: definition.Name,
 		WorkflowVersion: definition.Version, StartStage: start, Mode: request.Mode,
-		SourcePath: proposalPath, MaxCostUSD: request.MaxSpend,
+		SourcePath: proposalPath, MaxCostUSD: request.MaxSpend, BaseBranch: baseBranch, BaseSHA: baseSHA,
 	}, cap); err != nil {
 		_ = s.artifacts.DeleteWorkItem(workItemID)
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {

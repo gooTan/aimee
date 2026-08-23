@@ -46,12 +46,13 @@ func Hash(content []byte) string {
 }
 
 type ReviewRequest struct {
-	Artifact        string `json:"artifact"`
-	OriginalRequest string `json:"original_request"`
-	ArtifactStage   string `json:"artifact_stage"`
-	Roundtable      string `json:"roundtable"`
-	Workdir         string `json:"workdir"`
-	RunID           string `json:"run_id"`
+	Artifact        string          `json:"artifact"`
+	OriginalRequest string          `json:"original_request"`
+	PriorFeedback   *ReviewFeedback `json:"prior_feedback,omitempty"`
+	ArtifactStage   string          `json:"artifact_stage"`
+	Roundtable      string          `json:"roundtable"`
+	Workdir         string          `json:"workdir"`
+	RunID           string          `json:"run_id"`
 
 	// Stage and ExecutionVersion identify which attempt of which step this is.
 	// They key the durable slot each seat reserves, so a caller that omits them

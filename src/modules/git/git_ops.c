@@ -4,10 +4,13 @@
 #include "git_pr_api.h"                        /* git_pr_create_via_api — in-process REST open-PR */
 #include "util.h"                              /* safe_exec_capture_cwd_env_timeout */
 #include "modules/workspace/workspace_scope.h" /* ws_scope_project_path */
+#include "git_verify.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <ctype.h>
 #include <unistd.h> /* close — release the token memfd after the git exec */
 
 extern char **environ;
@@ -68,6 +71,24 @@ static int validate_managed_ref(const char *ref, char *err, size_t errlen)
       snprintf(err, errlen, "managed push ref is invalid");
       return -1;
    }
+    /* The callback validates syntax and registered ownership. Keep the final
+     * destination policy here as an independent boundary check. */
+     const char *suffix = NULL;
+     if (strncmp(ref, "aimee/feat/wi_", 14) == 0)
+        suffix = ref + 14;
+     else if (strncmp(ref, "aimee/wi/wi_", 12) == 0)
+        suffix = ref + 12;
+     if (!suffix || !suffix[0] || strstr(suffix, ".."))
+    {
+       snprintf(err, errlen, "managed push ref is not an exact owned AIMEE ref");
+       return -1;
+    }
+     for (const unsigned char *p = (const unsigned char *)suffix; *p; p++)
+        if (!(isalnum(*p) || *p == '_' || *p == '.'))
+        {
+           snprintf(err, errlen, "managed push ref is not an exact owned AIMEE ref");
+           return -1;
+        }
    return 0;
 }
 
@@ -115,7 +136,7 @@ static char **harden_push_env(char **source)
    /* Deliberately allowlist only the fd-fed askpass seam. Do not inherit HOME,
     * GIT_DIR/WORK_TREE/object/index selectors, proxy/TLS/header overrides, or
     * any other repository/transport control from the daemon environment. */
-   char **out = calloc(8, sizeof(char *));
+   char **out = calloc(9, sizeof(char *));
    if (!out)
       return NULL;
    size_t n = 0;
@@ -132,7 +153,8 @@ static char **harden_push_env(char **source)
    out[n++] = strdup("GIT_CONFIG_NOSYSTEM=1");
    out[n++] = strdup("GIT_CONFIG_SYSTEM=/dev/null");
    out[n++] = strdup("GIT_CONFIG_GLOBAL=/dev/null");
-   if (!out[n - 1] || !out[n - 2] || !out[n - 3] || !out[n - 4])
+   out[n++] = strdup("LC_ALL=C");
+   if (!out[n - 1] || !out[n - 2] || !out[n - 3] || !out[n - 4] || !out[n - 5])
       goto fail;
    return out;
 fail:
@@ -140,40 +162,106 @@ fail:
    return NULL;
 }
 
-int git_ops_push_dir(const char *principal, const char *repo_dir, const char *remote_url,
-                     const char *branch, char **out, char *err, size_t errlen)
+static void push_code(char *code, size_t code_len, const char *value)
 {
+   if (code && code_len)
+      snprintf(code, code_len, "%s", value);
+}
+
+static int sha_is_valid(const char *sha)
+{
+   size_t n = sha ? strlen(sha) : 0;
+   if (n != 40 && n != 64)
+      return 0;
+   for (size_t i = 0; i < n; i++)
+      if (!((sha[i] >= '0' && sha[i] <= '9') || (sha[i] >= 'a' && sha[i] <= 'f') ||
+            (sha[i] >= 'A' && sha[i] <= 'F')))
+         return 0;
+   return 1;
+}
+
+int git_ops_push_dir_ex(const char *principal, const char *repo_dir, const char *remote_url,
+                        const char *branch, const char *expected_remote, char **out, char *code,
+                        size_t code_len, char *err, size_t errlen)
+{
+   push_code(code, code_len, "publication_failed");
    if (out)
       *out = NULL;
    if (err && errlen)
       err[0] = '\0';
    if (!repo_dir || !repo_dir[0] || !remote_url || !remote_url[0])
    {
+      push_code(code, code_len, "invalid_publication");
       snprintf(err, errlen, "managed push repository and remote are required");
       return -1;
    }
    if (validate_managed_ref(branch, err, errlen) != 0)
+   {
+      push_code(code, code_len, "invalid_publication");
       return -1;
+   }
+   if (expected_remote && expected_remote[0] && !sha_is_valid(expected_remote))
+   {
+      push_code(code, code_len, "invalid_expected_remote");
+      snprintf(err, errlen, "expected remote must be exactly 40 or 64 hexadecimal characters");
+      return -1;
+   }
+   if (expected_remote && expected_remote[0] && strncmp(branch, "aimee/feat/wi_", 14) != 0)
+   {
+      push_code(code, code_len, "invalid_publication");
+      snprintf(err, errlen, "lease publication is restricted to a managed feature branch");
+      return -1;
+   }
+   if (expected_remote && expected_remote[0])
+   {
+      char commit[80], verify_msg[512];
+      char *head_out = NULL;
+      const char *head_argv[] = {"git", "-C", repo_dir, "rev-parse", "HEAD", NULL};
+      if (safe_exec_capture(head_argv, &head_out, 80) != 0 || !head_out)
+      {
+         free(head_out);
+         push_code(code, code_len, "unverified_commit");
+         snprintf(err, errlen, "cannot resolve local HEAD");
+         return -1;
+      }
+      snprintf(commit, sizeof commit, "%s", head_out);
+      free(head_out);
+      commit[strcspn(commit, "\r\n")] = '\0';
+      if (verify_gate_blocks(repo_dir, commit, verify_msg, sizeof verify_msg))
+      {
+         push_code(code, code_len, "unverified_commit");
+         snprintf(err, errlen, "%s", verify_msg[0] ? verify_msg : "local commit is not verified");
+         return -1;
+      }
+   }
    char refspec[420];
-   if ((size_t)snprintf(refspec, sizeof(refspec), "%s:%s", branch, branch) >= sizeof(refspec))
+   if ((size_t)snprintf(refspec, sizeof(refspec), "%s:refs/heads/%s", branch, branch) >= sizeof(refspec))
    {
       snprintf(err, errlen, "managed push ref too long");
       return -1;
    }
-   const char *argv[] = {"git",
-                         "-c",
-                         "core.hooksPath=/dev/null",
-                         "-c",
-                         "credential.helper=",
-                         "-c",
-                         "protocol.allow=never",
-                         "-c",
-                         "protocol.https.allow=always",
-                         "push",
-                         "-u",
-                         remote_url,
-                         refspec,
-                         NULL};
+   char lease[180];
+   const char *argv[20];
+   size_t ai = 0;
+   argv[ai++] = "git";
+   argv[ai++] = "-c";
+   argv[ai++] = "core.hooksPath=/dev/null";
+   argv[ai++] = "-c";
+   argv[ai++] = "credential.helper=";
+   argv[ai++] = "-c";
+   argv[ai++] = "protocol.allow=never";
+   argv[ai++] = "-c";
+   argv[ai++] = "protocol.https.allow=always";
+   argv[ai++] = "push";
+   argv[ai++] = "--porcelain";
+   if (expected_remote && expected_remote[0])
+   {
+      snprintf(lease, sizeof lease, "--force-with-lease=refs/heads/%s:%s", branch, expected_remote);
+      argv[ai++] = lease;
+   }
+   argv[ai++] = remote_url;
+   argv[ai++] = refspec;
+   argv[ai] = NULL;
    int token_fd = -1;
    char **envp =
        git_cred_inject_build_env_for_repo(principal, remote_url, NULL, NULL, environ, &token_fd);
@@ -232,10 +320,24 @@ int git_ops_push_dir(const char *principal, const char *repo_dir, const char *re
       /* Preserve the complete capture in *out. The typed resource route carries
        * it in a separate detail field, so diagnostics are never byte-truncated
        * into this fixed-size summary buffer. */
-      snprintf(err, errlen, "git push failed (rc=%d)", rc);
+       const char *diagnostic = out && *out ? *out : "";
+       if (expected_remote && expected_remote[0] &&
+           (strstr(diagnostic, "stale info") || strstr(diagnostic, "rejected")))
+          push_code(code, code_len, "lease_mismatch");
+       else if (strstr(diagnostic, "non-fast-forward"))
+          push_code(code, code_len, "non_fast_forward");
+       snprintf(err, errlen, "git push failed (rc=%d)", rc);
       return -1;
    }
+   push_code(code, code_len, "published");
    return 0;
+}
+
+int git_ops_push_dir(const char *principal, const char *repo_dir, const char *remote_url,
+                     const char *branch, char **out, char *err, size_t errlen)
+{
+   return git_ops_push_dir_ex(principal, repo_dir, remote_url, branch, NULL, out, NULL, 0, err,
+                              errlen);
 }
 
 /* Resolve the working dir for `project`: the project checkout, or — when

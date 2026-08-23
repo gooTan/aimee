@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -9,8 +10,34 @@ import (
 	"github.com/JBailes/aimee/server-go/bus"
 	"github.com/JBailes/aimee/server-go/internal/db1"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
+	roundtablemod "github.com/JBailes/aimee/server-go/modules/roundtable"
 	roundtablecfg "github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
+
+type replayUnavailableReviewer struct{}
+
+func (replayUnavailableReviewer) Review(context.Context, roundtablecfg.ReviewRequest) (roundtablecfg.RunResult, error) {
+	return roundtablecfg.RunResult{CostUSD: 1.25, CostUnknown: true}, roundtablecfg.ErrReplayUnavailable
+}
+
+func TestRoundtableBusPreservesReplayUnavailable(t *testing.T) {
+	request, err := json.Marshal(roundtablecfg.ReviewRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, status := roundtablemod.NewReviewHandler(replayUnavailableReviewer{})(
+		bus.ModuleInvocation{StageID: roundtablemod.StageReview}, request)
+	if status != bus.ModuleStatusOK {
+		t.Fatalf("status = %v, want OK so the result body crosses the bus", status)
+	}
+	result, err := decodeRoundtableReply(body)
+	if !errors.Is(err, roundtablecfg.ErrReplayUnavailable) {
+		t.Fatalf("err = %v, want ErrReplayUnavailable", err)
+	}
+	if result.CostUSD != 1.25 || !result.CostUnknown {
+		t.Fatalf("result = %+v, want preserved cost", result)
+	}
+}
 
 type statusReviewer struct{ status bus.ModuleStatus }
 

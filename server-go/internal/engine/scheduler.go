@@ -191,6 +191,11 @@ func (s *Scheduler) fill(ctx context.Context) {
 		}
 		s.log.Warn("stopped orphaned workflow descendants", "count", len(stopped))
 	}
+	if resumed, err := s.db.ResumeChangedRunnerFailureBreakers(ctx); err != nil {
+		s.log.Error("resume changed runner-failure breakers", "error", err)
+	} else if resumed > 0 {
+		s.log.Info("resumed changed runner-failure breakers", "count", resumed)
+	}
 	if cancelTerminal != nil {
 		if cancelled, err := cancelTerminal(ctx); err != nil {
 			s.log.Error("cancel terminal workflow delegate jobs", "cancelled", cancelled, "error", err)

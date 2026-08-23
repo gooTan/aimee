@@ -196,6 +196,84 @@ func TestIntegrateFeatureBaseNoopWhenAlreadyCurrent(t *testing.T) {
 	}
 }
 
+func TestEphemeralRemoteAdvancesIntegrateAndRefreshesRecordedBase(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	repo := filepath.Join(root, "repo")
+	gitRun(t, root, "init", "--bare", "-b", "trunk", origin)
+	gitRun(t, root, "clone", origin, repo)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "README")
+	gitRun(t, repo, "commit", "-m", "initial")
+	gitRun(t, repo, "push", "-u", "origin", "trunk")
+	first := strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD"))
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.AdmitRoot(ctx, db1.CreateWorkItem{ID: "wi_remote", Repo: repo, ProposalPath: "p",
+		WorkflowName: "build", StartStage: "accept_freeze", BaseBranch: "trunk", BaseSHA: first}, 1); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ := store.WorkItem(ctx, "wi_remote")
+	workdir, _, err := manager.Ensure(ctx, item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advance := func(name, content string) string {
+		t.Helper()
+		publisher := filepath.Join(root, name)
+		gitRun(t, root, "clone", "-b", "trunk", origin, publisher)
+		if err := os.WriteFile(filepath.Join(publisher, name+".txt"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, publisher, "add", ".")
+		gitRun(t, publisher, "commit", "-m", name)
+		gitRun(t, publisher, "push", "origin", "trunk")
+		return strings.TrimSpace(gitRun(t, publisher, "rev-parse", "HEAD"))
+	}
+	second := advance("second", "second\n")
+	changed, conflict, _, err := (&NativeRunner{db: store, worktrees: manager, forge: fixedIdentityForge{}}).integrateRootBase(ctx, item, workdir, "accept_freeze")
+	if err != nil || conflict || !changed {
+		t.Fatalf("first remote integration changed=%v conflict=%v err=%v", changed, conflict, err)
+	}
+	item, _ = store.WorkItem(ctx, item.ID)
+	if item.BaseSHA != second || !strings.Contains(gitRun(t, workdir, "log", "--oneline"), "second") {
+		t.Fatalf("after first integration item=%+v", item)
+	}
+	third := advance("third", "third\n")
+	changed, conflict, _, err = (&NativeRunner{db: store, worktrees: manager, forge: fixedIdentityForge{}}).integrateRootBase(ctx, item, workdir, "final_pr")
+	if err != nil || conflict || !changed {
+		t.Fatalf("second remote integration changed=%v conflict=%v err=%v", changed, conflict, err)
+	}
+	item, _ = store.WorkItem(ctx, item.ID)
+	if item.BaseSHA != third {
+		t.Fatalf("after second integration base_sha=%q, want %q", item.BaseSHA, third)
+	}
+	events, err := store.Events(ctx, item.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Kind == "base_integration" {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("base integration events=%d, want 2: %+v", count, events)
+	}
+}
+
 func TestIntegrateFeatureBaseConflictAbortsCleanly(t *testing.T) {
 	repo, slicedir := setupSliceRepo(t)
 
@@ -647,5 +725,85 @@ func TestDocumentPartialNoChangeAdvancesUnchangedHead(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitRun(t, workdir, "status", "--porcelain")); got != "" {
 		t.Fatalf("document no-op dirtied the worktree: %q", got)
+	}
+}
+
+func TestRootFreezeIntegratesAdvancedPinnedBaseBeforeReview(t *testing.T) {
+	t.Setenv("AIMEE_GIT_AUTHOR_NAME", "Aimee Test")
+	t.Setenv("AIMEE_GIT_AUTHOR_EMAIL", "aimee@example.invalid")
+	root := t.TempDir()
+	origin, repo := filepath.Join(root, "origin.git"), filepath.Join(root, "repo")
+	gitRun(t, root, "init", "--bare", "-b", "trunk", origin)
+	gitRun(t, root, "clone", origin, repo)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "README")
+	gitRun(t, repo, "commit", "-m", "initial")
+	gitRun(t, repo, "push", "-u", "origin", "trunk")
+	oldSHA := strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD"))
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_base_move", Repo: repo,
+		ProposalPath: "p", WorkflowName: "build", StartStage: "accept_freeze", BaseBranch: "trunk", BaseSHA: oldSHA}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ := store.WorkItem(t.Context(), "wi_base_move")
+	workdir, _, err := manager.Ensure(t.Context(), item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "feature.txt"), []byte("feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, workdir, "add", "feature.txt")
+	gitRun(t, workdir, "commit", "-m", "feature")
+
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("advanced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "base.txt")
+	gitRun(t, repo, "commit", "-m", "advance base")
+	gitRun(t, repo, "push", "origin", "trunk")
+	newSHA := strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD"))
+
+	runner := &NativeRunner{db: store, worktrees: manager}
+	result, err := runner.freeze(t.Context(), StepRequest{WorkItem: item, Node: wfe.Node{ID: "accept_freeze"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced {
+		t.Fatalf("freeze result=%+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "base.txt")); err != nil {
+		t.Fatalf("base was not integrated before freeze: %v", err)
+	}
+	updated, err := store.WorkItem(t.Context(), item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.BaseSHA != newSHA {
+		t.Fatalf("durable base SHA=%s, want %s", updated.BaseSHA, newSHA)
+	}
+	events, err := store.Events(t.Context(), item.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Kind == "base_integration" && event.ContentHash == newSHA {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("base integration evidence was not recorded before review freeze")
 	}
 }

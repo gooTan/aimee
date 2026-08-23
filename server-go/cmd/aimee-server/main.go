@@ -148,17 +148,15 @@ func main() {
 		if runnerErr != nil {
 			log.Fatal(runnerErr)
 		}
-		// Reviews run in the roundtable module over the daemon's bus. This process
-		// attaches as a requesting principal under its generated grant; it does
-		// not host a panel, so there is one implementation and one place that
-		// spends money convening seats.
+		// Reviews run in the roundtable module over the WFE's existing bus caller.
+		// This process does not host a panel, so there is one implementation and
+		// one place that spends money convening seats.
 		//
 		// A gate whose reviewer never attached parks with that reason rather than
 		// failing the run, so a bus that is not up yet delays reviews instead of
 		// losing work.
 		if *moduleBusSocket != "" {
-			reviewer, reviewerErr := engine.NewBusReviewer(rootCtx, *moduleBusSocket,
-				engine.BusPrincipalClass, engine.WFEBusPrincipalRef, 0)
+			reviewer, reviewerErr := engine.NewBusReviewer(caller, 0)
 			if reviewerErr != nil {
 				log.Printf("roundtable reviews unavailable: %v", reviewerErr)
 			} else {

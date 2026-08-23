@@ -257,6 +257,10 @@ func TestReviewBindsTheVerdictToTheRunAndArtifact(t *testing.T) {
 		if !strings.Contains(request.Prompt, "DIRECT_ARTIFACT_MARKER") {
 			t.Fatalf("seat received another run's artifact: %+v", request)
 		}
+		if !strings.HasPrefix(request.Prompt, "CONTEXT-ONLY REVIEW") ||
+			!strings.Contains(request.Prompt, "Do not call tools") {
+			t.Fatalf("seat was not instructed to use only supplied context: %s", request.Prompt)
+		}
 	}
 }
 
@@ -316,6 +320,18 @@ func TestReviewCarriesRunIdentityOntoEverySeat(t *testing.T) {
 	// The per-seat ceiling is the plane adapter's to divide, not the panel's, so
 	// it is asserted where that division happens rather than through a double
 	// that does not implement it.
+}
+
+func TestRoundtableSeatsUseOnlySuppliedContext(t *testing.T) {
+	request := (seatBus{}).request(panel.Run{Workdir: "/repo"}, panel.SeatRequest{
+		Role: "review", Prompt: "CONTEXT-ONLY REVIEW", Tools: true,
+	})
+	if request.Workdir != contextOnlyWorkdir() {
+		t.Fatalf("workdir = %q, want neutral %q", request.Workdir, contextOnlyWorkdir())
+	}
+	if !request.ProvidedTarget || !request.Tools {
+		t.Fatalf("context-only CLI transport lost its supplied target: %+v", request)
+	}
 }
 
 // ReplayOnly is what stops a lifecycle retry from paying twice for spend that

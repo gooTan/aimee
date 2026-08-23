@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -14,11 +16,14 @@ import (
 )
 
 type WorktreeManager struct {
-	db    *db1.Store
-	root  string
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	db      *db1.Store
+	root    string
+	mu      sync.Mutex
+	locks   map[string]*sync.Mutex
+	install CommandRunner
 }
+
+type CommandRunner func(context.Context, string, ...string) ([]byte, error)
 
 func NewWorktreeManager(db *db1.Store, root string) (*WorktreeManager, error) {
 	if db == nil || root == "" {
@@ -31,7 +36,18 @@ func NewWorktreeManager(db *db1.Store, root string) (*WorktreeManager, error) {
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return nil, err
 	}
-	return &WorktreeManager{db: db, root: abs, locks: make(map[string]*sync.Mutex)}, nil
+	return &WorktreeManager{db: db, root: abs, locks: make(map[string]*sync.Mutex), install: nativeCommandRunner}, nil
+}
+
+func NewWorktreeManagerWithRunner(db *db1.Store, root string, runner CommandRunner) (*WorktreeManager, error) {
+	manager, err := NewWorktreeManager(db, root)
+	if err != nil {
+		return nil, err
+	}
+	if runner != nil {
+		manager.install = runner
+	}
+	return manager, nil
 }
 
 func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature bool) (string, string, error) {
@@ -58,6 +74,9 @@ func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature
 		actual, branchErr := gitText(ctx, candidate, "rev-parse", "--abbrev-ref", "HEAD")
 		if topErr == nil && branchErr == nil && filepath.Clean(top) == candidate {
 			if actual == branch {
+				if err := m.prepareDependencies(ctx, item.ID, item.Repo, candidate); err != nil {
+					return "", "", err
+				}
 				if item.Worktree != candidate {
 					if err := m.db.SetWorktree(ctx, item.ID, candidate); err != nil {
 						return "", "", err
@@ -77,6 +96,9 @@ func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature
 					if _, switchErr := gitText(ctx, candidate, "switch", branch); switchErr != nil {
 						return "", "", fmt.Errorf("restore durable worktree branch %q from identical alias %q: %w", branch, actual, switchErr)
 					}
+					if err := m.prepareDependencies(ctx, item.ID, item.Repo, candidate); err != nil {
+						return "", "", err
+					}
 					if err := m.db.SetWorktree(ctx, item.ID, candidate); err != nil {
 						return "", "", err
 					}
@@ -94,6 +116,9 @@ func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature
 				}
 				if _, renameErr := gitText(ctx, candidate, "branch", "-m", branch); renameErr != nil {
 					return "", "", fmt.Errorf("migrate legacy worktree branch: %w", renameErr)
+				}
+				if err := m.prepareDependencies(ctx, item.ID, item.Repo, candidate); err != nil {
+					return "", "", err
 				}
 				if err := m.db.SetWorktree(ctx, item.ID, candidate); err != nil {
 					return "", "", err
@@ -118,13 +143,17 @@ func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature
 	path := expected
 	base := "HEAD"
 	if feature {
-		trunk, trunkErr := repoDefaultBranch(ctx, repo)
-		if trunkErr != nil {
-			return "", "", trunkErr
-		}
-		base = "origin/" + trunk
-		if _, checkErr := gitText(ctx, repo, "rev-parse", "--verify", base+"^{commit}"); checkErr != nil {
-			base = trunk
+		if item.BaseSHA != "" {
+			base = item.BaseSHA
+		} else {
+			trunk, trunkErr := repoDefaultBranch(ctx, repo)
+			if trunkErr != nil {
+				return "", "", trunkErr
+			}
+			base = "origin/" + trunk
+			if _, checkErr := gitText(ctx, repo, "rev-parse", "--verify", base+"^{commit}"); checkErr != nil {
+				base = trunk
+			}
 		}
 	} else if item.ParentID != "" {
 		base = "aimee/feat/" + item.ParentID
@@ -155,10 +184,239 @@ func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature
 			return "", "", retryErr
 		}
 	}
+	if err := m.prepareDependencies(ctx, item.ID, repo, path); err != nil {
+		return "", "", err
+	}
 	if err := m.db.SetWorktree(ctx, item.ID, path); err != nil {
 		return "", "", err
 	}
 	return path, branch, nil
+}
+
+func shareNodeModules(repo, worktree string) error {
+	repo, err := filepath.Abs(repo)
+	if err != nil {
+		return err
+	}
+	exclude, err := gitText(context.Background(), worktree, "rev-parse", "--git-path", "info/exclude")
+	if err != nil {
+		return fmt.Errorf("resolve managed worktree exclusions: %w", err)
+	}
+	contents, err := os.ReadFile(exclude)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read managed worktree exclusions: %w", err)
+	}
+	if !containsLine(string(contents), "node_modules") {
+		if err := os.MkdirAll(filepath.Dir(exclude), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(exclude, append(contents, []byte("\nnode_modules\n")...), 0o600); err != nil {
+			return fmt.Errorf("exclude shared node_modules from artifacts: %w", err)
+		}
+	}
+	return filepath.WalkDir(repo, func(source string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if source != repo && entry.IsDir() && (entry.Name() == ".git" || entry.Name() == ".aimee") {
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() || entry.Name() != "node_modules" {
+			return nil
+		}
+		relative, err := filepath.Rel(repo, source)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(worktree, relative)
+		if _, err := os.Lstat(target); err == nil {
+			return filepath.SkipDir
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := os.Symlink(source, target); err != nil {
+			return fmt.Errorf("share repository node_modules with managed worktree: %w", err)
+		}
+		return filepath.SkipDir
+	})
+}
+
+func nativeCommandRunner(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
+func (m *WorktreeManager) prepareDependencies(ctx context.Context, itemID, repo, worktree string) error {
+	source, sourceExists, err := dependencyGraphFingerprint(repo)
+	if err != nil {
+		return fmt.Errorf("fingerprint source dependency graph: %w", err)
+	}
+	current, currentExists, err := dependencyGraphFingerprint(worktree)
+	if err != nil {
+		return fmt.Errorf("fingerprint worktree dependency graph: %w", err)
+	}
+	if !sourceExists && !currentExists {
+		return shareNodeModules(repo, worktree)
+	}
+	if !currentExists {
+		return errors.New("worktree dependency graph is missing while source graph exists")
+	}
+	ready := false
+	if itemID != "" {
+		events, eventErr := m.db.Events(ctx, itemID, 0, 1000)
+		if eventErr != nil {
+			return fmt.Errorf("read dependency readiness: %w", eventErr)
+		}
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].Kind == "dependency_graph" && events[i].ContentHash == current {
+				ready = true
+				break
+			}
+		}
+	}
+	if sourceExists && source == current {
+		if err := shareNodeModules(repo, worktree); err != nil {
+			return err
+		}
+	} else {
+		if err := removeManagedSourceLinks(repo, worktree); err != nil {
+			return err
+		}
+		if !ready {
+			runner := m.install
+			if runner == nil {
+				runner = nativeCommandRunner
+			}
+			output, installErr := runner(ctx, worktree, "pnpm", "install", "--frozen-lockfile", "--offline")
+			if installErr != nil {
+				return fmt.Errorf("pnpm install --frozen-lockfile --offline failed in %s: %s: %w", worktree, strings.TrimSpace(string(output)), installErr)
+			}
+		}
+	}
+	if itemID == "" || ready {
+		return nil
+	}
+	return m.db.RecordLifecycleEvent(ctx, itemID, "worktree", "dependency_graph", "dependencies ready", current)
+}
+
+func dependencyGraphFingerprint(root string) (string, bool, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(filepath.Join(root, "pnpm-lock.yaml")); errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, err
+	}
+	tracked, err := trackedRepositoryPaths(root)
+	if err != nil {
+		return "", false, err
+	}
+	paths := make([]string, 0)
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != root && entry.IsDir() && (entry.Name() == ".git" || entry.Name() == ".aimee" || entry.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if tracked[rel] && (rel == "pnpm-lock.yaml" || rel == "pnpm-workspace.yaml" || filepath.Base(rel) == "package.json") {
+			paths = append(paths, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if len(paths) == 0 {
+		return "", false, nil
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	for _, rel := range paths {
+		content, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if readErr != nil {
+			return "", false, fmt.Errorf("read %s: %w", rel, readErr)
+		}
+		_, _ = hash.Write([]byte(rel))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write(content)
+		_, _ = hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), true, nil
+}
+
+func trackedRepositoryPaths(root string) (map[string]bool, error) {
+	output, err := nativeCommandRunner(context.Background(), root, "git", "ls-files", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("list tracked dependency manifests: %w", err)
+	}
+	paths := make(map[string]bool)
+	for _, path := range strings.Split(string(output), "\x00") {
+		if path != "" {
+			paths[filepath.ToSlash(path)] = true
+		}
+	}
+	return paths, nil
+}
+
+func removeManagedSourceLinks(repo, worktree string) error {
+	repo, err := filepath.Abs(repo)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(worktree, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == worktree || entry.Name() != "node_modules" {
+			return nil
+		}
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target, evalErr := filepath.EvalSymlinks(path)
+		if evalErr != nil {
+			return filepath.SkipDir
+		}
+		target, evalErr = filepath.Abs(target)
+		if evalErr != nil {
+			return evalErr
+		}
+		rel, relErr := filepath.Rel(repo, target)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			if removeErr := os.Remove(path); removeErr != nil {
+				return removeErr
+			}
+		}
+		return filepath.SkipDir
+	})
+}
+
+func containsLine(contents, want string) bool {
+	for _, line := range strings.Split(contents, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func legacySliceBranch(id string) string {

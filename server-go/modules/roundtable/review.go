@@ -67,6 +67,19 @@ func NewReviewHandler(reviewer Reviewer) bus.ModuleHandler {
 		// so a review that overruns is reported as such rather than replied to.
 		result, err := reviewer.Review(context.Background(), decoded)
 		if err != nil {
+			// Non-OK module replies discard their bodies. Carry replay loss in the
+			// existing result envelope so the workflow engine can recover the stale
+			// reservation instead of parking it as an opaque internal failure.
+			if errors.Is(err, panel.ErrReplayUnavailable) {
+				result.Status = panel.StatusPending
+				result.PauseReason = "replay_unavailable"
+				result.Detail = err.Error()
+				body, marshalErr := json.Marshal(result)
+				if marshalErr != nil {
+					return []byte("encode roundtable replay failure: " + marshalErr.Error()), bus.ModuleStatusInternal
+				}
+				return body, bus.ModuleStatusOK
+			}
 			// A request this panel will never accept is reported as invalid, not
 			// internal. The distinction is the caller's only way to tell "try
 			// again later" from "this will fail every time", and without it a

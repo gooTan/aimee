@@ -8,7 +8,7 @@ import (
 
 const (
 	delegateRole        = "review"
-	delegateMaxTurnsCap = 24
+	delegateMaxTurnsCap = 4
 )
 
 type SeatReport struct {

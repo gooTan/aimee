@@ -55,4 +55,10 @@ void git_ops_register_session_isolation(int (*fn)(const char *cwd, const char *s
 int git_ops_push_dir(const char *principal, const char *repo_dir, const char *remote_url,
                      const char *branch, char **out, char *err, size_t errlen);
 
+/* As above, with an optional exact remote lease. `code` receives a stable
+ * machine-readable result code when supplied. */
+int git_ops_push_dir_ex(const char *principal, const char *repo_dir, const char *remote_url,
+                        const char *branch, const char *expected_remote, char **out, char *code,
+                        size_t code_len, char *err, size_t errlen);
+
 #endif /* GIT_OPS_H */

@@ -18,6 +18,19 @@ extern aimee_module_status_t aimee_workspace_module_handler(const aimee_module_i
                                                             const uint8_t *, uint32_t, uint8_t *,
                                                             uint32_t, uint32_t *, void *);
 
+static int block_verify_gate;
+
+int verify_gate_blocks(const char *target_root, const char *expected_commit, char *msg,
+                       size_t msg_len)
+{
+   (void)target_root;
+   (void)expected_commit;
+   if (!block_verify_gate)
+      return 0;
+   snprintf(msg, msg_len, "commit lacks current verification evidence");
+   return 1;
+}
+
 int aimee_module_invocation_cancelled(const aimee_module_invocation_t *invocation)
 {
    (void)invocation;
@@ -184,6 +197,26 @@ int main(void)
    assert(strstr(err, "git push failed") != NULL);
    free(out);
    out = NULL;
+   assert(git_ops_push_dir("webuser:alice", proj, "https://127.0.0.1:1/probe.git",
+                           "aimee/feat/wi_valid/extra", &out, err, sizeof(err)) == -1);
+   assert(strstr(err, "exact owned AIMEE ref") != NULL);
+   char code[64];
+   assert(git_ops_push_dir_ex("webuser:alice", proj, "https://127.0.0.1:1/probe.git",
+                              "aimee/feat/wi_valid", "not-a-sha", &out, code, sizeof(code), err,
+                              sizeof(err)) == -1);
+   assert(strcmp(code, "invalid_expected_remote") == 0);
+   assert(git_ops_push_dir_ex("webuser:alice", proj, "https://127.0.0.1:1/probe.git", wfe_ref,
+                              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &out, code,
+                              sizeof(code), err, sizeof(err)) == -1);
+   assert(strstr(err, "restricted to a managed feature branch") != NULL);
+   block_verify_gate = 1;
+   assert(git_ops_push_dir_ex("webuser:alice", proj, "https://127.0.0.1:1/probe.git",
+                              "aimee/feat/wi_valid",
+                              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &out, code,
+                              sizeof(code), err, sizeof(err)) == -1);
+   assert(strcmp(code, "unverified_commit") == 0);
+   assert(strstr(err, "lacks current verification evidence") != NULL);
+   block_verify_gate = 0;
    assert(git_ops_push_dir("webuser:alice", proj, "https://127.0.0.1:1/probe.git", "-evil", &out,
                            err, sizeof(err)) == -1);
    assert(strstr(err, "ref is invalid") != NULL);

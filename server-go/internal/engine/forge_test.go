@@ -127,6 +127,64 @@ func TestHTTPForgePushRejectsUnmanagedBranchAndMismatchedOrigin(t *testing.T) {
 	}
 }
 
+func TestManagedBranchRequiresExactOwnedRefShape(t *testing.T) {
+	for _, test := range []struct {
+		branch string
+		valid  bool
+	}{
+		{"aimee/feat/wi_example", true},
+		{"aimee/wi/wi_example.s123.g0.0", true},
+		{"aimee/feat/wi_", false},
+		{"aimee/feat/wi_example/extra", false},
+		{"aimee/feat/wi_example..x", false},
+		{"aimee/other/wi_example", false},
+	} {
+		if got := managedBranch(test.branch); got != test.valid {
+			t.Errorf("managedBranch(%q) = %v, want %v", test.branch, got, test.valid)
+		}
+	}
+}
+
+func TestHTTPForgePushCarriesExpectedRemoteAndDecodesTypedFailure(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "forge.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request["op"] != "push" || request["expected_remote"] != strings.Repeat("a", 40) {
+			t.Fatalf("request = %#v", request)
+		}
+		_, _ = w.Write([]byte(`{"ok":false,"code":"lease_mismatch","error":"remote changed","detail":"full git diagnostic"}`))
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+
+	forge, err := NewHTTPForge(HTTPForgeConfig{UnixSocket: socket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	repo, worktree := filepath.Join(root, "repo"), filepath.Join(root, "worktree")
+	for _, dir := range []string{repo, worktree} {
+		if output, initErr := exec.Command("git", "init", dir).CombinedOutput(); initErr != nil {
+			t.Fatalf("git init: %v: %s", initErr, output)
+		}
+		if output, addErr := exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/acme/one.git").CombinedOutput(); addErr != nil {
+			t.Fatalf("git remote: %v: %s", addErr, output)
+		}
+	}
+	err = forge.push(t.Context(), repo, worktree, "aimee/feat/wi_example", strings.Repeat("a", 40))
+	if !errors.Is(err, ErrForgeLeaseMismatch) || !strings.Contains(err.Error(), "full git diagnostic") {
+		t.Fatalf("push error = %v", err)
+	}
+}
+
 func TestHTTPForgeOpenCarriesCompleteDraftHandoff(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "forge.sock")
 	listener, err := net.Listen("unix", socket)

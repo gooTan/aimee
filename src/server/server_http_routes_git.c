@@ -374,6 +374,17 @@ static int wfe_ref_valid(const char *s)
    return 1;
 }
 
+static int wfe_final_ref_valid(const char *s, int feature)
+{
+    const char *prefix = feature ? "aimee/feat/wi_" : "aimee/wi/wi_";
+    if (!s || strncmp(s, prefix, strlen(prefix)) != 0 || !s[strlen(prefix)])
+       return 0;
+    for (const unsigned char *p = (const unsigned char *)s + strlen(prefix); *p; p++)
+       if (!(isalnum(*p) || *p == '_' || *p == '.'))
+          return 0;
+    return 1;
+}
+
 #define WFE_MAX_ID_LEN 80
 
 static int wfe_id_root_char(unsigned char c)
@@ -584,7 +595,7 @@ static int wfe_managed_base(const char *repo, const char *base, char *err, size_
 static int wfe_forge_body_fields_valid(const cJSON *body)
 {
    static const char *const allowed[] = {"op",   "workdir", "head",   "base", "title",
-                                         "body", "draft",   "number", NULL};
+                                          "body", "draft",   "number", "expected_remote", NULL};
    for (const cJSON *field = body ? body->child : NULL; field; field = field->next)
    {
       int index = -1;
@@ -599,7 +610,7 @@ static int wfe_forge_body_fields_valid(const cJSON *body)
       for (const cJSON *prior = body->child; prior != field; prior = prior->next)
          if (prior->string && strcmp(prior->string, field->string) == 0)
             return 0;
-      int valid_type = index == 7   ? cJSON_IsNumber(field)
+       int valid_type = index == 7   ? cJSON_IsNumber(field)
                        : index == 6 ? cJSON_IsBool(field)
                                     : cJSON_IsString(field);
       if (!valid_type)
@@ -625,22 +636,27 @@ static int wfe_slice_ref_matches_workdir(const char *workdir, const char *prefix
 }
 
 static int wfe_forge_operation_valid(const char *op, const char *head, const char *base,
-                                     const char *title, const char *body, const cJSON *jdraft,
-                                     int draft, const cJSON *jnumber, int number)
+                                      const char *title, const char *body, const cJSON *jdraft,
+                                      int draft, const cJSON *jnumber, int number,
+                                      const cJSON *jexpected)
 {
    int has_number = jnumber != NULL;
    int has_draft = jdraft != NULL;
+   if (jexpected && strcmp(op, "push") != 0 && strcmp(op, "open") != 0)
+      return 0;
    if (has_number && (!cJSON_IsNumber(jnumber) || jnumber->valuedouble != (double)number))
       return 0;
    if (strcmp(op, "push") == 0)
-      return head && !base && !title && !body && !has_draft && !has_number;
+       return head && !base && !title && !body && !has_draft && !has_number &&
+              (!jexpected || (cJSON_IsString(jexpected) && jexpected->valuestring[0]));
    if (strcmp(op, "identity") == 0)
       return !head && !base && !title && !body && !has_draft && !has_number;
    if (strcmp(op, "open") == 0)
    {
       int final_head = head && strncmp(head, "aimee/feat/wi_", 14) == 0;
       return head && base && title && title[0] && body && body[0] && has_draft &&
-             cJSON_IsBool(jdraft) && draft == final_head && !has_number;
+              cJSON_IsBool(jdraft) && draft == final_head && !has_number &&
+               (!jexpected || (cJSON_IsString(jexpected) && jexpected->valuestring[0]));
    }
    if (strcmp(op, "info") == 0 || strcmp(op, "ci") == 0)
       return !head && !base && !title && !body && !has_draft && has_number && number > 0;
@@ -665,14 +681,17 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    const char *base = route_json_string(body, "base");
    const char *title = route_json_string(body, "title");
    const char *pr_body = route_json_string(body, "body");
+   const char *expected_remote = route_json_string(body, "expected_remote");
    const cJSON *jdraft = body ? cJSON_GetObjectItemCaseSensitive(body, "draft") : NULL;
    int draft = cJSON_IsTrue(jdraft) ? 1 : 0;
    const cJSON *jnumber = body ? cJSON_GetObjectItemCaseSensitive(body, "number") : NULL;
+   const cJSON *jexpected = body ? cJSON_GetObjectItemCaseSensitive(body, "expected_remote") : NULL;
    int number = cJSON_IsNumber(jnumber) ? jnumber->valueint : 0;
    if (!body || !wfe_forge_body_fields_valid(body) || !op || !workdir_in ||
        (head && !wfe_ref_valid(head)) || (base && !wfe_ref_valid(base)) ||
        (title && strlen(title) > 256) || (pr_body && strlen(pr_body) > 60000) ||
-       !wfe_forge_operation_valid(op, head, base, title, pr_body, jdraft, draft, jnumber, number))
+        !wfe_forge_operation_valid(op, head, base, title, pr_body, jdraft, draft, jnumber, number,
+                                    jexpected))
    {
       cJSON_Delete(body);
       return err_json(resp, cap, 400, "invalid forge operation request");
@@ -689,6 +708,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    cJSON *out = cJSON_CreateObject();
    char *detail = NULL;
    int rc = -1;
+   char code[64] = "publication_failed";
    struct stat current;
    if (lstat(workdir, &current) != 0 || current.st_dev != identity.st_dev ||
        current.st_ino != identity.st_ino)
@@ -697,8 +717,8 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
       cJSON_Delete(out);
       return err_json(resp, cap, 409, "managed worktree identity changed");
    }
-   int feature_head = head && strncmp(head, "aimee/feat/wi_", 14) == 0;
-   int slice_head = head && strncmp(head, "aimee/wi/wi_", 12) == 0;
+    int feature_head = wfe_final_ref_valid(head, 1);
+    int slice_head = wfe_final_ref_valid(head, 0);
    int allowed_push_head =
        feature_head || (slice_head && wfe_slice_ref_matches_workdir(workdir, "aimee/wi/", 0, head));
    if (strcmp(op, "identity") == 0)
@@ -720,7 +740,8 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    }
    else if (strcmp(op, "push") == 0 && head && allowed_push_head)
    {
-      rc = git_ops_push_dir(principal, workdir, remote, head, &detail, err, sizeof(err));
+       rc = git_ops_push_dir_ex(principal, workdir, remote, head, expected_remote, &detail, code,
+                                sizeof(code), err, sizeof(err));
    }
    else if (strcmp(op, "open") == 0)
    {
@@ -732,7 +753,8 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
       if (base_ok == 1)
       {
          char *push_out = NULL, url[1024];
-         rc = git_ops_push_dir(principal, workdir, remote, head, &push_out, err, sizeof(err));
+          rc = git_ops_push_dir_ex(principal, workdir, remote, head, expected_remote, &push_out,
+                                   code, sizeof(code), err, sizeof(err));
          if (rc != 0)
             detail = push_out;
          else
@@ -804,6 +826,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    {
       cJSON_Delete(out);
       cJSON *failure = cJSON_CreateObject();
+      cJSON_AddStringToObject(failure, "code", code);
       cJSON_AddStringToObject(failure, "error", err[0] ? err : "forge operation failed");
       if (detail && detail[0])
          cJSON_AddStringToObject(failure, "detail", detail);

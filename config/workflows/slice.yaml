@@ -6,48 +6,78 @@
 name: slice
 intent_tags:
   - slice
-start: scope
+start: source
 nodes:
-  # Turn the parent packet into an actionable intent without user input.
+  # Preserve the immutable admitted packet using the native proposal contract.
+  - id: source
+    block: author.proposal
+    next: scope
+  # Scout both the admitted request and, on repair passes, the current frozen
+  # implementation plus the latest structured review findings.
   - id: scope
     block: understand
     params:
       with_user: false
-    next: impl
+      delegate: luna
+      current_artifact: freeze
+      max_rounds: 3
+    next: plan
     on_fail: scope
+  # Sol converts scouting into a validated, judgment-free implementation plan.
+  - id: plan
+    block: author.plan
+    in:
+      proposal: source.out
+    params:
+      delegate: sol
+      mechanical: true
+      scout_artifact: scope
+      current_artifact: freeze
+      max_rounds: 3
+    next: impl
+    on_fail: plan
   # Implement the packet on the slice branch.
   - id: impl
     block: implement
     in:
-      plan: scope.out
+      plan: plan.out
     params:
-      # Give implementation a small corrective window before operator repair.
+      delegate: luna
       max_rounds: 3
     next: freeze
-    # Requested changes return to implementation.
-    on_fail: impl
+    on_fail: scope
   - id: freeze
     block: freeze
     in:
       branch: impl.out
+    next: sol_review
+  # The deterministic repository review precedes the broader roundtable.
+  - id: sol_review
+    block: review
+    in:
+      src: freeze.out
+    params:
+      delegate: sol
+      require_code_review_skill: true
+      task: Apply the repository code-review skill across the Standards and Spec axes.
+      max_rounds: 3
     next: rt_gate
-  # Standard roundtable review of the slice diff; changes loop back to implement.
+    on_fail: scope
+  # Review findings restart scouting; they never go raw to implementation.
   - id: rt_gate
     block: gate.roundtable
     in:
       src: freeze.out
     params:
-      roundtable: default
+      roundtable: implementation
       panel:
         required:
-          - security
-          - architect
           - qa
           - reviewer
-      quorum: 4
-      max_rounds: 6
+      quorum: 2
+      max_rounds: 3
     on_pass: pr
-    on_fail: impl
+    on_fail: scope
   # Open the slice sub-PR (targets the parent feature branch).
   - id: pr
     block: pr.open
@@ -60,13 +90,13 @@ nodes:
     next: ci
     # Retry a requested forge correction within the node budget.
     on_fail: pr
-  # CI must be fully green before the slice may merge; red loops back to implement.
+  # CI must be fully green before the slice may merge.
   - id: ci
     block: gate.ci
     in:
       pr: pr.out
     on_pass: merge
-    on_fail: impl
+    on_fail: scope
   # Merge the green, approved slice into the feature branch. Terminal: slice done.
   - id: merge
     block: merge

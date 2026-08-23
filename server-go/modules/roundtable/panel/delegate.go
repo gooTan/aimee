@@ -26,6 +26,7 @@ type Run struct {
 	// the first question every seat answers, so a review without it is not a
 	// weaker review -- it is a different one.
 	OriginalRequest string
+	PriorFeedback   *ReviewFeedback
 	// Reviewed is the exact artifact under review.
 	Reviewed Artifact
 }

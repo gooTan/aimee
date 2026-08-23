@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -529,6 +530,9 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 	if !ok {
 		return StepResult{}, errors.New("author.plan missing proposal input")
 	}
+	if paramBool(req.Node, "mechanical") {
+		return r.mechanicalPlan(ctx, req, proposal, kind)
+	}
 	// The proposal input is the immutable workflow-entry request; only its schema name is historical.
 	prompt := "Author a complete implementation plan for the original request below. Return only the plan; do not truncate it. " +
 		"Complete means every part of the request is covered, not that the plan is large. Plan the smallest work that satisfies the request as written: " +
@@ -541,7 +545,7 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 		encoded, _ := json.Marshal(req.Feedback)
 		prompt += "\n\nPRIOR REVIEW FEEDBACK TO RESOLVE:\n" + string(encoded)
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo, Tools: true})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -551,10 +555,73 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 	return StepResult{Status: StepAdvanced, ArtifactType: kind, Artifact: result.Response, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
 }
 
+func (r *NativeRunner) mechanicalPlan(ctx context.Context, req StepRequest, scout wfe.Artifact, kind string) (StepResult, error) {
+	original := strings.TrimSpace(req.Proposal)
+	if original == "" {
+		original = string(scout.Content)
+	}
+	scouting := string(scout.Content)
+	if artifact := r.configuredArtifact(req, "scout_artifact"); artifact != "" {
+		scouting = artifact
+	}
+	prompt := "Author a completely MECHANICAL implementation plan. Return exactly one JSON object shaped " +
+		`{"schema_version":1,"steps":[{"order":1,"finding_id":"request-or-review-finding-id","file":"exact/repository/path","location":"exact symbol, test, or line","edit":"one imperative edit with no alternatives","expected_result":"observable result","verification":["exact command"]}]}. ` +
+		"Every step must name one exact edit and exact verification command. Resolve all choices from the supplied context; leave no choices, alternatives, investigation, or judgment to the implementer. " +
+		"Use finding_id=request for original-request work. Every blocking review finding must have a step. Do not add unrequested work.\n\n" +
+		"ORIGINAL REQUEST:\n" + original + "\n\nLUNA SCOUTING CONTEXT:\n" + scouting
+	if current := r.currentImplementation(req); current != "" {
+		prompt += "\n\nCURRENT IMPLEMENTATION (FROZEN DIFF):\n" + current
+	}
+	if req.Feedback != nil {
+		encoded, _ := json.Marshal(req.Feedback)
+		prompt += "\n\nSTRUCTURED REVIEW FINDINGS TO RESOLVE:\n" + string(encoded)
+	}
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo, Tools: true})
+	if err != nil {
+		return StepResult{}, err
+	}
+	doc, validationErr := extractJSONObject(result.Response)
+	if validationErr == nil {
+		validationErr = validateMechanicalPlan(doc, req.Feedback)
+	}
+	if validationErr != nil {
+		return StepResult{Status: StepChanges, Detail: "mechanical plan invalid: " + validationErr.Error(), CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
+	}
+	return StepResult{Status: StepAdvanced, ArtifactType: kind, Artifact: string(doc), CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
+}
+
+func (r *NativeRunner) currentImplementation(req StepRequest) string {
+	if current := inputText(req, "current"); current != "" {
+		return current
+	}
+	return r.configuredArtifact(req, "current_artifact")
+}
+
+func (r *NativeRunner) configuredArtifact(req StepRequest, param string) string {
+	nodeID := paramString(req.Node, param, "")
+	if nodeID == "" || r.artifacts == nil || req.WorkItem.ID == "" {
+		return ""
+	}
+	artifact, err := r.artifacts.NodeArtifact(req.WorkItem.ID, nodeID)
+	if err != nil {
+		return ""
+	}
+	return string(artifact.Content)
+}
+
 func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind string) (StepResult, error) {
 	var prompt string
 	if kind == "intent" {
 		prompt = "Scope the engineering task below. Return only JSON shaped {\"schema_version\":1,\"status\":\"unconfirmed\",\"summary\":\"...\",\"rationale\":\"...\",\"acceptance_criteria\":[\"...\"]}. Describe the task, never the bookkeeping record.\n\nTASK:\n" + req.Proposal
+		prompt = "Use the supplied task, frozen diff, and findings as the complete context. Do not perform wide repository or web searches.\n\n" + prompt
+		if current := r.currentImplementation(req); current != "" {
+			prompt += "\n\nCURRENT IMPLEMENTATION (FROZEN DIFF):\n" + current
+		}
+		if req.Feedback != nil {
+			encoded, _ := json.Marshal(req.Feedback)
+			prompt += "\n\nLATEST STRUCTURED REVIEW FINDINGS:\n" + string(encoded) +
+				"\n\nScout the current implementation specifically against these findings. State what is already implemented and what remains; do not propose solutions yet."
+		}
 	} else {
 		source := inputText(req, "plan")
 		if source == "" {
@@ -605,7 +672,7 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 	var content []byte
 	var validationErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo})
+		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo, Tools: true})
 		if validationErr != nil {
 			return StepResult{}, validationErr
 		}
@@ -656,10 +723,52 @@ func (r *NativeRunner) branchOpen(ctx context.Context, req StepRequest) (StepRes
 	if err := r.ensureRunnable(ctx, req.WorkItem.ID); err != nil {
 		return StepResult{}, err
 	}
-	if err := r.forge.Push(ctx, req.WorkItem.Repo, workdir, branch); err != nil {
+	if err := ensureFrozenHead(ctx, workdir, req.Inputs["src"]); err != nil {
+		return StepResult{}, err
+	}
+	expected, lease, err := r.db.PublicationLease(ctx, req.WorkItem.ID)
+	if err != nil {
+		return StepResult{}, err
+	}
+	if lease {
+		if f, ok := r.forge.(interface {
+			PushExpected(context.Context, string, string, string, string) error
+		}); ok {
+			err = f.PushExpected(ctx, req.WorkItem.Repo, workdir, branch, expected)
+		} else {
+			err = errors.New("forge does not support lease publication")
+		}
+	} else {
+		err = r.forge.Push(ctx, req.WorkItem.Repo, workdir, branch)
+	}
+	if err != nil {
+		return StepResult{}, err
+	}
+	head, err := gitText(ctx, workdir, "rev-parse", "HEAD")
+	if err != nil {
+		return StepResult{}, err
+	}
+	if err := r.db.RecordLifecycleEvent(ctx, req.WorkItem.ID, req.Node.ID, "publication", "published", head); err != nil {
 		return StepResult{}, err
 	}
 	return StepResult{Status: StepAdvanced, ArtifactType: "branch", Artifact: branch, ContentHash: wfe.Hash([]byte(branch))}, nil
+}
+
+func ensureFrozenHead(ctx context.Context, workdir string, src wfe.Artifact) error {
+	// Most `src` artifacts are content-addressed with the workflow's SHA-256
+	// hash. A publication freeze is stricter only when the frozen value is a
+	// commit identity (the 40-character Git SHA used by the verification gate).
+	if len(src.Hash) != 40 {
+		return nil
+	}
+	head, err := gitText(ctx, workdir, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(head) != strings.TrimSpace(src.Hash) {
+		return &ForgePublicationError{Code: "unverified_commit", Detail: "local HEAD no longer matches the frozen src content hash"}
+	}
+	return nil
 }
 
 // documentDelegatePrompt anchors documentation work to the same immutable
@@ -713,6 +822,7 @@ func retryDetailForPrompt(detail string) string {
 
 func implementationDelegatePrompt() string {
 	return "Implement the complete approved task in this worktree, run the repository verification, fix failures, and leave the accepted changes in the worktree. " +
+		"Do not delegate or create nested worktrees; execute the task yourself. " +
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
@@ -765,8 +875,14 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		if status == "" && strings.TrimSpace(diff) != "" &&
 			wfe.Hash([]byte(diff)) != req.Feedback.ArtifactHash {
 			if !docs {
+				if err := r.worktrees.prepareDependencies(ctx, req.WorkItem.ID, req.WorkItem.Repo, workdir); err != nil {
+					return StepResult{}, err
+				}
 				if err := r.verifier.Verify(ctx, workdir); err != nil {
 					return StepResult{Status: StepChanges, Detail: err.Error()}, nil
+				}
+				if err := r.recordDependencyVerification(ctx, req.WorkItem, workdir, req.Node.ID); err != nil {
+					return StepResult{}, err
 				}
 			}
 			head, headErr := gitText(ctx, workdir, "rev-parse", "HEAD")
@@ -886,8 +1002,14 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		}
 	}
 	if !docs {
+		if err := r.worktrees.prepareDependencies(ctx, req.WorkItem.ID, req.WorkItem.Repo, workdir); err != nil {
+			return StepResult{}, err
+		}
 		if err := r.verifier.Verify(ctx, workdir); err != nil {
 			return StepResult{Status: StepChanges, Detail: err.Error(), CostUSD: cost, CostUnknown: costUnknown}, nil
+		}
+		if err := r.recordDependencyVerification(ctx, req.WorkItem, workdir, req.Node.ID); err != nil {
+			return StepResult{}, err
 		}
 	}
 	head, err := gitText(ctx, workdir, "rev-parse", "HEAD")
@@ -895,6 +1017,20 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		return StepResult{}, err
 	}
 	return StepResult{Status: StepAdvanced, ArtifactType: "branch", Artifact: branch, ContentHash: head, CostUSD: cost, CostUnknown: costUnknown}, nil
+}
+
+func (r *NativeRunner) recordDependencyVerification(ctx context.Context, item db1.WorkItem, workdir, stage string) error {
+	if err := r.worktrees.prepareDependencies(ctx, item.ID, item.Repo, workdir); err != nil {
+		return err
+	}
+	fingerprint, exists, err := dependencyGraphFingerprint(workdir)
+	if err != nil {
+		return fmt.Errorf("fingerprint verified dependency graph: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	return r.db.RecordLifecycleEvent(ctx, item.ID, stage, "verification", "dependency graph verified", fingerprint)
 }
 
 func feedbackHasBlockingFinding(feedback *wfe.ReviewFeedback) bool {
@@ -918,6 +1054,14 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	}
 	persona := paramString(req.Node, "persona", paramString(req.Node, "reviewer", "reviewer"))
 	prompt := "Review this complete artifact against the proposal. Return only JSON shaped {\"verdict\":\"approve\" or \"changes\" or \"blocked\",\"findings\":[{\"id\":\"...\",\"severity\":\"blocking\",\"location\":\"...\",\"summary\":\"...\",\"recommendation\":\"...\"}]}.\n\nPROPOSAL:\n" + req.Proposal + "\n\nARTIFACT:\n" + string(reviewed.Content)
+	if req.Feedback != nil {
+		encoded, _ := json.Marshal(req.Feedback)
+		prompt += "\n\nPRIOR REVIEW FEEDBACK:\n" + string(encoded) +
+			"\n\nDo not reverse a prior remediation unless the current artifact provides concrete evidence that the remediation was incorrect; explain that evidence in the new finding."
+	}
+	if task := paramString(req.Node, "task", ""); task != "" {
+		prompt = task + "\n\n" + prompt
+	}
 	workdir := req.WorkItem.Worktree
 	if workdir == "" {
 		var err error
@@ -926,7 +1070,10 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 			return StepResult{}, err
 		}
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir})
+	if paramBool(req.Node, "require_code_review_skill") {
+		return r.reviewCodeReviewSkill(ctx, req, reviewed, workdir, prompt, persona)
+	}
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir, Tools: paramBool(req.Node, "require_code_review_skill")})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -949,6 +1096,81 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 		feedback.Findings = append(feedback.Findings, wfe.Finding{ID: "review-invalid", Persona: persona, Severity: "blocking", Summary: "review did not approve and supplied no finding", Recommendation: "review the artifact and provide an actionable finding"})
 	}
 	return StepResult{Status: StepChanges, Feedback: &feedback, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
+}
+
+func (r *NativeRunner) reviewCodeReviewSkill(ctx context.Context, req StepRequest, reviewed wfe.Artifact, workdir, prompt, persona string) (StepResult, error) {
+	axes := []struct {
+		name  string
+		brief string
+	}{
+		{"Standards", "Check documented repository standards and code smells. Distinguish hard rule violations from judgement calls; skip issues already enforced by tooling."},
+		{"Spec", "Check missing or partial requirements, scope creep, and implementations that contradict the proposal."},
+	}
+	requests := make([]DelegateRequest, len(axes))
+	delegate := paramString(req.Node, "delegate", "")
+	for i, axis := range axes {
+		requests[i] = DelegateRequest{
+			Role:     "review",
+			Persona:  persona + "-" + strings.ToLower(axis.name),
+			Delegate: delegate,
+			Workdir:  workdir,
+			Tools:    true,
+			Prompt: "Aimee is executing the repository code-review skill as two isolated parallel axes. You are the " + axis.name + " axis. " +
+				axis.brief + " Do not delegate, call tools, or perform a wide search; use only the supplied context.\n\n" + prompt,
+		}
+	}
+	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: reviewed.Hash}
+	cost := 0.0
+	costUnknown := false
+	for i, call := range r.parallelDelegates(ctx, req, requests) {
+		if call.Err != nil {
+			return StepResult{}, call.Err
+		}
+		cost += call.CostUSD
+		costUnknown = costUnknown || call.CostUnknown
+		doc, err := extractJSONObject(call.Response)
+		if err != nil {
+			feedback.Findings = append(feedback.Findings, wfe.Finding{ID: strings.ToLower(axes[i].name) + "-invalid", Persona: requests[i].Persona, Severity: "blocking", Summary: "review axis returned malformed JSON", Recommendation: "rerun the " + axes[i].name + " axis"})
+			continue
+		}
+		var parsed panelResponse
+		if err := json.Unmarshal(doc, &parsed); err != nil {
+			feedback.Findings = append(feedback.Findings, wfe.Finding{ID: strings.ToLower(axes[i].name) + "-invalid", Persona: requests[i].Persona, Severity: "blocking", Summary: "review axis returned malformed JSON", Recommendation: "rerun the " + axes[i].name + " axis"})
+			continue
+		}
+		if parsed.Verdict == "approve" && len(parsed.Findings) == 0 {
+			continue
+		}
+		for j, finding := range parsed.Findings {
+			feedback.Findings = append(feedback.Findings, wfe.Finding{ID: firstNonempty(finding.ID, fmt.Sprintf("%s-%d", strings.ToLower(axes[i].name), j+1)), Persona: requests[i].Persona, Severity: firstNonempty(finding.Severity, "blocking"), Location: finding.Location, Summary: finding.Summary, Recommendation: finding.Recommendation})
+		}
+		if len(parsed.Findings) == 0 {
+			feedback.Findings = append(feedback.Findings, wfe.Finding{ID: strings.ToLower(axes[i].name) + "-invalid", Persona: requests[i].Persona, Severity: "blocking", Summary: axes[i].name + " review did not approve and supplied no finding", Recommendation: "rerun the " + axes[i].name + " axis with an actionable finding"})
+		}
+	}
+	if len(feedback.Findings) == 0 {
+		return StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved", ContentHash: reviewed.Hash, CostUSD: cost, CostUnknown: costUnknown}, nil
+	}
+	return StepResult{Status: StepChanges, Feedback: &feedback, CostUSD: cost, CostUnknown: costUnknown}, nil
+}
+
+func (r *NativeRunner) parallelDelegates(ctx context.Context, step StepRequest, requests []DelegateRequest) []DelegateGroupResult {
+	results := make([]DelegateGroupResult, len(requests))
+	if len(requests) == 0 {
+		return results
+	}
+	step.CostLimitUSD /= float64(len(requests))
+	var wait sync.WaitGroup
+	wait.Add(len(requests))
+	for i := range requests {
+		go func(i int) {
+			defer wait.Done()
+			deferred, err := r.delegate(ctx, step, requests[i])
+			results[i] = DelegateGroupResult{Response: deferred.Response, CostUSD: deferred.CostUSD, CostUnknown: deferred.CostUnknown, Err: err}
+		}(i)
+	}
+	wait.Wait()
+	return results
 }
 
 func (r *NativeRunner) checkMergeable(ctx context.Context, req StepRequest) (StepResult, error) {
@@ -1210,6 +1432,21 @@ func (r *NativeRunner) freeze(ctx context.Context, req StepRequest) (StepResult,
 	if err != nil {
 		return StepResult{}, err
 	}
+	if item.ParentID == "" {
+		changed, conflict, detail, err := r.integrateRootBase(ctx, item, workdir, req.Node.ID)
+		if err != nil {
+			return StepResult{}, err
+		}
+		if conflict {
+			return StepResult{Status: StepPending, PauseReason: "base_integration_conflict", Detail: detail}, nil
+		}
+		if changed {
+			item, err = r.db.WorkItem(ctx, item.ID)
+			if err != nil {
+				return StepResult{}, err
+			}
+		}
+	}
 	diff, err := frozenWorktreeDiff(ctx, item, workdir)
 	if err != nil {
 		return StepResult{}, err
@@ -1257,11 +1494,15 @@ func frozenWorktreeBase(ctx context.Context, item db1.WorkItem, workdir string) 
 			return "", errors.New("parent feature branch is unavailable")
 		}
 	} else {
-		trunk, e := repoDefaultBranch(ctx, workdir)
-		if e != nil {
-			return "", e
+		if item.BaseBranch == "" {
+			trunk, err := repoDefaultBranch(ctx, workdir)
+			if err != nil {
+				return "", err
+			}
+			base = "origin/" + trunk
+		} else {
+			base = "origin/" + item.BaseBranch
 		}
-		base = "origin/" + trunk
 	}
 	return base, nil
 }
@@ -1410,6 +1651,7 @@ func (r *NativeRunner) roundtable(ctx context.Context, req StepRequest) (StepRes
 	result, err := r.reviews.Review(ctx, roundtablecfg.ReviewRequest{
 		Artifact:         string(reviewed.Content),
 		OriginalRequest:  req.Proposal,
+		PriorFeedback:    req.Feedback,
 		ArtifactStage:    reviewed.Type,
 		Roundtable:       paramString(req.Node, "roundtable", ""),
 		Workdir:          workdir,
@@ -1650,7 +1892,7 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	if err != nil {
 		return StepResult{}, err
 	}
-	workdir, head, err := r.worktrees.Ensure(ctx, item, item.ParentID == "")
+	workdir, _, err := r.worktrees.Ensure(ctx, item, item.ParentID == "")
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -1667,19 +1909,41 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 		// lane. It need not match origin/HEAD (testing versus main, or a
 		// deliberately pinned batch branch), and the forge resource plane
 		// enforces this same checkout-derived base independently.
-		base, err = repoIntegrationBranch(ctx, item.Repo)
+		base = item.BaseBranch
+		if base == "" {
+			base, err = repoIntegrationBranch(ctx, item.Repo)
+			if err != nil {
+				return StepResult{}, err
+			}
+		}
+	default:
+		if item.ParentID == "" {
+			base = item.BaseBranch
+			if base == "" {
+				return StepResult{}, errors.New("root work item has no durable base branch")
+			}
+		} else {
+			base = baseKind
+		}
+	}
+	if item.ParentID == "" {
+		changed, conflict, detail, err := r.integrateRootBase(ctx, item, workdir, req.Node.ID)
 		if err != nil {
 			return StepResult{}, err
 		}
-	default:
-		base = baseKind
+		if conflict {
+			return StepResult{Status: StepPending, PauseReason: "base_integration_conflict", Detail: detail}, nil
+		}
+		if changed {
+			return StepResult{Status: StepPending, PauseReason: "base_changed_requires_review", Detail: "remote base advanced after review; integrated content must be frozen and reviewed again"}, nil
+		}
 	}
-	baseConflict, detail, err := r.refreshPullRequestBase(ctx, workdir, base)
+	head, err := gitText(ctx, workdir, "rev-parse", "HEAD")
 	if err != nil {
 		return StepResult{}, err
 	}
-	if baseConflict {
-		return StepResult{Status: StepPending, PauseReason: "base_integration_conflict", Detail: detail}, nil
+	if err := ensureFrozenHead(ctx, workdir, req.Inputs["src"]); err != nil {
+		return StepResult{}, err
 	}
 	spec, err := r.pullRequestSpec(ctx, req, item, workdir, head, base)
 	if err != nil {
@@ -1688,8 +1952,31 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	if err := r.ensureRunnable(ctx, item.ID); err != nil {
 		return StepResult{}, err
 	}
-	pr, err := r.forge.Open(ctx, item.Repo, workdir, head, base, spec)
+	expected, lease, err := r.db.PublicationLease(ctx, item.ID)
 	if err != nil {
+		return StepResult{}, err
+	}
+	var pr PullRequest
+	if lease {
+		if f, ok := r.forge.(expectedOpenForge); ok {
+			pr, err = f.OpenExpected(ctx, item.Repo, workdir, head, base, expected, spec)
+		} else {
+			// Test and offline forge implementations predate the optional lease
+			// seam. Keep their interactive behavior; the production HTTP forge
+			// implements OpenExpected and cannot bypass the lease.
+			pr, err = r.forge.Open(ctx, item.Repo, workdir, head, base, spec)
+		}
+	} else {
+		pr, err = r.forge.Open(ctx, item.Repo, workdir, head, base, spec)
+	}
+	if err != nil {
+		return StepResult{}, err
+	}
+	remoteHead, err := gitText(ctx, workdir, "rev-parse", "HEAD")
+	if err != nil {
+		return StepResult{}, err
+	}
+	if err := r.db.RecordLifecycleEvent(ctx, item.ID, req.Node.ID, "publication", "published", remoteHead); err != nil {
 		return StepResult{}, err
 	}
 	if err := r.db.SetPRRef(ctx, item.ID, pr.Ref); err != nil {
@@ -1697,6 +1984,46 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	}
 	encoded, _ := json.Marshal(pr)
 	return StepResult{Status: StepAdvanced, ArtifactType: "pr", Artifact: string(encoded), ContentHash: wfe.Hash(encoded)}, nil
+}
+
+func (r *NativeRunner) integrateRootBase(ctx context.Context, item db1.WorkItem, workdir, stage string) (bool, bool, string, error) {
+	if item.BaseBranch == "" || item.BaseSHA == "" {
+		// Legacy/internal fixtures created before base pinning remain runnable.
+		// All external root admission paths now persist a concrete pin.
+		return false, false, "", nil
+	}
+	ref := "refs/remotes/origin/" + item.BaseBranch
+	if _, err := gitText(ctx, workdir, "fetch", "--no-tags", "origin", "+refs/heads/"+item.BaseBranch+":"+ref); err != nil {
+		return false, false, "", fmt.Errorf("refresh pinned base: %w", err)
+	}
+	remote, err := gitText(ctx, workdir, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return false, false, "", err
+	}
+	if strings.TrimSpace(remote) == strings.TrimSpace(item.BaseSHA) {
+		return false, false, "", nil
+	}
+	status, err := gitText(ctx, workdir, "status", "--porcelain")
+	if err != nil {
+		return false, false, "", err
+	}
+	if status != "" {
+		return false, false, "", errors.New("refuse base integration from a dirty worktree")
+	}
+	if _, err := gitText(ctx, workdir, "merge", "--ff-only", ref); err != nil {
+		ident, identityErr := r.resolveGitIdentity(ctx, workdir)
+		if identityErr != nil {
+			return false, false, "", identityErr
+		}
+		if _, mergeErr := gitText(ctx, workdir, append(ident, "merge", "--no-edit", ref)...); mergeErr != nil {
+			_, _ = gitText(ctx, workdir, "merge", "--abort")
+			return false, true, "remote base changed and conflicts with the reviewed work; resolve the content conflict, then resume", nil
+		}
+	}
+	if err := r.db.UpdateBase(ctx, item.ID, item.BaseBranch, remote, stage); err != nil {
+		return false, false, "", err
+	}
+	return true, false, "", nil
 }
 
 // refreshPullRequestBase makes the PR contract describe the remote target that
@@ -2206,6 +2533,64 @@ func validateStructured(kind string, doc []byte) error {
 	for _, id := range ids {
 		if err := visit(id); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateMechanicalPlan(doc []byte, feedback *wfe.ReviewFeedback) error {
+	var root struct {
+		SchemaVersion int `json:"schema_version"`
+		Steps         []struct {
+			Order          int      `json:"order"`
+			FindingID      string   `json:"finding_id"`
+			File           string   `json:"file"`
+			Location       string   `json:"location"`
+			Edit           string   `json:"edit"`
+			ExpectedResult string   `json:"expected_result"`
+			Verification   []string `json:"verification"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(doc, &root); err != nil {
+		return err
+	}
+	if root.SchemaVersion != 1 {
+		return errors.New("schema_version must be 1")
+	}
+	if len(root.Steps) == 0 {
+		return errors.New("mechanical plan requires at least one step")
+	}
+	covered := make(map[string]bool, len(root.Steps))
+	for i, step := range root.Steps {
+		if step.Order != i+1 {
+			return fmt.Errorf("step %d order must be %d", i+1, i+1)
+		}
+		for name, value := range map[string]string{
+			"finding_id": step.FindingID, "file": step.File, "location": step.Location,
+			"edit": step.Edit, "expected_result": step.ExpectedResult,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("step %d %s is required", step.Order, name)
+			}
+		}
+		if len(step.Verification) == 0 {
+			return fmt.Errorf("step %d verification requires at least one exact command", step.Order)
+		}
+		for _, command := range step.Verification {
+			if strings.TrimSpace(command) == "" {
+				return fmt.Errorf("step %d verification command is empty", step.Order)
+			}
+		}
+		covered[step.FindingID] = true
+	}
+	if feedback != nil {
+		for _, finding := range feedback.Findings {
+			if strings.EqualFold(finding.Severity, "suggestion") || strings.EqualFold(finding.Severity, "nit") {
+				continue
+			}
+			if !covered[finding.ID] {
+				return fmt.Errorf("blocking finding %s has no mechanical step", finding.ID)
+			}
 		}
 	}
 	return nil

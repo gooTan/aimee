@@ -50,6 +50,60 @@ func TestOpenMigratesPreGoWorkflowSchema(t *testing.T) {
 	}
 }
 
+func TestRootBasePinPersistsAndChildrenInheritIt(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	sha := strings.Repeat("a", 40)
+	if err := store.AdmitRoot(ctx, CreateWorkItem{ID: "wi_pinned", Repo: "repo", ProposalPath: "pinned", WorkflowName: "build", StartStage: "start", BaseBranch: "testing", BaseSHA: sha}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_pinned.child", Repo: "repo", ProposalPath: "child", WorkflowName: "slice", StartStage: "start", ParentID: "wi_pinned"}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.WorkItem(ctx, "wi_pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.WorkItem(ctx, "wi_pinned.child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.BaseBranch != "testing" || root.BaseSHA != sha || child.BaseBranch != root.BaseBranch || child.BaseSHA != root.BaseSHA {
+		t.Fatalf("root=%+v child=%+v", root, child)
+	}
+	if err := store.UpdateBase(ctx, root.ID, "testing", strings.Repeat("b", 40), "freeze"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.Events(ctx, root.ID, 0, 20)
+	if err != nil || len(events) < 2 || events[len(events)-1].Kind != "base_integration" {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}
+
+func TestPublicationLeaseUsesOnlyPostPublicationBaseIntegration(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_lease", Repo: "repo", ProposalPath: "lease", WorkflowName: "test", WorkflowVersion: "v1", StartStage: "publish"}); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 40)
+	if err := store.RecordLifecycleEvent(ctx, "wi_lease", "publish", "base_integration", "integrated testing", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordLifecycleEvent(ctx, "wi_lease", "publish", "publication", "published", sha); err != nil {
+		t.Fatal(err)
+	}
+	if expected, lease, err := store.PublicationLease(ctx, "wi_lease"); err != nil || lease || expected != "" {
+		t.Fatalf("lease before integration = (%q, %v, %v)", expected, lease, err)
+	}
+	if err := store.RecordLifecycleEvent(ctx, "wi_lease", "publish", "base_integration", "integrated testing", "base2"); err != nil {
+		t.Fatal(err)
+	}
+	if expected, lease, err := store.PublicationLease(ctx, "wi_lease"); err != nil || !lease || expected != sha {
+		t.Fatalf("lease after integration = (%q, %v, %v)", expected, lease, err)
+	}
+}
+
 func TestOpenBackfillsLegacyDelegateMappingOwnership(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy-mapping.db")
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -331,6 +385,28 @@ func TestRetryLimitResumeStartsFreshBudgetAndKeepsDiagnostic(t *testing.T) {
 	}
 }
 
+func TestConvergenceResumeStartsFreshBoundedCycle(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_convergence_resume", Repo: "repo", ProposalPath: "proposal", WorkflowName: "build", StartStage: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.RecordRequestedChanges(ctx, "wi_convergence_resume", "gate", "plan", "artifact-a", "feedback-a", "fix a", 1, 3, 0)
+	if err != nil || !first.Parked || first.PauseReason != "convergence_limit" {
+		t.Fatalf("first cycle=%+v err=%v", first, err)
+	}
+	if err := store.Resume(ctx, "wi_convergence_resume"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.RecordRequestedChanges(ctx, "wi_convergence_resume", "gate", "plan", "artifact-a", "feedback-a", "fix a", 3, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Parked || second.Attempts != 1 || second.IdenticalRepeats != 1 {
+		t.Fatalf("resumed cycle inherited exhausted convergence state: %+v", second)
+	}
+}
+
 func TestWorkflowBudgetHeartbeatExtendsReplayReservations(t *testing.T) {
 	for _, state := range []string{"actual", "unresolved"} {
 		t.Run(state, func(t *testing.T) {
@@ -368,6 +444,145 @@ func TestTransientPauseIsNotRepairContext(t *testing.T) {
 	}
 	if detail, err := store.LatestStageRetryDetail(ctx, "wi_transient", "impl"); err != nil || detail != "" {
 		t.Fatalf("transient pause leaked as repair detail=%q err=%v", detail, err)
+	}
+}
+
+func TestRunnerFailureBreakerIsAtomicAndOperatorResumable(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	item := CreateWorkItem{ID: "wi_breaker", Repo: "repo", ProposalPath: "breaker", WorkflowName: "build", WorkflowVersion: "v1", StartStage: "impl"}
+	if err := store.CreateWorkItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := store.ReserveWorkflowBudget(ctx, item.ID, "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ParkRunnerFailureWithSignature(ctx, item.ID, "impl", "owner", "runner_unavailable", "runner failed", "class-a", "detail-a", item.WorkflowVersion, false, false, 0); err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 3 {
+			if _, err := store.ResumeTransient(ctx, "runner_unavailable", 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, err := store.WorkItem(ctx, item.ID)
+	if err != nil || got.PauseReason != "repeated_runner_failure" {
+		t.Fatalf("breaker=%+v err=%v", got, err)
+	}
+	if resumed, err := store.ResumeTransient(ctx, "runner_unavailable", 0); err != nil || resumed != 0 {
+		t.Fatalf("tripped breaker was transiently resumed: count=%d err=%v", resumed, err)
+	}
+	if err := store.Resume(ctx, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.WorkItem(ctx, item.ID); err != nil || got.PauseReason != "" {
+		t.Fatalf("operator resume did not clear breaker: %+v err=%v", got, err)
+	}
+}
+
+func TestRunnerFailureBreakerVersionChangeReleasesOnlyChangedVersion(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	item := CreateWorkItem{ID: "wi_breaker_version", Repo: "repo", ProposalPath: "breaker-version", WorkflowName: "build", WorkflowVersion: "v1", StartStage: "impl"}
+	if err := store.CreateWorkItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err := store.ReserveWorkflowBudget(ctx, item.ID, "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ParkRunnerFailureWithSignature(ctx, item.ID, item.StartStage, "owner", "runner_unavailable", "runner failed", "class-a", "detail-a", "v1", false, false, 0); err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 2 {
+			if _, err := store.ResumeTransient(ctx, "runner_unavailable", 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE lifecycle_work_item SET updated_at=datetime('now','+1 hour') WHERE work_item_id=?`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if resumed, err := store.ResumeChangedRunnerFailureBreakers(ctx); err != nil || resumed != 0 {
+		t.Fatalf("updated_at alone reset breaker: resumed=%d err=%v", resumed, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE lifecycle_work_item SET workflow_version='v2' WHERE work_item_id=?`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if resumed, err := store.ResumeChangedRunnerFailureBreakers(ctx); err != nil || resumed != 1 {
+		t.Fatalf("workflow version change did not release breaker: resumed=%d err=%v", resumed, err)
+	}
+}
+
+func TestRunnerFailureBreakerResetsAfterSuccessfulAdvance(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	item := CreateWorkItem{ID: "wi_breaker_progress", Repo: "repo", ProposalPath: "breaker-progress", WorkflowName: "build", WorkflowVersion: "v1", StartStage: "first"}
+	if err := store.CreateWorkItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveWorkflowBudget(ctx, item.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ParkRunnerFailureWithSignature(ctx, item.ID, "first", "owner", "runner_unavailable", "A", "class", "A", "v1", false, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResumeTransient(ctx, "runner_unavailable", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Move(ctx, item.ID, "first", "second", "advance", "ok", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := store.ReserveWorkflowBudget(ctx, item.ID, "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ParkRunnerFailureWithSignature(ctx, item.ID, "second", "owner", "runner_unavailable", "B", "class", "B", "v1", false, false, 0); err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 3 {
+			if _, err := store.ResumeTransient(ctx, "runner_unavailable", 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, err := store.WorkItem(ctx, item.ID)
+	if err != nil || got.PauseReason != "repeated_runner_failure" {
+		t.Fatalf("next-stage breaker=%+v err=%v", got, err)
+	}
+}
+
+func TestRunnerFailureBreakerDifferentSignatureStartsAtOne(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	item := CreateWorkItem{ID: "wi_breaker_signature", Repo: "repo", ProposalPath: "breaker-signature", WorkflowName: "build", WorkflowVersion: "v1", StartStage: "impl"}
+	if err := store.CreateWorkItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	for attempt, detail := range []string{"A", "B", "B", "B"} {
+		if _, err := store.ReserveWorkflowBudget(ctx, item.ID, "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ParkRunnerFailureWithSignature(ctx, item.ID, "impl", "owner", "runner_unavailable", detail, "class", detail, "v1", false, false, 0); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.WorkItem(ctx, item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 3 {
+			if _, err := store.ResumeTransient(ctx, "runner_unavailable", 0); err != nil {
+				t.Fatal(err)
+			}
+		} else if got.PauseReason != "repeated_runner_failure" {
+			t.Fatalf("B did not trip on its third attempt: %+v", got)
+		}
+	}
+	got, err := store.WorkItem(ctx, item.ID)
+	if err != nil || got.PauseReason != "repeated_runner_failure" {
+		t.Fatalf("B did not require three attempts: %+v err=%v", got, err)
 	}
 }
 

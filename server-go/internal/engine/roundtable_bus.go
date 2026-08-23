@@ -17,8 +17,9 @@ import (
 // validator keeps the ref above every module ref and pins the kind to a stage
 // some module actually serves.
 const (
-	BusPrincipalClass  uint32 = 1
-	WFEBusPrincipalRef uint32 = 64
+	BusPrincipalClass        uint32 = 1
+	WFEBusPrincipalRef       uint32 = 64
+	WFEReviewBusPrincipalRef uint32 = 66
 )
 
 // BusReviewer reaches the roundtable module over the event bus.

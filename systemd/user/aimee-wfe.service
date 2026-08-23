@@ -8,6 +8,7 @@ PartOf=aimee.slice
 Type=simple
 Slice=aimee.slice
 Environment=AIMEE_HOME=%h/.config/aimee
+Environment=AIMEE_MODULE_BUS_SOCKET=%h/.config/aimee/server-module-bus.sock
 ExecStart=%h/.local/bin/aimee-wfe --home %h/.config/aimee --socket %h/.config/aimee/aimee-wfe-http.sock --config %h/.config/aimee/aimee.yaml --workflow-dir %h/.config/aimee/workflows --forge-service-socket %h/.config/aimee/aimee-http.sock --module-bus-socket %h/.config/aimee/server-module-bus.sock
 Restart=on-failure
 RestartSec=2

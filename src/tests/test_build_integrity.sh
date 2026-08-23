@@ -785,6 +785,17 @@ else
     fail "native installs omit the Go WFE or shipped factory workflows"
 fi
 
+# WFE must serve the workflow control stage over the module bus: the unit must
+# both pass --module-bus-socket and export AIMEE_MODULE_BUS_SOCKET with the same value.
+wfe_unit="../systemd/user/aimee-wfe.service"
+wfe_env_socket=$(grep -F 'Environment=AIMEE_MODULE_BUS_SOCKET=' "$wfe_unit" 2>/dev/null | sed -n 's/.*Environment=AIMEE_MODULE_BUS_SOCKET=//p' | head -1 | tr -d '\r' || true)
+wfe_flag_socket=$(grep -F -- '--module-bus-socket' "$wfe_unit" 2>/dev/null | sed -n 's/.*--module-bus-socket \([^ ]*\).*/\1/p' | head -1 | tr -d '\r' || true)
+if [ -n "$wfe_env_socket" ] && [ "$wfe_env_socket" = "$wfe_flag_socket" ] && [ "$wfe_env_socket" = "%h/.config/aimee/server-module-bus.sock" ]; then
+    pass "aimee-wfe.service exports the same module-bus socket it passes by flag"
+else
+    fail "aimee-wfe.service must export AIMEE_MODULE_BUS_SOCKET=%h/.config/aimee/server-module-bus.sock matching --module-bus-socket (env=$wfe_env_socket flag=$wfe_flag_socket)"
+fi
+
 managed_defaults_tmp=$(mktemp -d /tmp/aimee-managed-defaults.XXXXXX)
 mkdir -p "$managed_defaults_tmp/source"
 printf 'first\n' > "$managed_defaults_tmp/source/demo.yaml"

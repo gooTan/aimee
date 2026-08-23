@@ -164,7 +164,7 @@ func main() {
 		// losing work.
 		if *moduleBusSocket != "" {
 			reviewer, reviewerErr := engine.NewBusReviewer(rootCtx, *moduleBusSocket,
-				engine.BusPrincipalClass, engine.WFEBusPrincipalRef, 0)
+				engine.BusPrincipalClass, engine.WFEReviewBusPrincipalRef, 0)
 			if reviewerErr != nil {
 				log.Printf("roundtable reviews unavailable: %v", reviewerErr)
 			} else {

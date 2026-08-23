@@ -48,6 +48,49 @@ func TestOpenMigratesPreGoWorkflowSchema(t *testing.T) {
 	if item.SourcePath == "" {
 		t.Fatal("source_path migration missing")
 	}
+	var packetSchemaVersion int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT packet_schema_version FROM lifecycle_work_item WHERE work_item_id=?`, "wi_migrated").Scan(&packetSchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	if packetSchemaVersion != 0 {
+		t.Fatalf("legacy packet_schema_version=%d, want 0", packetSchemaVersion)
+	}
+}
+
+func TestWorkItemPacketSchemaVersionRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_packet_root", Repo: "repo", ProposalPath: "root", WorkflowName: "build", StartStage: "start", PacketSchemaVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_packet_child", Repo: "repo", ProposalPath: "child", WorkflowName: "slice", StartStage: "impl", ParentID: "wi_packet_root", PacketSchemaVersion: 2}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.WorkItem(ctx, "wi_packet_root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.PacketSchemaVersion != 1 {
+		t.Fatalf("WorkItem packet schema version=%d, want 1", item.PacketSchemaVersion)
+	}
+	items, err := store.WorkItems(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[string]int, len(items))
+	for _, item := range items {
+		versions[item.ID] = item.PacketSchemaVersion
+	}
+	if versions["wi_packet_root"] != 1 || versions["wi_packet_child"] != 2 {
+		t.Fatalf("WorkItems packet schema versions=%v", versions)
+	}
+	children, err := store.Children(ctx, "wi_packet_root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 || children[0].PacketSchemaVersion != 2 {
+		t.Fatalf("Children=%+v, want one child with schema version 2", children)
+	}
 }
 
 func TestOpenBackfillsLegacyDelegateMappingOwnership(t *testing.T) {

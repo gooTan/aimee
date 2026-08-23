@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS lifecycle_work_item (
   override_count INTEGER NOT NULL DEFAULT 0,
   parent_id TEXT NOT NULL DEFAULT '',
   source_path TEXT NOT NULL DEFAULT '',
+  packet_schema_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(repo, proposal_path)
@@ -146,6 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_wfe_premium_call_root ON wfe_premium_call(root_id
 		{"reservation_state", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_state TEXT NOT NULL DEFAULT ''`},
 		{"reservation_owner", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_owner TEXT NOT NULL DEFAULT ''`},
 		{"reservation_lease_until", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_lease_until TEXT NOT NULL DEFAULT ''`},
+		{"packet_schema_version", `ALTER TABLE lifecycle_work_item ADD COLUMN packet_schema_version INTEGER NOT NULL DEFAULT 0`},
 	} {
 		has, err := s.hasWorkItemColumn(ctx, migration.column)
 		if err != nil {
@@ -264,17 +266,18 @@ func (s *Store) hasWorkItemColumn(ctx context.Context, wanted string) (bool, err
 }
 
 type CreateWorkItem struct {
-	ID              string
-	Repo            string
-	ProposalPath    string
-	WorkflowName    string
-	WorkflowVersion string
-	StartStage      string
-	Mode            string
-	Submitter       string
-	ParentID        string
-	SourcePath      string
-	MaxCostUSD      float64
+	ID                  string
+	Repo                string
+	ProposalPath        string
+	WorkflowName        string
+	WorkflowVersion     string
+	StartStage          string
+	Mode                string
+	Submitter           string
+	ParentID            string
+	SourcePath          string
+	MaxCostUSD          float64
+	PacketSchemaVersion int
 }
 
 var ErrAdmissionFull = errors.New("trigger admission full")
@@ -319,9 +322,9 @@ func (s *Store) createWorkItem(ctx context.Context, in CreateWorkItem, cap int) 
 		inserted, err = tx.ExecContext(ctx, `
 INSERT INTO lifecycle_work_item
   (work_item_id, repo, proposal_path, workflow_name, workflow_version,
-   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.WorkflowName,
-			in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID, in.SourcePath, in.MaxCostUSD)
+   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd, packet_schema_version)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.WorkflowName,
+			in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID, in.SourcePath, in.MaxCostUSD, in.PacketSchemaVersion)
 	} else {
 		// Parent eligibility and insertion are one SQLite statement. A concurrent
 		// StopTree therefore either includes this child or wins first and makes the
@@ -329,12 +332,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.W
 		inserted, err = tx.ExecContext(ctx, `
 INSERT INTO lifecycle_work_item
   (work_item_id, repo, proposal_path, workflow_name, workflow_version,
-   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd, packet_schema_version)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 FROM lifecycle_work_item parent
 WHERE parent.work_item_id=? AND parent.state='active'`, in.ID, in.Repo, in.ProposalPath,
 			in.WorkflowName, in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID,
-			in.SourcePath, in.MaxCostUSD, in.ParentID)
+			in.SourcePath, in.MaxCostUSD, in.PacketSchemaVersion, in.ParentID)
 	}
 	if err != nil {
 		return fmt.Errorf("insert work item: %w", err)
@@ -356,27 +359,28 @@ VALUES (?, ?, 'create', ?, ?, ?)`, in.ID, in.StartStage, in.Submitter, in.Workfl
 }
 
 type WorkItem struct {
-	ID                string  `json:"id"`
-	Repo              string  `json:"repo"`
-	ProposalPath      string  `json:"-"`
-	WorkflowName      string  `json:"workflow"`
-	WorkflowVersion   string  `json:"version"`
-	Stage             string  `json:"stage"`
-	State             string  `json:"state"`
-	Mode              string  `json:"mode"`
-	PauseReason       string  `json:"pause_reason"`
-	ContentHash       string  `json:"content_hash,omitempty"`
-	PRRef             string  `json:"pr_ref"`
-	Submitter         string  `json:"submitter"`
-	CumulativeCostUSD float64 `json:"cum_cost_usd"`
-	ReservedCostUSD   float64 `json:"reserved_cost_usd"`
-	ReservationState  string  `json:"-"`
-	MaxCostUSD        float64 `json:"work_item_max_cost_usd"`
-	OverrideCount     int     `json:"override_count"`
-	ParentID          string  `json:"parent_id,omitempty"`
-	Worktree          string  `json:"worktree,omitempty"`
-	SourcePath        string  `json:"-"`
-	UpdatedAt         string  `json:"updated_at"`
+	ID                  string  `json:"id"`
+	Repo                string  `json:"repo"`
+	ProposalPath        string  `json:"-"`
+	WorkflowName        string  `json:"workflow"`
+	WorkflowVersion     string  `json:"version"`
+	Stage               string  `json:"stage"`
+	State               string  `json:"state"`
+	Mode                string  `json:"mode"`
+	PauseReason         string  `json:"pause_reason"`
+	ContentHash         string  `json:"content_hash,omitempty"`
+	PRRef               string  `json:"pr_ref"`
+	Submitter           string  `json:"submitter"`
+	CumulativeCostUSD   float64 `json:"cum_cost_usd"`
+	ReservedCostUSD     float64 `json:"reserved_cost_usd"`
+	ReservationState    string  `json:"-"`
+	MaxCostUSD          float64 `json:"work_item_max_cost_usd"`
+	OverrideCount       int     `json:"override_count"`
+	ParentID            string  `json:"parent_id,omitempty"`
+	Worktree            string  `json:"worktree,omitempty"`
+	SourcePath          string  `json:"-"`
+	PacketSchemaVersion int     `json:"packet_schema_version,omitempty"`
+	UpdatedAt           string  `json:"updated_at"`
 }
 
 func (s *Store) WorkItem(ctx context.Context, id string) (WorkItem, error) {
@@ -384,11 +388,11 @@ func (s *Store) WorkItem(ctx context.Context, id string) (WorkItem, error) {
 	err := s.db.QueryRowContext(ctx, `
 SELECT work_item_id, repo, proposal_path, workflow_name, workflow_version, current_stage,
        state, mode, pause_reason, content_hash, pr_ref, submitter, cum_cost_usd, reserved_cost_usd, reservation_state,
-       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, updated_at
+       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, packet_schema_version, updated_at
 FROM lifecycle_work_item WHERE work_item_id = ?`, id).Scan(
 		&item.ID, &item.Repo, &item.ProposalPath, &item.WorkflowName, &item.WorkflowVersion,
 		&item.Stage, &item.State, &item.Mode, &item.PauseReason, &item.ContentHash, &item.PRRef,
-		&item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD, &item.ReservationState, &item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath,
+		&item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD, &item.ReservationState, &item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.PacketSchemaVersion,
 		&item.UpdatedAt)
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("get work item: %w", err)
@@ -433,7 +437,7 @@ func (s *Store) WorkItems(ctx context.Context) ([]WorkItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT work_item_id, repo, proposal_path, workflow_name, workflow_version, current_stage,
        state, mode, pause_reason, content_hash, pr_ref, submitter, cum_cost_usd, reserved_cost_usd,
-       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, updated_at
+       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, packet_schema_version, updated_at
 FROM lifecycle_work_item ORDER BY id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list work items: %w", err)
@@ -445,7 +449,7 @@ FROM lifecycle_work_item ORDER BY id DESC`)
 		if err := rows.Scan(&item.ID, &item.Repo, &item.ProposalPath, &item.WorkflowName,
 			&item.WorkflowVersion, &item.Stage, &item.State, &item.Mode, &item.PauseReason,
 			&item.ContentHash, &item.PRRef, &item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD,
-			&item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.UpdatedAt); err != nil {
+			&item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.PacketSchemaVersion, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan work item: %w", err)
 		}
 		items = append(items, item)

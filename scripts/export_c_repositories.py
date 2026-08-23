@@ -28,6 +28,22 @@ INVENTORY = ROOT / "tests/baselines/modules/canonical-inventory.yaml"
 LOCK = ROOT / "dependencies/aimee-repositories.lock.json"
 CORE_VERSION_FILE = ROOT / "src/core/VERSION"
 REMOTE_ROOT = "https://github.com/RakuenSoftware"
+MODULE_ORIGIN_OVERRIDES = {
+    "config": "https://github.com/gooTan/aimee-module-config.git",
+    "delegates": "https://github.com/gooTan/aimee-module-delegates.git",
+    "git": "https://github.com/gooTan/aimee-module-git.git",
+    "workflows": "https://github.com/gooTan/aimee-module-workflows.git",
+    "roundtable": "https://github.com/gooTan/aimee-module-roundtable.git",
+}
+
+
+def module_remote(module_id: str) -> str:
+    override = MODULE_ORIGIN_OVERRIDES.get(module_id)
+    if override is not None:
+        return override
+    return f"{REMOTE_ROOT}/aimee-module-{module_id}.git"
+
+
 HOSTED_BY_EXECUTABLE = {"wfe": "/usr/local/bin/aimee-wfe"}
 PRINCIPAL_CLASS = 1
 
@@ -593,7 +609,7 @@ preserved at their canonical paths so their migration history remains auditable.
         "owned_files": owned,
     }
     write_text(repository / "SOURCE_MANIFEST.json", json.dumps(manifest, indent=2) + "\n")
-    remote = f"{REMOTE_ROOT}/aimee-module-{module_id}.git"
+    remote = module_remote(module_id)
     commit = initialize_repository(repository, remote, timestamp, version)
     pin = {
         "id": module_id,

@@ -2,8 +2,6 @@ package panel
 
 import (
 	"context"
-
-	"github.com/JBailes/aimee/server-go/delegate"
 )
 
 // Run is the identity and budget a review executes under. The panel needs these
@@ -97,8 +95,23 @@ type SeatResult struct {
 	ReplayLost bool
 	// AvailabilityClass is the transport-owned retry class. It is independent
 	// of FailureCategory and remains empty for replay loss and ordinary failures.
-	AvailabilityClass delegate.AvailabilityClass
+	AvailabilityClass string
 }
+
+const (
+	AvailabilityClassNone                = ""
+	AvailabilityClassProviderQuota       = "provider_quota"
+	AvailabilityClassQuotaRateLimit      = AvailabilityClassProviderQuota
+	AvailabilityClassCapacity            = "capacity"
+	AvailabilityClassAuthentication      = "authentication"
+	AvailabilityClassProviderUnavailable = "provider_unavailable"
+	AvailabilityClassStartDeadline       = "start_deadline"
+	AvailabilityProviderQuota            = AvailabilityClassProviderQuota
+	AvailabilityCapacity                 = AvailabilityClassCapacity
+	AvailabilityAuthentication           = AvailabilityClassAuthentication
+	AvailabilityProviderUnavailable      = AvailabilityClassProviderUnavailable
+	AvailabilityStartDeadline            = AvailabilityClassStartDeadline
+)
 
 // Delegates is the resource plane a panel convenes over.
 //

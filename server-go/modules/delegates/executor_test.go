@@ -51,7 +51,7 @@ func (e *planningExecutor) PlanGroup(_ context.Context,
 
 func (blockingExecutor) Execute(ctx context.Context, _ delegatecontract.Invocation) delegatecontract.InvocationResult {
 	<-ctx.Done()
-	return delegatecontract.InvocationResult{Version: 2, Status: "failed", Error: ctx.Err().Error()}
+	return delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed", Error: ctx.Err().Error()}
 }
 
 func (e *fixedExecutor) Execute(_ context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
@@ -60,8 +60,8 @@ func (e *fixedExecutor) Execute(_ context.Context, request delegatecontract.Invo
 }
 
 func TestExecutionStageCanonicalizesRoleAndReturnsTerminalStatus(t *testing.T) {
-	executor := &fixedExecutor{result: delegatecontract.InvocationResult{Version: 2, Status: "done", Response: "complete"}}
-	request, _ := json.Marshal(delegatecontract.Invocation{Version: 2, Role: "implement", Persona: "engineer", Prompt: "do it"})
+	executor := &fixedExecutor{result: delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "done", Response: "complete"}}
+	request, _ := json.Marshal(delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "implement", Persona: "engineer", Prompt: "do it"})
 	reply, status := NewHandler(executor)(bus.ModuleInvocation{StageID: StageInvoke}, request)
 	if status != bus.ModuleStatusOK {
 		t.Fatalf("status = %d", status)
@@ -76,7 +76,7 @@ func TestExecutionStageCanonicalizesRoleAndReturnsTerminalStatus(t *testing.T) {
 }
 
 func TestExecutionStageAppliesProducerDeadline(t *testing.T) {
-	request, _ := json.Marshal(delegatecontract.Invocation{Version: 2, Role: "review",
+	request, _ := json.Marshal(delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "review",
 		Persona: "reviewer", Prompt: "inspect", ExecutionTimeoutMS: 20})
 	started := time.Now()
 	reply, status := NewHandler(blockingExecutor{})(bus.ModuleInvocation{StageID: StageInvoke}, request)
@@ -155,7 +155,7 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 2, Role: "code",
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
 		Persona: "security", Prompt: "inspect", Workdir: workdir, Tools: true})
 	if result.Status != "done" || !strings.Contains(result.Response, "You are acting as security.") {
 		t.Fatalf("result = %+v", result)
@@ -189,7 +189,7 @@ func TestRegistryExecutorEnforcesMaxParallelWithoutPoisoningAgentHealth(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := delegatecontract.Invocation{Version: 2, Role: "code", Persona: "engineer",
+	request := delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code", Persona: "engineer",
 		Prompt: "work", Workdir: workdir, Tools: true}
 	results := make(chan delegatecontract.InvocationResult, 2)
 	for range 2 {
@@ -262,7 +262,7 @@ func TestRegistryExecutorTypesCallerDeadlineAsExecutionDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	result := executor.Execute(ctx, delegatecontract.Invocation{Version: 2, Role: "code",
+	result := executor.Execute(ctx, delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
 		Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
 	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassStartDeadline || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
 		delegatecontract.IsCapacityDeadline(errors.New(result.Error)) {

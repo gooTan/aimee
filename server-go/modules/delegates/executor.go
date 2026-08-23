@@ -714,7 +714,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed"}
 	fail := func(err error, detail string) delegatecontract.InvocationResult {
 		result.Error = detail
-		result.AvailabilityClass = delegatecontract.ClassifyAvailability(err, false)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(err, false)
 		return result
 	}
 	if ctx == nil {
@@ -775,7 +775,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		if monitor.Exceeded() {
 			detail := fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
 			result.Error = detail
-			result.AvailabilityClass = delegatecontract.ClassifyAvailability(errors.New(detail), response != "")
+			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), response != "")
 			return result
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -783,7 +783,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			if detail := strings.TrimSpace(output.String()); detail != "" {
 				result.Error += ": " + delegatecontract.SafeDiagnostic(detail)
 			}
-			result.AvailabilityClass = delegatecontract.ClassifyAvailability(delegatecontract.ErrDelegateExecutionDeadline, response != "")
+			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, response != "")
 			return result
 		}
 		detail := strings.TrimSpace(output.String())
@@ -791,7 +791,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			detail = err.Error()
 		}
 		result.Error = delegatecontract.SafeDiagnostic(detail)
-		result.AvailabilityClass = delegatecontract.ClassifyAvailability(err, response != "")
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(err, response != "")
 		return result
 	}
 	response := finalOutput(agent.CLIKind, output.BytesCopy())

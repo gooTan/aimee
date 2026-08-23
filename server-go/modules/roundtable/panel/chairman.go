@@ -43,6 +43,7 @@ type chairmanAttemptResult struct {
 	err          error
 	detail       string
 	availability delegate.AvailabilityClass
+	replayLost   bool
 	cost         float64
 	costUnknown  bool
 }
@@ -62,7 +63,8 @@ func runChairmanAttempt(ctx context.Context, delegates Delegates, run Run, reque
 	result := delegates.One(ctx, run, request)
 	out := chairmanAttemptResult{response: result.Response, err: result.Err,
 		detail: result.FailureDetail, availability: result.AvailabilityClass,
-		cost: result.CostUSD, costUnknown: result.CostUnknown}
+		replayLost: result.ReplayLost,
+		cost:       result.CostUSD, costUnknown: result.CostUnknown}
 	if result.Err != nil {
 		return out
 	}
@@ -139,7 +141,7 @@ func RunChairman(ctx context.Context, delegates Delegates, run Run, panel Panel,
 	cost += attempt.cost
 	costUnknown = costUnknown || attempt.costUnknown
 	if attempt.err != nil {
-		if chairmanAvailabilityAllowed(attempt.availability) && !run.ReplayOnly && strings.TrimSpace(panel.ChairmanFallback) != "" {
+		if chairmanAvailabilityAllowed(attempt.availability) && !attempt.replayLost && !run.ReplayOnly && strings.TrimSpace(panel.ChairmanFallback) != "" {
 			fallback := request
 			fallback.Selector = panel.ChairmanFallback
 			fallback.DurableSlot = chairmanDurableSlot(run) + ":fallback"

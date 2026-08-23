@@ -238,7 +238,7 @@ func TestChairmanBothProfilesUnavailableReturnCombinedDiagnostics(t *testing.T) 
 	_, approvals, _, _, errText, _ := RunChairman(context.Background(), agents, chairmanRun(), Panel{
 		ChairmanEnabled: true, Chairman: "primary", ChairmanFallback: "fallback",
 	}, analysis, analysis.Feedback, 0, false, "plan")
-	if approvals != analysis.Approvals || !strings.Contains(errText, "primary chairman unavailable (quota_rate_limit)") ||
+	if approvals != analysis.Approvals || !strings.Contains(errText, "primary chairman unavailable (provider_quota)") ||
 		!strings.Contains(errText, "fallback chairman unavailable (provider_unavailable)") {
 		t.Fatalf("combined unavailable diagnostics missing: approvals=%d err=%q", approvals, errText)
 	}

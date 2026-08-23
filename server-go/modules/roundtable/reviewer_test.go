@@ -171,7 +171,8 @@ func TestSeatFailureCategoriesNameTheTransportCause(t *testing.T) {
 }
 
 func TestSeatBusForwardsAvailabilityClass(t *testing.T) {
-	result := seatResult("", "", 0, false, delegate.AvailabilityClassProviderUnavailable, errors.New("provider unavailable"))
+	err := &delegate.DelegateExecutionError{Err: errors.New("provider unavailable"), AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}
+	result := seatResult("", "", 0, false, delegate.AvailabilityClassNone, err)
 	if result.AvailabilityClass != delegate.AvailabilityClassProviderUnavailable || result.ReplayLost {
 		t.Fatalf("availability class was not forwarded independently: %+v", result)
 	}

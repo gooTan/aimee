@@ -172,15 +172,15 @@ func TestClassifyAvailability(t *testing.T) {
 		began bool
 		want  AvailabilityClass
 	}{
-		{name: "quota", err: errors.New("provider quota exceeded"), want: AvailabilityClassQuotaRateLimit},
-		{name: "rate limit diagnostic", err: errors.New("aimee_err=rate_limit"), want: AvailabilityClassQuotaRateLimit},
+		{name: "quota diagnostic", err: errors.New("provider quota exceeded")},
+		{name: "rate limit diagnostic", err: errors.New("aimee_err=rate_limit")},
 		{name: "capacity", err: ErrDelegateCapacity, want: AvailabilityClassCapacity},
 		{name: "capacity deadline diagnostic", err: errors.New("aimee_err=capacity_deadline"), want: AvailabilityClassCapacity},
-		{name: "authentication", err: errors.New("authentication failed"), want: AvailabilityClassAuthentication},
-		{name: "session outage", err: errors.New("session unavailable"), want: AvailabilityClassAuthentication},
-		{name: "provider", err: errors.New("provider unavailable"), want: AvailabilityClassProviderUnavailable},
-		{name: "missing cli", err: errors.New("no enabled delegate CLI is configured"), want: AvailabilityClassProviderUnavailable},
-		{name: "deadline", err: ErrDelegateExecutionDeadline, want: AvailabilityClassStartDeadline},
+		{name: "authentication diagnostic", err: errors.New("authentication failed")},
+		{name: "session outage", err: errors.New("session unavailable")},
+		{name: "provider diagnostic", err: errors.New("provider unavailable")},
+		{name: "missing cli", err: errors.New("no enabled delegate CLI is configured")},
+		{name: "deadline", err: ErrDelegateExecutionDeadline},
 		{name: "response started", err: errors.New("quota exceeded"), began: true},
 		{name: "replay", err: ErrDelegateReplayUnavailable},
 		{name: "terminal", err: ErrDelegateTerminal},
@@ -201,9 +201,9 @@ func TestDelegateCarriesAvailabilityClass(t *testing.T) {
 		t.Fatalf("single delegate lost availability class: result=%+v err=%v", result, err)
 	}
 
-	group := &BusClient{caller: &groupRoutingCaller{planError: "quota exceeded"}, deadline: time.Second}
+	group := &BusClient{caller: &groupRoutingCaller{planError: ErrDelegateCapacity.Error()}, deadline: time.Second}
 	results := group.DelegateGroup(t.Context(), []DelegateRequest{{Role: "review", Persona: "qa", Prompt: "review"}})
-	if len(results) != 1 || results[0].AvailabilityClass != AvailabilityClassQuotaRateLimit {
+	if len(results) != 1 || results[0].AvailabilityClass != AvailabilityClassCapacity {
 		t.Fatalf("group planning lost availability class: %+v", results)
 	}
 

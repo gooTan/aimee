@@ -150,6 +150,10 @@ func (s seatBus) request(run panel.Run, seat panel.SeatRequest) delegate.Delegat
 }
 
 func seatResult(participant, response string, cost float64, costUnknown bool, availability delegate.AvailabilityClass, err error) panel.SeatResult {
+	availability = delegate.AvailabilityClassNone
+	if err != nil {
+		availability = delegate.AvailabilityClassOf(err)
+	}
 	out := panel.SeatResult{Participant: participant, Response: response,
 		CostUSD: cost, CostUnknown: costUnknown, AvailabilityClass: availability, Err: err}
 	if err == nil {

@@ -1,12 +1,12 @@
 {
   "name": "default",
   "seats": [
-    {"model": "sol", "persona": "reviewer"},
-    {"model": "antigravity", "persona": "reviewer"},
-    {"model": "fable", "persona": "architect", "optional": true}
+    {"model": "codex:gpt-5.6-sol", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "qa"},
+    {"model": "claude:claude-fable-5", "persona": "architect", "optional": true}
   ],
   "chairman": "antigravity",
-  "chairman_fallback": "sol",
+  "chairman_fallback": "codex:gpt-5.6-sol",
   "chairman_enabled": true,
   "min_successful": 2,
   "deadline_ms": 600000,

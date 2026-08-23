@@ -23,7 +23,7 @@ const (
 	StageInvoke     uint32 = 1
 	EventGroupPlan  uint32 = 6678
 	StageGroupPlan  uint32 = 22
-	WireVersion            = 2
+	WireVersion            = 3
 	DefaultDeadline        = 30 * time.Minute
 )
 
@@ -90,20 +90,23 @@ var (
 
 // AvailabilityClass is the transport-owned recovery class for a delegate
 // failure. Empty means the failure is not safe to retry by selecting another
-// provider/profile.
-type AvailabilityClass string
+// provider/profile. It is an alias so panel transport contracts can expose the
+// field as a plain string without conversion noise.
+type AvailabilityClass = string
 
 const (
-	AvailabilityClassNone                AvailabilityClass = ""
-	AvailabilityClassQuotaRateLimit      AvailabilityClass = "quota_rate_limit"
-	AvailabilityClassCapacity            AvailabilityClass = "capacity"
-	AvailabilityClassAuthentication      AvailabilityClass = "authentication"
-	AvailabilityClassProviderUnavailable AvailabilityClass = "provider_unavailable"
-	AvailabilityClassStartDeadline       AvailabilityClass = "start_deadline"
+	AvailabilityClassNone                = ""
+	AvailabilityClassProviderQuota       = "provider_quota"
+	AvailabilityClassCapacity            = "capacity"
+	AvailabilityClassAuthentication      = "authentication"
+	AvailabilityClassProviderUnavailable = "provider_unavailable"
+	AvailabilityClassStartDeadline       = "start_deadline"
 
-	// Short aliases keep callers readable while the wire names remain explicit.
+	// Compatibility aliases for callers that used the pre-v3 name.
+	AvailabilityClassQuotaRateLimit = AvailabilityClassProviderQuota
 	AvailabilityNone                = AvailabilityClassNone
-	AvailabilityQuotaRateLimit      = AvailabilityClassQuotaRateLimit
+	AvailabilityProviderQuota       = AvailabilityClassProviderQuota
+	AvailabilityQuotaRateLimit      = AvailabilityClassProviderQuota
 	AvailabilityCapacity            = AvailabilityClassCapacity
 	AvailabilityAuthentication      = AvailabilityClassAuthentication
 	AvailabilityProviderUnavailable = AvailabilityClassProviderUnavailable
@@ -111,10 +114,11 @@ const (
 )
 
 type DelegateExecutionError struct {
-	Err        error
-	Dispatched bool
-	CostKnown  bool
-	CostUSD    float64
+	Err               error
+	Dispatched        bool
+	CostKnown         bool
+	CostUSD           float64
+	AvailabilityClass AvailabilityClass
 }
 
 func (e *DelegateExecutionError) Error() string { return e.Err.Error() }
@@ -220,7 +224,8 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		remaining := time.Until(contextDeadline)
 		if remaining <= 0 {
 			err := errors.Join(ErrDelegateTerminal, context.DeadlineExceeded)
-			return DelegateResult{AvailabilityClass: ClassifyAvailability(err, false)}, err
+			return DelegateResult{AvailabilityClass: AvailabilityClassStartDeadline}, &DelegateExecutionError{
+				Err: err, AvailabilityClass: AvailabilityClassStartDeadline}
 		}
 		if remaining < deadline {
 			deadline = remaining
@@ -246,7 +251,7 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) ||
 			errors.Is(err, bus.ErrModuleCallRejected) ||
 			errors.Is(err, bus.ErrModuleCallNotDispatched) {
-			return DelegateResult{AvailabilityClass: ClassifyAvailability(err, false)}, err
+			return DelegateResult{}, err
 		}
 		// Once handed to the bus, loss of the reply cannot prove the provider did
 		// not run. Preserve that uncertainty at the caller's billing boundary.
@@ -271,16 +276,20 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 			detail = ErrDelegateTerminal.Error()
 		}
 		failure := classifyDelegateError(errors.New(detail))
-		if !IsCapacityBackpressure(failure) && !IsCapacityDeadline(failure) && !IsExecutionDeadline(failure) {
+		if !errors.Is(failure, ErrDelegateCapacity) && !IsCapacityDeadline(failure) && !IsExecutionDeadline(failure) {
 			failure = fmt.Errorf("%w: %s", ErrDelegateTerminal, detail)
 		}
 		responseStarted := strings.TrimSpace(result.Response) != ""
-		availability := ClassifyAvailability(failure, responseStarted)
+		availability := AvailabilityClassNone
 		if !responseStarted {
-			availability = firstNonemptyAvailability(result.AvailabilityClass, availability)
+			availability = validAvailabilityClass(result.AvailabilityClass)
+			if availability == AvailabilityClassNone {
+				availability = AvailabilityClassOf(failure)
+			}
 		}
 		return DelegateResult{AvailabilityClass: availability}, &DelegateExecutionError{Err: failure,
-			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD}
+			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD,
+			AvailabilityClass: availability}
 	}
 	participant := request.Participant
 	if participant == "" {
@@ -288,7 +297,7 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 	}
 	return DelegateResult{Response: result.Response, Agent: result.Agent, Participant: participant,
 		CostUSD: result.CostUSD, CostUnknown: !result.CostKnown,
-		AvailabilityClass: result.AvailabilityClass}, nil
+		AvailabilityClass: AvailabilityClassNone}, nil
 }
 
 func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
@@ -333,7 +342,7 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 	}
 	if err != nil {
 		err = classifyDelegateError(err)
-		availability := ClassifyAvailability(err, false)
+		availability := AvailabilityClassOf(err)
 		for i := range out {
 			out[i] = DelegateGroupResult{Participant: requests[i].Participant, AvailabilityClass: availability, Err: err}
 		}
@@ -401,21 +410,47 @@ func IsExecutionDeadline(err error) bool {
 		strings.Contains(err.Error(), "aimee_err=execution_deadline"))
 }
 
-func firstNonemptyAvailability(values ...AvailabilityClass) AvailabilityClass {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
+func validAvailabilityClass(class AvailabilityClass) AvailabilityClass {
+	switch class {
+	case AvailabilityClassProviderQuota, AvailabilityClassCapacity,
+		AvailabilityClassAuthentication, AvailabilityClassProviderUnavailable,
+		AvailabilityClassStartDeadline:
+		return class
+	default:
+		return AvailabilityClassNone
 	}
-	return ""
 }
 
-// ClassifyAvailability maps only failures that are safe to retry with another
-// provider/profile. Once a usable response exists, the provider may have done
-// work even if the terminal status is failed, so the class must stay empty.
-func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
+// AvailabilityClassOf returns only transport metadata carried by a delegate
+// execution error. It deliberately does not infer provider availability from
+// arbitrary terminal diagnostics; only the typed capacity sentinels are safe
+// to derive locally.
+func AvailabilityClassOf(err error) AvailabilityClass {
+	if err == nil {
+		return AvailabilityClassNone
+	}
+	var execution *DelegateExecutionError
+	if errors.As(err, &execution) {
+		if class := validAvailabilityClass(execution.AvailabilityClass); class != AvailabilityClassNone {
+			return class
+		}
+	}
+	if errors.Is(err, ErrDelegateCapacity) || IsCapacityDeadline(err) {
+		return AvailabilityClassCapacity
+	}
+	return AvailabilityClassNone
+}
+
+// CarriedAvailabilityClass is an explicit-name alias for callers that prefer
+// to document that the class came from the transport envelope.
+func CarriedAvailabilityClass(err error) AvailabilityClass { return AvailabilityClassOf(err) }
+
+// ClassifyProviderAvailability is used only by the delegate producer, which
+// owns CLI/provider diagnostics. The client-side ClassifyAvailability below
+// never infers a class from arbitrary terminal text.
+func ClassifyProviderAvailability(err error, responseStarted bool) AvailabilityClass {
 	if err == nil || responseStarted || errors.Is(err, ErrDelegateReplayUnavailable) {
-		return ""
+		return AvailabilityClassNone
 	}
 	if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) {
 		return AvailabilityClassProviderUnavailable
@@ -425,7 +460,8 @@ func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
 	}
 	detail := strings.ToLower(err.Error())
 	if strings.Contains(detail, "aimee_err=concurrency_limit") ||
-		strings.Contains(detail, "capacity unavailable") || strings.Contains(detail, "capacity saturated") {
+		strings.Contains(detail, "capacity unavailable") || strings.Contains(detail, "capacity saturated") ||
+		strings.Contains(detail, "capacity deadline") || strings.Contains(detail, "capacity-deadline") {
 		return AvailabilityClassCapacity
 	}
 	if strings.Contains(detail, "quota") || strings.Contains(detail, "rate limit") ||
@@ -435,9 +471,11 @@ func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
 		strings.Contains(detail, "credits exhausted") || strings.Contains(detail, "throttled") {
 		return AvailabilityClassQuotaRateLimit
 	}
-	if strings.Contains(detail, "authentication") || strings.Contains(detail, "unauthorized") ||
+	if strings.Contains(detail, "authentication") || strings.Contains(detail, "authorization") ||
+		strings.Contains(detail, "unauthorized") ||
 		strings.Contains(detail, "invalid api key") || strings.Contains(detail, "api key") ||
-		strings.Contains(detail, "login required") || strings.Contains(detail, "session expired") ||
+		strings.Contains(detail, "login") || strings.Contains(detail, "credential") ||
+		strings.Contains(detail, "session expired") || strings.Contains(detail, "expired session") || strings.Contains(detail, "expired-session") ||
 		strings.Contains(detail, "session unavailable") || strings.Contains(detail, "session is unavailable") || strings.Contains(detail, "session outage") ||
 		strings.Contains(detail, "session not found") || strings.Contains(detail, "no active session") ||
 		strings.Contains(detail, "token expired") || strings.Contains(detail, "invalid token") ||
@@ -445,6 +483,7 @@ func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
 		return AvailabilityClassAuthentication
 	}
 	if strings.Contains(detail, "provider unavailable") || strings.Contains(detail, "provider is unavailable") ||
+		strings.Contains(detail, "unavailable provider") ||
 		strings.Contains(detail, "provider not found") || strings.Contains(detail, "cli unavailable") ||
 		strings.Contains(detail, "command not found") || strings.Contains(detail, "executable file not found") ||
 		strings.Contains(detail, "no such file or directory") || strings.Contains(detail, "not installed") ||
@@ -456,7 +495,17 @@ func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
 	if IsExecutionDeadline(err) || errors.Is(err, context.DeadlineExceeded) || strings.Contains(detail, "execution deadline exceeded") {
 		return AvailabilityClassStartDeadline
 	}
-	return ""
+	return AvailabilityClassNone
+}
+
+// ClassifyAvailability returns only transport-carried metadata and typed
+// capacity. It is safe to use at the client boundary because it does not
+// inspect arbitrary terminal error text.
+func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
+	if responseStarted {
+		return AvailabilityClassNone
+	}
+	return AvailabilityClassOf(err)
 }
 
 // classifyDelegateError preserves the specific typed deadline sentinel even

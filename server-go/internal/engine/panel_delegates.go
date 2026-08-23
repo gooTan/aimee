@@ -45,6 +45,10 @@ func (p panelDelegates) request(run roundtablecfg.Run, seat roundtablecfg.SeatRe
 // result classifies and redacts here rather than in the panel, so the panel
 // never grows a second copy of this taxonomy to keep in step with these errors.
 func panelSeatResult(participant, response string, cost float64, costUnknown bool, availability delegate.AvailabilityClass, err error) roundtablecfg.SeatResult {
+	availability = delegate.AvailabilityClassNone
+	if err != nil {
+		availability = delegate.AvailabilityClassOf(err)
+	}
 	out := roundtablecfg.SeatResult{Participant: participant, Response: response,
 		CostUSD: cost, CostUnknown: costUnknown, AvailabilityClass: availability, Err: err}
 	if err == nil {

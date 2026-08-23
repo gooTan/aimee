@@ -52,6 +52,23 @@ class ExportCModuleOriginsTest(unittest.TestCase):
         self.assertEqual(f"{EXPORTER.REMOTE_ROOT}/aimee-core-c.git",
                          "https://github.com/RakuenSoftware/aimee-core-c.git")
 
+    def test_roundtable_shared_sources_include_preset_configs(self) -> None:
+        expected = {
+            "config/roundtables/default.json",
+            "config/roundtables/plan.json",
+            "config/roundtables/implementation.json",
+            "config/roundtables/documentation.json",
+        }
+        roundtable_sources = set(EXPORTER.go_process_shared_sources("roundtable"))
+        self.assertTrue(expected.issubset(roundtable_sources), roundtable_sources)
+        self.assertEqual(len(expected & roundtable_sources), 4)
+        for module_id in ("audit", "workflows", "delegates", "git", "config", "memory"):
+            with self.subTest(module=module_id):
+                self.assertTrue(
+                    expected.isdisjoint(set(EXPORTER.go_process_shared_sources(module_id))),
+                    f"{module_id} must not include roundtable preset configs",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

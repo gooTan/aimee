@@ -354,6 +354,14 @@ def go_process_shared_sources(module_id: str) -> list[str]:
             for path in (ROOT / "server-go/modules/delegates").glob("*.go")
             if not path.name.endswith("_test.go")
         )
+        sources.extend(
+            [
+                "config/roundtables/default.json",
+                "config/roundtables/plan.json",
+                "config/roundtables/implementation.json",
+                "config/roundtables/documentation.json",
+            ]
+        )
     if module_id == "delegates":
         sources.extend(
             path.relative_to(ROOT).as_posix()

@@ -45,6 +45,20 @@ func TestWFEModuleBusPrincipalsAreDistinctAndPinned(t *testing.T) {
 	if !strings.Contains(snippet, "WFEReviewBusPrincipalRef") {
 		t.Fatal("NewBusReviewer call must use WFEReviewBusPrincipalRef")
 	}
+	logIdx := strings.Index(text, "roundtable review requests will be sent over the event bus")
+	if logIdx == -1 {
+		t.Fatal("main.go missing reviewer success log")
+	}
+	logSnippet := text[logIdx:]
+	if len(logSnippet) > 600 {
+		logSnippet = logSnippet[:600]
+	}
+	if !strings.Contains(logSnippet, "WFEReviewBusPrincipalRef") {
+		t.Fatal("reviewer success log must print WFEReviewBusPrincipalRef (not WFEBusPrincipalRef)")
+	}
+	if strings.Contains(logSnippet, "engine.WFEBusPrincipalRef") {
+		t.Fatal("reviewer success log must not print WFEBusPrincipalRef; it must match the reviewer attachment")
+	}
 	if !strings.Contains(text, "PrincipalRef:   20") && !strings.Contains(text, "PrincipalRef: 20") {
 		t.Fatal("workflow module service principal must remain 20")
 	}

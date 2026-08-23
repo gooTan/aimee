@@ -275,7 +275,11 @@ func (m *WorktreeManager) prepareDependencies(ctx context.Context, itemID, repo,
 			}
 		}
 	}
-	if sourceExists && source == current {
+	sourceReady, err := dependencyTreeReady(repo)
+	if err != nil {
+		return fmt.Errorf("check source dependencies: %w", err)
+	}
+	if sourceExists && source == current && sourceReady {
 		if err := shareNodeModules(repo, worktree); err != nil {
 			return err
 		}
@@ -283,7 +287,11 @@ func (m *WorktreeManager) prepareDependencies(ctx context.Context, itemID, repo,
 		if err := removeManagedSourceLinks(repo, worktree); err != nil {
 			return err
 		}
-		if !ready {
+		worktreeReady, readyErr := dependencyTreeReady(worktree)
+		if readyErr != nil {
+			return fmt.Errorf("check worktree dependencies: %w", readyErr)
+		}
+		if !ready || !worktreeReady {
 			runner := m.install
 			if runner == nil {
 				runner = nativeCommandRunner
@@ -298,6 +306,17 @@ func (m *WorktreeManager) prepareDependencies(ctx context.Context, itemID, repo,
 		return nil
 	}
 	return m.db.RecordLifecycleEvent(ctx, itemID, "worktree", "dependency_graph", "dependencies ready", current)
+}
+
+func dependencyTreeReady(root string) (bool, error) {
+	info, err := os.Stat(filepath.Join(root, "node_modules"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
 }
 
 func dependencyGraphFingerprint(root string) (string, bool, error) {

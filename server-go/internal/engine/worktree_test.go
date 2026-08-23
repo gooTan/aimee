@@ -645,6 +645,50 @@ func TestDependencyGraphControlsReuseAndFrozenInstall(t *testing.T) {
 	}
 }
 
+func TestMatchingDependencyGraphInstallsWhenSourceHasNoDependencies(t *testing.T) {
+	graphRepo := func() string {
+		dir := t.TempDir()
+		gitRun(t, dir, "init", "-b", "trunk")
+		for name, body := range map[string]string{
+			"pnpm-lock.yaml":      "lockfileVersion: '9.0'\n",
+			"pnpm-workspace.yaml": "packages: []\n",
+			"package.json":        `{"private":true}`,
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gitRun(t, dir, "add", ".")
+		gitRun(t, dir, "commit", "-m", "graph")
+		return dir
+	}
+
+	source := graphRepo()
+	worktree := graphRepo()
+	store, err := db1.Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_matching", Repo: source, ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	installs := 0
+	manager := &WorktreeManager{db: store, install: func(_ context.Context, dir string, _ ...string) ([]byte, error) {
+		installs++
+		return nil, os.Mkdir(filepath.Join(dir, "node_modules"), 0o700)
+	}}
+	if err := manager.prepareDependencies(t.Context(), "wi_matching", source, worktree); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.prepareDependencies(t.Context(), "wi_matching", source, worktree); err != nil {
+		t.Fatal(err)
+	}
+	if installs != 1 {
+		t.Fatalf("matching graph without source dependencies installed %d times, want 1", installs)
+	}
+}
+
 func TestDependencyGraphChangeInvalidatesReadiness(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "source")
@@ -679,7 +723,10 @@ func TestDependencyGraphChangeInvalidatesReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	installs := 0
-	manager := &WorktreeManager{db: store, install: func(context.Context, string, ...string) ([]byte, error) { installs++; return nil, nil }}
+	manager := &WorktreeManager{db: store, install: func(_ context.Context, dir string, _ ...string) ([]byte, error) {
+		installs++
+		return nil, os.MkdirAll(filepath.Join(dir, "node_modules"), 0o700)
+	}}
 	if err := manager.prepareDependencies(t.Context(), "wi_graph", repo, worktree); err != nil {
 		t.Fatal(err)
 	}

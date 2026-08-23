@@ -669,9 +669,9 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 			}
 		}
 		prompt = "Decompose the complete approved plan into the smallest independent implementation packets that preserve the ORIGINAL REQUEST exactly. " +
-			"Return only JSON shaped {\"schema_version\":2,\"packets\":[{\"packet_id\":\"p1\",\"summary\":\"...\",\"target_blocks\":[\"implement\"],\"dependencies\":[],\"acceptance_criteria\":[\"...\"],\"implementation_kind\":\"general|ui\"}]}; implementation_kind must be exactly general or ui. " +
-			"Classify by the requested outcome: UI means the packet changes a frontend, browser, presentation, interaction, style, component, or accessibility outcome; general means backend, server, API, CLI, storage, configuration, workflow, test, documentation, or infrastructure outcomes. " +
-			"The outcome rule is to classify what the user receives, not how it is implemented. For mixed work (mixed-work), split independent UI and general deliverables when possible; if one packet must contain both, use ui when a user-visible UI outcome is part of the requested deliverable, otherwise use general. Do not infer classification from workflow names, model names, delegate names, CLI flags, or other routing metadata. " +
+			"Return only JSON shaped {\"schema_version\":2,\"packets\":[{\"schema_version\":2,\"packet_id\":\"p1\",\"summary\":\"...\",\"target_blocks\":[\"implement\"],\"dependencies\":[],\"acceptance_criteria\":[\"...\"],\"implementation_kind\":\"general|ui\"}]}; every packet schema_version must be 2, and implementation_kind must be exactly general or ui. " +
+			"Classify by the requested outcome, never by filenames or how the work is implemented: UI means the packet changes a frontend, browser, presentation, interaction, style, component, or accessibility outcome; general means backend, server, API, CLI, storage, configuration, workflow, test, documentation, or infrastructure outcomes. " +
+			"The outcome rule is to classify what the user receives, not how it is implemented. For mixed work (mixed-work), split independent UI and general deliverables when possible; if one packet must contain both, use ui when a user-visible UI outcome is part of the requested deliverable, otherwise use general. Do not infer classification from workflow names, model names, delegate names, CLI flags, filenames, or other routing metadata. " +
 			"Never include model, delegate, CLI, or workflow-selection identifiers in packet content; those are routing metadata and are rejected. " +
 			"Only create packets for repository changes that can be completed in this workflow run. Do not create packets for post-adoption measurements, future observation windows, operational follow-up, proposal bookkeeping, or manual verification. " +
 			"Tests and acceptance checks are criteria, not packets, unless the original request explicitly asks for a new reusable test artifact. Every packet must trace to an explicit requested deliverable; useful extra work is scope drift. " +
@@ -791,25 +791,37 @@ func implementationDelegatePrompt() string {
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
-func packetImplementationDelegate(item db1.WorkItem, proposal, fallback string) (string, error) {
-	switch item.PacketSchemaVersion {
-	case 0, 1:
-		return fallback, nil
-	case 2:
-		var packet map[string]any
-		if err := json.Unmarshal([]byte(proposal), &packet); err != nil {
-			return "", fmt.Errorf("decode version-2 packet: %w", err)
+func packetImplementationKind(item db1.WorkItem, proposal string) (string, error) {
+	var packet map[string]any
+	if err := json.Unmarshal([]byte(proposal), &packet); err != nil {
+		// Version-1 children historically carried free-form proposals. Preserve
+		// that compatibility while refusing an unreadable version-2 packet.
+		if item.PacketSchemaVersion <= 1 {
+			return "general", nil
 		}
-		if _, _, err := validatePacketFields(packet, 2); err != nil {
-			return "", fmt.Errorf("validate version-2 packet: %w", err)
-		}
-		if packet["implementation_kind"] == "ui" {
-			return "fable", nil
-		}
-		return fallback, nil
-	default:
-		return "", fmt.Errorf("unsupported packet schema version %d", item.PacketSchemaVersion)
+		return "", fmt.Errorf("decode packet proposal: %w", err)
 	}
+	version := 1
+	if item.PacketSchemaVersion == 2 {
+		version = 2
+	}
+	if rawVersion, ok := packet["schema_version"]; ok {
+		parsed, ok := packetSchemaVersionValue(rawVersion)
+		if !ok {
+			return "", errors.New("packet schema_version must be 1 or 2")
+		}
+		if item.PacketSchemaVersion > 0 && parsed != item.PacketSchemaVersion {
+			return "", fmt.Errorf("packet schema_version %d does not match child schema version %d", parsed, item.PacketSchemaVersion)
+		}
+		version = parsed
+	}
+	if _, _, err := validatePacketFields(packet, version); err != nil {
+		return "", fmt.Errorf("validate packet: %w", err)
+	}
+	if packet["implementation_kind"] == "ui" {
+		return "ui", nil
+	}
+	return "general", nil
 }
 
 // repairDelegatePrompt frames a review-driven repair round as a bounded task.
@@ -826,11 +838,15 @@ func repairDelegatePrompt() string {
 
 func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (StepResult, error) {
 	delegate := paramString(req.Node, "delegate", "")
+	persona := paramString(req.Node, "persona", "engineer")
 	if !docs {
-		var err error
-		delegate, err = packetImplementationDelegate(req.WorkItem, req.Proposal, delegate)
+		kind, err := packetImplementationKind(req.WorkItem, req.Proposal)
 		if err != nil {
 			return StepResult{}, err
+		}
+		persona = "engineer"
+		if kind == "ui" {
+			persona = "ui"
 		}
 	}
 	workdir, branch, err := r.worktrees.Ensure(ctx, req.WorkItem, req.WorkItem.ParentID == "")
@@ -945,7 +961,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	// independently committed and verified by the Go native runner". Record the
 	// pre-delegate HEAD so that promise can actually be checked below.
 	baseHead, baseHeadErr := gitText(ctx, workdir, "rev-parse", "HEAD")
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: paramString(req.Node, "persona", "engineer"), Delegate: delegate, Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: delegate, Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -2444,21 +2460,28 @@ func extractJSONObjects(text string) ([][]byte, error) {
 }
 
 func packetSchemaVersion(root map[string]any) (int, error) {
-	version, ok := root["schema_version"].(float64)
-	if !ok || (version != 1 && version != 2) {
+	version, ok := packetSchemaVersionValue(root["schema_version"])
+	if !ok {
 		return 0, errors.New("packet schema_version must be 1 or 2")
 	}
-	return int(version), nil
+	return version, nil
+}
+
+func packetSchemaVersionValue(value any) (int, bool) {
+	version, ok := value.(float64)
+	if !ok || (version != 1 && version != 2) {
+		return 0, false
+	}
+	return int(version), true
 }
 
 func validatePacketFields(packet map[string]any, version int) (string, []string, error) {
 	allowed := map[string]bool{
-		"packet_id": true, "summary": true, "target_blocks": true,
+		"schema_version": true,
+		"packet_id":      true, "summary": true, "target_blocks": true,
 		"dependencies": true, "acceptance_criteria": true,
 	}
-	if version == 2 {
-		allowed["implementation_kind"] = true
-	}
+	allowed["implementation_kind"] = true
 	for field := range packet {
 		if !allowed[field] {
 			return "", nil, fmt.Errorf("packet field %s is not allowed", field)
@@ -2468,11 +2491,19 @@ func validatePacketFields(packet map[string]any, version int) (string, []string,
 	if id == "" {
 		return "", nil, errors.New("packet_id is required")
 	}
-	if version == 2 {
-		kind, ok := packet["implementation_kind"].(string)
+	if kindValue, exists := packet["implementation_kind"]; version == 2 || exists {
+		kind, ok := kindValue.(string)
 		if !ok || (kind != "general" && kind != "ui") {
 			return "", nil, fmt.Errorf("packet %s implementation_kind must be general or ui", id)
 		}
+	}
+	if rawVersion, exists := packet["schema_version"]; exists {
+		packetVersion, ok := packetSchemaVersionValue(rawVersion)
+		if !ok || packetVersion != version {
+			return "", nil, fmt.Errorf("packet schema_version must be %d", version)
+		}
+	} else if version == 2 {
+		return "", nil, errors.New("packet schema_version must be 2")
 	}
 	if len(stringSlice(packet["acceptance_criteria"])) == 0 {
 		return "", nil, fmt.Errorf("packet %s needs acceptance criteria", id)

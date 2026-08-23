@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "cli_oracle.h"
+#include "platform_test_util.h"
 #include "provider_cli_adapter.h"
 
 /* Minimal stub needed for provider_cli_adapter_get without the full agent stack */
@@ -58,18 +59,22 @@ static void test_oracle_argv_policy(void)
    snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "oracle -e browser");
    snprintf(agent.model, sizeof(agent.model), "gpt-5.5-pro");
    provider_cli_cfg_t cfg = {.agent = &agent};
+   char task_path[PATH_MAX];
+   char answer_path[PATH_MAX];
+   snprintf(task_path, sizeof(task_path), "%s/task.md", platform_tmpdir());
+   snprintf(answer_path, sizeof(answer_path), "%s/answer.md", platform_tmpdir());
 
    char *tokens[64] = {0};
    int split = 0;
-   int argc = oracle_build_argv(&cfg, "/tmp/task.md", "/tmp/answer.md", 2700, tokens, 48, &split);
+   int argc = oracle_build_argv(&cfg, task_path, answer_path, 2700, tokens, 48, &split);
    assert(argc > 0);
    /* The operator's engine choice from cli_cmd survives verbatim. */
    assert(strcmp(tokens[0], "oracle") == 0);
    assert(strcmp(tokens[1], "-e") == 0 && strcmp(tokens[2], "browser") == 0);
    /* Fixed consultation shape: task attached as a file, answer to a file,
     * no desktop notifications, aligned timeout, pinned model. */
-   assert(argv_has_pair(tokens, argc, "-f", "/tmp/task.md"));
-   assert(argv_has_pair(tokens, argc, "--write-output", "/tmp/answer.md"));
+   assert(argv_has_pair(tokens, argc, "-f", task_path));
+   assert(argv_has_pair(tokens, argc, "--write-output", answer_path));
    assert(argv_has_pair(tokens, argc, "--timeout", "2700"));
    assert(argv_has_pair(tokens, argc, "-m", "gpt-5.5-pro"));
    int saw_notify_off = 0, saw_prompt = 0;
@@ -92,12 +97,16 @@ static void test_oracle_argv_without_model(void)
    agent_t agent;
    memset(&agent, 0, sizeof(agent));
    provider_cli_cfg_t cfg = {.agent = &agent};
+   char task_path[PATH_MAX];
+   char answer_path[PATH_MAX];
+   snprintf(task_path, sizeof(task_path), "%s/t.md", platform_tmpdir());
+   snprintf(answer_path, sizeof(answer_path), "%s/a.md", platform_tmpdir());
    char *tokens[64] = {0};
    int split = 0;
-   int argc = oracle_build_argv(&cfg, "/tmp/t.md", "/tmp/a.md", 60, tokens, 48, &split);
+   int argc = oracle_build_argv(&cfg, task_path, answer_path, 60, tokens, 48, &split);
    assert(argc > 0);
    for (int i = 0; i < argc; i++)
-      assert(strcmp(tokens[i], "-m") != 0); /* unpinned agent adds no -m */
+      assert(strcmp(tokens[i], "-m") != 0);  /* unpinned agent adds no -m */
    assert(strcmp(tokens[0], "oracle") == 0); /* default command */
    provider_cli_free_tokens(tokens, split);
    printf("PASS: unpinned oracle agent omits the model flag\n");

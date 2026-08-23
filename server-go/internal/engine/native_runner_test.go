@@ -1121,10 +1121,10 @@ func TestNativeRunnerSplitAcceptsManagedChangeIntentBinding(t *testing.T) {
 	}
 }
 
-func TestSplitSingleSliceUsesFableClassification(t *testing.T) {
-	plan := "# Plan\n\nAdd the feature-branch trigger and change nothing else."
-	proposal := "# Proposal: run CI on slice sub-PRs\n\n- **State:** pending — single slice.\n\n## Recommendation\n\nAdd `aimee/feat/**` to the existing trigger."
-	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"packets":[{"packet_id":"p1","summary":"Run CI on slice sub-PRs","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature branch trigger exists"],"implementation_kind":"ui"}]}`}}
+func TestNativeRunnerSplitClassifiesExplicitSingleSliceUI(t *testing.T) {
+	plan := "# Plan\n\nAdd the frontend settings panel and its keyboard interaction."
+	proposal := "# Proposal: add the browser settings panel\n\n- **State:** pending — single UI slice.\n\n## Recommendation\n\nAdd the visible panel and its interaction states."
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"Add browser settings panel","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["settings panel is visible and interactive"],"implementation_kind":"ui"}]}`}}
 	runner := &NativeRunner{agents: agents}
 	result, err := runner.structured(context.Background(), StepRequest{
 		WorkItem: db1.WorkItem{Repo: "/repo"},
@@ -1183,8 +1183,9 @@ func TestNativeRunnerSplitPromptCarriesOriginalRequestAndRejectsFollowUpPackets(
 
 func TestValidateStructuredPacketSchemaVersions(t *testing.T) {
 	validV1 := `{"schema_version":1,"packets":[{"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"]}]}`
-	validV2 := `{"schema_version":2,"packets":[{"packet_id":"p1","summary":"ui","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"ui"}]}`
-	for _, doc := range []string{validV1, validV2} {
+	validV1WithPacketVersion := `{"schema_version":1,"packets":[{"schema_version":1,"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"]}]}`
+	validV2 := `{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"ui","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"ui"}]}`
+	for _, doc := range []string{validV1, validV1WithPacketVersion, validV2} {
 		if err := validateStructured("packets", []byte(doc)); err != nil {
 			t.Fatalf("valid packet plan rejected: %v", err)
 		}
@@ -1197,6 +1198,8 @@ func TestValidateStructuredPacketSchemaVersions(t *testing.T) {
 		{name: "unknown schema", doc: strings.Replace(validV1, `"schema_version":1`, `"schema_version":3`, 1), want: "schema_version"},
 		{name: "unknown root field", doc: strings.Replace(validV1, `"packets":`, `"delegate":"x","packets":`, 1), want: "packet plan field"},
 		{name: "unknown packet field", doc: strings.Replace(validV1, `"summary":"general"`, `"model":"x","summary":"general"`, 1), want: "packet field"},
+		{name: "missing v2 packet schema", doc: strings.Replace(validV2, `"schema_version":2,"packet_id"`, `"packet_id"`, 1), want: "schema_version"},
+		{name: "mismatched v2 packet schema", doc: strings.Replace(validV2, `"schema_version":2,"packet_id"`, `"schema_version":1,"packet_id"`, 1), want: "schema_version"},
 		{name: "missing v2 kind", doc: strings.Replace(validV2, `,"implementation_kind":"ui"`, "", 1), want: "implementation_kind"},
 		{name: "unknown v2 kind", doc: strings.Replace(validV2, `"implementation_kind":"ui"`, `"implementation_kind":"other"`, 1), want: "implementation_kind"},
 	} {
@@ -1452,7 +1455,7 @@ func TestRoundtableSkipsReviewWhenArtifactIsUnchanged(t *testing.T) {
 	}
 }
 
-func TestForeachRejectsInvalidV2PacketsBeforeCreatingChildren(t *testing.T) {
+func TestForeachRejectsInvalidImplementationKindBeforeCreatingChildren(t *testing.T) {
 	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -1465,7 +1468,7 @@ func TestForeachRejectsInvalidV2PacketsBeforeCreatingChildren(t *testing.T) {
 	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_invalid_packets", Repo: "repo", ProposalPath: "invalid", WorkflowName: "build", StartStage: "slices"}); err != nil {
 		t.Fatal(err)
 	}
-	content := []byte(`{"schema_version":2,"packets":[{"packet_id":"p1","summary":"bad","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["bad"]}]}`)
+	content := []byte(`{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"bad","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["bad"]}]}`)
 	runner := &NativeRunner{db: store, artifacts: artifacts}
 	_, err = runner.foreach(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{ID: "wi_invalid_packets", Repo: "repo"},
@@ -1484,8 +1487,8 @@ func TestForeachRejectsInvalidV2PacketsBeforeCreatingChildren(t *testing.T) {
 	}
 }
 
-func TestPacketImplementationDelegate(t *testing.T) {
-	general := `{"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
+func TestPacketImplementationKind(t *testing.T) {
+	general := `{"schema_version":2,"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
 	ui := strings.Replace(general, `"implementation_kind":"general"`, `"implementation_kind":"ui"`, 1)
 	for _, test := range []struct {
 		name     string
@@ -1493,20 +1496,75 @@ func TestPacketImplementationDelegate(t *testing.T) {
 		proposal string
 		want     string
 	}{
-		{name: "legacy", version: 0, proposal: "not a packet", want: "configured"},
-		{name: "v1", version: 1, proposal: "not a packet", want: "configured"},
-		{name: "general", version: 2, proposal: general, want: "configured"},
-		{name: "ui", version: 2, proposal: ui, want: "fable"},
+		{name: "legacy", version: 0, proposal: "not a packet", want: "general"},
+		{name: "v1", version: 1, proposal: "not a packet", want: "general"},
+		{name: "general", version: 2, proposal: general, want: "general"},
+		{name: "ui", version: 2, proposal: ui, want: "ui"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := packetImplementationDelegate(db1.WorkItem{PacketSchemaVersion: test.version}, test.proposal, "configured")
+			got, err := packetImplementationKind(db1.WorkItem{PacketSchemaVersion: test.version}, test.proposal)
 			if err != nil || got != test.want {
 				t.Fatalf("delegate=%q err=%v, want %q", got, err, test.want)
 			}
 		})
 	}
-	if _, err := packetImplementationDelegate(db1.WorkItem{PacketSchemaVersion: 2}, strings.Replace(general, `"implementation_kind":"general"`, `"implementation_kind":"other"`, 1), "configured"); err == nil {
+	if _, err := packetImplementationKind(db1.WorkItem{PacketSchemaVersion: 2}, strings.Replace(general, `"implementation_kind":"general"`, `"implementation_kind":"other"`, 1)); err == nil {
 		t.Fatal("unknown version-2 implementation_kind was accepted")
+	}
+}
+
+func TestImplementationKindRoutesBeforeDispatch(t *testing.T) {
+	repo, _ := setupSliceRepo(t)
+	gitRun(t, repo, "remote", "add", "origin", repo)
+	gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+	gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &rejectDelegateAgents{}
+	runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+	for _, test := range []struct {
+		name    string
+		kind    string
+		persona string
+	}{
+		{name: "general", kind: "general", persona: "engineer"},
+		{name: "ui", kind: "ui", persona: "ui"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := "wi_route_" + test.name
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
+				ID: id, Repo: repo, ProposalPath: id, WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"` + test.kind + `"}`
+			_, err = runner.mutate(t.Context(), StepRequest{
+				WorkItem: item,
+				Node:     wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal: proposal,
+			}, false)
+			if err == nil {
+				t.Fatal("expected recording delegate failure")
+			}
+			if agents.last.Persona != test.persona || agents.last.Delegate != "configured" {
+				t.Fatalf("dispatch=%+v err=%v, want persona=%q delegate=configured", agents.last, err, test.persona)
+			}
+		})
 	}
 }
 
@@ -1514,7 +1572,7 @@ func TestMutateRejectsInvalidV2PacketBeforeDispatch(t *testing.T) {
 	runner := &NativeRunner{}
 	_, err := runner.mutate(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{PacketSchemaVersion: 2},
-		Proposal: `{"packet_id":"p1","summary":"bad","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["bad"]}`,
+		Proposal: `{"schema_version":2,"packet_id":"p1","summary":"bad","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["bad"]}`,
 	}, false)
 	if err == nil || !strings.Contains(err.Error(), "implementation_kind") {
 		t.Fatalf("mutate error=%v, want invalid packet rejection before dispatch", err)
@@ -1560,7 +1618,7 @@ func TestForeachRespawnsIdenticalPacketsInALaterGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &NativeRunner{db: store, artifacts: artifacts, workflows: registry}
-	packetBytes := []byte(`{"packet_id": "p1", "summary":"implement", "target_blocks":["implement"], "dependencies":[], "acceptance_criteria":["implemented"], "implementation_kind":"general"}`)
+	packetBytes := []byte(`{"schema_version":2,"packet_id": "p1", "summary":"implement", "target_blocks":["implement"], "dependencies":[], "acceptance_criteria":["implemented"], "implementation_kind":"general"}`)
 	packetsContent := append([]byte(`{"schema_version":2,"packets":[`), packetBytes...)
 	packetsContent = append(packetsContent, []byte(`]}`)...)
 	packets := wfe.Artifact{Type: "packets", Content: packetsContent}
@@ -1627,6 +1685,10 @@ func TestForeachRespawnsIdenticalPacketsInALaterGeneration(t *testing.T) {
 	if !strings.Contains(secondGeneration[0], ".g0.") || !strings.Contains(secondGeneration[1], ".g1.") {
 		t.Fatalf("children are not generation-scoped: %v", secondGeneration)
 	}
+}
+
+func TestForeachPreservesVersionedPacketBytes(t *testing.T) {
+	TestForeachRespawnsIdenticalPacketsInALaterGeneration(t)
 }
 
 func childIDs(t *testing.T, store *db1.Store, parentID string) []string {

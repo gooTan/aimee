@@ -75,6 +75,26 @@ func TestShippedAutonomousWorkflowRetriesAreBounded(t *testing.T) {
 	}
 }
 
+func TestShippedBuildDocumentsTheAcceptedArtifact(t *testing.T) {
+	registry, err := wfe.NewRegistry(copyShippedWorkflowDefinitions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := registry.Pin("build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range definition.Nodes {
+		if node.ID == "document" {
+			if got := node.In["branch"]; got != "accept_freeze.out" {
+				t.Fatalf("document branch = %q, want accepted artifact", got)
+			}
+			return
+		}
+	}
+	t.Fatal("build workflow has no document node")
+}
+
 func runExactShippedWorkflow(t *testing.T, workflowName, wantState, wantPause string) {
 	t.Helper()
 	root := t.TempDir()

@@ -45,7 +45,7 @@ var BuiltinBlocks = []BlockDefinition{
 	{Name: "trigger.watch-dir", Produces: "proposal"},
 	{Name: "author.plan", Produces: "plan", Accepts: []string{"proposal"}, InputPorts: []string{"proposal"}, RequiredPorts: []string{"proposal"}, RequiresInput: true},
 	{Name: "implement", Produces: "branch", Accepts: []string{"plan", "intent"}, InputPorts: []string{"plan"}, RequiredPorts: []string{"plan"}, RequiresInput: true},
-	{Name: "document", Produces: "branch", Accepts: []string{"branch"}, InputPorts: []string{"branch"}, RequiredPorts: []string{"branch"}, RequiresInput: true},
+	{Name: "document", Produces: "branch", Accepts: []string{"branch", "frozen_diff"}, InputPorts: []string{"branch"}, RequiredPorts: []string{"branch"}, RequiresInput: true},
 	{Name: "source.archive", Produces: "branch", Accepts: []string{"branch"}, InputPorts: []string{"branch"}, RequiredPorts: []string{"branch"}, RequiresInput: true},
 	{Name: "freeze", Produces: "frozen_diff", Accepts: []string{"branch"}, InputPorts: []string{"branch"}, RequiredPorts: []string{"branch"}, RequiresInput: true},
 	{Name: "gate.roundtable", Produces: "verdict", Accepts: []string{"proposal", "plan", "frozen_diff"}, InputPorts: []string{"src"}, RequiredPorts: []string{"src"}, RequiresInput: true, RequiredParams: []string{"roundtable"}},

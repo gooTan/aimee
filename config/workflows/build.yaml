@@ -113,7 +113,7 @@ nodes:
     - id: document
       block: document
       in:
-        branch: slices.out
+        branch: accept_freeze.out
       next: doc_freeze
       on_fail: document
     - id: doc_freeze

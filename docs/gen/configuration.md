@@ -685,7 +685,7 @@ nodes:
 |-------|---------------------------------------------|----------|
 | `author.proposal` | `proposal` (optional); accepts `proposal` | `proposal` |
 | `trigger.watch-dir` | none | `proposal` |
-| `author.plan` | `proposal` (required); accepts `proposal` | `plan` |
+| `author.plan` | `proposal` (required); accepts `proposal`, `intent` | `plan` |
 | `implement` | `plan` (required); accepts `plan`, `intent` | `branch` |
 | `document` | `branch` (required); accepts `branch` | `branch` |
 | `source.archive` | `branch` (required); accepts `branch` | `branch` |
@@ -758,7 +758,7 @@ Beyond the config store, aimee reads a few standalone JSON/policy files (paths u
 | `cidr` | Allowed CIDR (relay / tunnel networking). |
 | `cli_cmd` | CLI command for a cli-backend agent. |
 | `cli_idle_timeout_ms` | Idle timeout (ms) for a CLI agent. |
-| `cli_kind` | CLI agent kind (claude / codex / opencode). |
+| `cli_kind` | CLI agent kind (claude / codex / mistral / acp / agy / oracle). |
 | `context_warn_pct` | Context % at which to warn. |
 | `context_window` | Model context window (tokens). |
 | `cost_limit` | Per-agent cost cap (USD). |
@@ -795,6 +795,7 @@ Beyond the config store, aimee reads a few standalone JSON/policy files (paths u
 | `price_out_per_mtok` | Output price, USD per million tokens. Overrides the catalog price. |
 | `primary_only` | Restrict this agent to primary sessions; do not use it for delegates. |
 | `provider` | Provider name. |
+| `reasoning_effort` | Per-seat reasoning effort for CLI agents that expose one (codex effort, claude --effort). Empty uses the CLI's default. |
 | `recommended_sampling` | Provider-recommended sampling parameters. |
 | `reconnect_delay` | Delay between reconnects (ms). |
 | `registration` | Name of the provider registration this agent was expanded from. Set automatically; used to prefer same-provider peers during fallback. |

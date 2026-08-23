@@ -1,384 +1,235 @@
-# Subscription software factory
+# Software factory - single build workflow
 
-Two shipped workflows, `quick-change` and `orchestrated-change`, turn aimee
-into a software factory that runs on the flat-rate subscriptions of locally
-authenticated coding CLIs. Aimee remains the only orchestrator: it owns
-workflow state, worktrees, retries, gates, artifacts, Git operations, and
-human approval. The external CLIs are dumb, single-shot delegates.
+One canonical workflow named `build` turns aimee into a subscription software factory. Aimee is the only orchestrator: it owns workflow state, worktrees, retries, gates, artifacts, Git operations, and human approval. External CLIs are single-shot delegates invoked through the bus. There is exactly one shipped workflow named `build`. Do not call it by any other name and do not use `-ui` workflow variants.
 
-## Seats
+## Flow
 
-| Seat | CLI | Model | Role | Access |
-|------|-----|-------|------|--------|
-| `fable` | Claude CLI (`claude`) | the CLI's default subscription model at medium effort | premium planner: architecture, decomposition, contracts, invariants, acceptance criteria | read-only |
-| `sol` | Codex CLI (`codex`) | `gpt-5.6-sol` | premium second opinion: plan review, difficult debugging, escalated decisions | read-only |
-| `luna` | Codex CLI (`codex`) | `gpt-5.6-luna` at xhigh effort | context preparation (ContextBrief), frozen-diff review, summarization | read-only |
-| `deepseek` | OpenCode (`opencode acp`) | `opencode-go/deepseek-v4-flash` | primary implementation and routine repair | isolated writable worktree |
-| `opus-ui` | Claude CLI (`claude`) | `opus` (Claude Opus 4.8) at high effort | implementer for frontend/UI work (the `-ui` workflow variants) | isolated writable worktree |
-| `sol-review` | Codex CLI (`codex`) | `gpt-5.6-sol` at high effort | senior verifying reviewer in the pro ladder: confirms or discards gemini's findings, then reviews adversarially (round-bounded, not ledgered) | read-only |
-| `antigravity` | Antigravity CLI (`agy`) | `gemini-3.7-flash-high` | initial PR reviewer in the pro ladder | read-only: repo reads allowed via agy settings, writes/commands auto-denied |
-| `oracle` | Oracle CLI (`oracle`, ChatGPT web) | `gpt-5.6` with `--browser-thinking-time pro` (GPT-5.6 Pro) | OPTIONAL consultation seat; not in the shipped ladder (browser automation is fragile) | consultation only: no tools, no worktree |
+The `build` workflow runs as a parent that forks per-packet children:
 
-Every seat uses the CLI's own login state. Aimee never extracts or proxies
-OAuth tokens; the child process reads the CLI's normal credential store from
-the server user's home directory. Forge and git credentials are stripped from
-delegate children as usual, so a delegate's only route to Git is aimee's own
-tooling.
+1. `draft` normalizes the proposal or bare request. Corrections return to `draft`.
+2. `prep` delegates to Luna, which prepares a bounded `ContextBrief` (relevant files and symbols, interfaces, constraints, prior decisions, risks, open questions, acceptance requirements, artifact references, capped at 32 KiB). An invalid or oversized brief returns to `prep` without premium spend.
+3. `plan` delegates to Fable (premium, role `draft`, persona `architect`) which authors the parent plan from the admitted proposal and the validated brief. `max_rounds` 6.
+4. `plan_gate` reviews the plan with the `plan` preset: seats Sol as reviewer and Antigravity as QA, Sol is chairman, Antigravity is availability-only chairman fallback, no Fable self-review. `min_successful` 2, `quorum` 4, `max_rounds` 6. Changes return to `plan`.
+5. `split` delegates to Fable which decomposes the approved plan into immutable packets with schema version 2. Each packet has `schema_version: 2` and `implementation_kind: general|ui` and carries no model, delegate, CLI, or workflow identifiers. Mixed work splits into independent UI and general packets when possible; a packet that must contain both uses `ui` when a user-visible UI outcome is part of the deliverable, otherwise `general`. Classification is by requested outcome, never by filenames or implementation path.
+6. `slices` runs `foreach.workflow` with `workflow: slice` for each packet. The shared `slice` child implements with deterministic routing: `general` routes to `muse` as primary with Luna as availability-only fallback; `ui` routes to `opus-ui`. The router does not heuristically reinterpret `implementation_kind` on retry or replay. Each slice runs `scope` (understand without user input) then `impl` then `freeze` then `rt_gate` (implementation preset) then `pr.open` (base `feature`) then `gate.ci` then `merge` into the parent feature branch. Verification is deterministic and a failure returns to `impl` for a bounded repair.
+7. `accept_freeze` and `accept_gate` freeze the assembled feature branch and review it with the `implementation` preset. `document` and `doc_freeze` and `doc_gate` do the same for documentation with the `documentation` preset. Both presets use seats Sol as reviewer and Antigravity as QA with optional Fable as architect, Fable as chairman with Sol as availability-only chairman fallback, `min_successful` 2. `on_fail` returns to `split` for acceptance and to `document` for documentation. Documentation updates user and developer docs and inline comments only when the accepted implementation needs them.
+8. `archive` retires the trigger proposal and `final_pr` opens a draft PR from the feature branch into the admitted checkout branch (`base: trunk`). The final PR is draft for human review and merge.
 
-## The two workflows
+Roundtables are discussion-free and bounded by `max_rounds` per gate. Reviewer commentary reaches the PR as inline review comments at file and line when possible. Forge credentials are stripped from delegate children; the engine posts review comments.
 
-### quick-change
+## Seats and routing
 
-```
-prep (luna) -> implement (deepseek) -> freeze -> review (luna) -> human gate -> deliver
-```
+| Seat | CLI | Purpose | Access |
+|------|-----|---------|--------|
+| `fable` | Claude CLI (`claude`) | premium planner: architecture, decomposition, contracts, invariants | read-only |
+| `sol` | Codex CLI (`codex`) | premium reviewer and chairman fallback | read-only |
+| `luna` | Codex CLI (`codex`) | ContextBrief preparation, general availability fallback | code and execute only for fallback |
+| `muse` | OpenCode ACP (`opencode acp`) | primary general implementer | isolated writable worktree |
+| `opus-ui` | Claude CLI (`claude`) | UI implementer (`implementation_kind: ui`) | isolated writable worktree |
+| `antigravity` | Antigravity CLI (`agy`) | initial PR reviewer, QA seat, chairman fallback | read-only |
+| `sol-review` | Codex CLI (`codex`) | verifying reviewer | read-only |
 
-For routine, well-understood changes. It makes zero premium calls by
-construction, and the engine's premium ledger would refuse one anyway.
-Deterministic verification (`aimee git verify`) runs inside the implement
-block after every delegate pass; a failure feeds the diagnostic straight back
-to DeepSeek for at most two bounded repair rounds. Luna's review findings take
-the same path. Delivery stops at a human gate.
+### Muse seat - exact configuration
 
-### orchestrated-change
+The general implementation seat is named exactly `muse`:
 
-```
-prep: luna prepares a typed ContextBrief
-plan: ONE premium call (fable) authors the implementation plan
-implement (deepseek) -> freeze -> review (luna)
-   routine findings        -> back to deepseek (bounded)
-   escalation-class finding -> second_opinion (sol), at most once
-pr: draft pull request -> human gate -> deliver
-```
+- `name`: `muse`
+- `backend`: `provider-cli`
+- `cli_kind`: `acp`
+- `cli_cmd`: `/home/midnight/.local/bin/opencode acp`
+- `model`: `opencode-go/muse-spark-1.2-contributor`
+- `reasoning_effort`: `xhigh`
+- `roles`: `code`, `execute`
+- `timeout_ms`: `1800000`
+- `cli_idle_timeout_ms`: `1800000`
+- `tier_price_exempt`: `flat-rate subscription seat`
+- `enabled`: `true`, `tools_enabled`: `true`
 
-The premium planner receives exactly two things: the immutable original
-request and a validated ContextBrief (relevant files and symbols, interfaces,
-constraints, prior decisions, risks, open questions, acceptance requirements,
-artifact references; hard cap 32 KiB). Full repository listings, raw logs,
-complete diffs, and conversation history do not fit the schema and are
-rejected before any premium dispatch.
+The 30-minute idle deadline (`1800000` ms) intentionally permits implementation longer than five minutes. The `timeout_ms` value is the per-call bound and the idle timeout is the ACP session bound; both are set to `1800000`.
 
-Sol runs only when Luna's review classifies a blocking finding as a genuine
-`architecture`, `security`, `migration`, `contract`, or `requirement`
-decision (the `on_escalate` edge). Any other label degrades to the routine
-repair path. Sol and Fable are never both called automatically on one path.
+The ACP adapter pins the model with `session/set_model` after `session/new` and then pins the effort with `session/set_config_option` where `configId` is `effort` and `value` is `xhigh`. Either refusal is exact-or-fail: the dispatch fails instead of silently substituting a default model or effort.
 
-### orchestrated-change-pro
+### Luna availability fallback
 
-```
-prep (luna brief) -> plan (fable, one capped call) -> implement (deepseek)
-  -> freeze -> gemini_review (Gemini 3.7 Flash high: initial PR review)
-  -> sol_review (Codex gpt-5.6-sol, high effort: verifies gemini's findings
-     adversarially, then its own adversarial review)
-  -> draft PR -> human gate -> deliver
-```
+Luna carries `code` and `execute` roles only so it can serve the explicit general availability fallback. It is never the normal general implementer. When `muse` fails before response start with one of the six typed pre-response availability classes, the engine retries the identical prompt on Luna. The six classes are `quota_rate_limit`, `capacity`, `capacity_deadline`, `authentication_session`, `provider_cli_unavailable`, and `start_deadline`. The retry does not run after response start, does not run on replay, and does not reinterpret the packet.
 
-The fully autonomous iterate-until-clean variant, shaped like a
-code-review-skill pass: the cheap seat reviews first along two axes
-(standards/correctness and spec-compliance with the original request), and
-the senior seat adversarially verifies those findings, discarding any it
-cannot confirm, before running its own independent adversarial review.
-Gemini's verdict never gates delivery by itself: a false positive cannot
-block the PR, and a cheap approval cannot green-light it. Only findings sol
-itself asserts return to the DeepSeek implementer; after a repair the
-re-frozen diff climbs the whole ladder again, so the human gate is only
-ever presented with a diff sol approved with zero findings.
+### UI routing
 
-`sol-review` is deliberately a distinct delegate entry from the ledgered
-`sol` escalation seat: iterate-until-clean needs repeated senior review
-rounds, so the ladder rungs are bounded by each node's `max_rounds` (four)
-and the engine's no-progress convergence detection rather than the premium
-planning ledger, which keeps guarding fable. Reasoning effort is pinned per
-seat with the `reasoning_effort` agents.json field (codex turn effort,
-claude --effort); a seat without one uses the CLI's configured default.
+`opus-ui` is the normal route for `implementation_kind: ui`. `opus-ui-recovery` remains explicit recovery only when a workflow or operator explicitly mentions it. Do not route UI work to `muse` and do not route general work to `opus-ui`.
 
-### Optional: the oracle consultation seat
+## Premium policy
 
-The `oracle` cli_kind drives a signed-in ChatGPT web session (GPT-5.6 Pro
-via `-m gpt-5.6 --browser-thinking-time pro`) as a pure consultation seat:
-aimee writes the complete prompt to a temporary task file, runs
-`oracle -p <pointer> -f <task-file> --write-output <answer-file>`, and reads
-back only the final assistant message; no tools, worktree, credentials, or
-history. It works, and supports up to three concurrent browser slots, but
-browser automation is the most fragile link in any pipeline (window
-lifecycle, picker drift, sticky effort state), so it is not wired into the
-shipped ladder. Use it as a manually pinned adjudicator or swap it into a
-custom workflow if the trade-off suits you.
+Premium write refusal applies to all premium seats. A premium delegate dispatched with write tools or role `code` is refused before dispatch with `premium_write_refused` and the run parks for operator fix of the workflow definition.
 
-## Premium-call limits
+Only premium `draft` calls consume the durable planning ledger (`wfe_premium_call`). Repeated read-only reviews, including roundtable chairman and reviewer calls, do not consume ledger capacity. The default planning cap is `15`, which covers at most six Fable plan attempts plus three split generations each with at most three corrective attempts (`6 + 3*3 = 15`). Environment overrides remain:
 
-The engine keeps a durable per-run-tree ledger (`wfe_premium_call` in DB1).
-Before any dispatch of a premium delegate the runner records the call inside a
-transaction that enforces the cap; exceeding it parks the run with pause
-reason `premium_cap` for a human. A premium delegate dispatched with write
-tools is refused outright (`premium_write_refused`). Deterministic checks,
-not model claims, decide whether verification passed.
+- `AIMEE_PREMIUM_DELEGATES` (default `sol,fable`, comma-separated, `none` disables enforcement)
+- `AIMEE_PREMIUM_CALL_CAP` (default `15`)
 
-Configuration (environment of `aimee-server`):
+Aliases remap at dispatch time (`AIMEE_DELEGATE_ALIASES=fable=sol` or per-run `delegate_aliases`). The ledger charges the delegate that actually runs. A malformed or oversized `ContextBrief` is rejected before any premium dispatch and loops to `prep`.
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `AIMEE_PREMIUM_DELEGATES` | `sol,fable` | comma-separated delegate names that count as premium; `none` disables enforcement |
-| `AIMEE_PREMIUM_CALL_CAP` | `2` | hard dispatch ceiling per workflow run tree |
+## Source definitions
 
-## Setup
+Repository source definitions are:
 
-### 1. Authenticate the CLIs (one time, interactive)
+- `config/workflows/build.yaml`
+- `config/workflows/slice.yaml`
+- `config/roundtables/plan.json`
+- `config/roundtables/implementation.json`
+- `config/roundtables/documentation.json`
+
+Installed copies under `$AIMEE_HOME/workflows` and `$AIMEE_HOME/roundtables` must match these files exactly. The container seeds them on start. Validate with `aimee workflow validate` and `diff` against the installed copies.
+
+### Roundtable presets
+
+`plan` preset (`config/roundtables/plan.json`):
+
+- seats: `codex:gpt-5.6-sol` as `reviewer`, `antigravity` as `qa`
+- chairman: `codex:gpt-5.6-sol`, chairman fallback: `antigravity`, enabled, `min_successful` 2
+
+`implementation` and `documentation` presets (`config/roundtables/implementation.json`, `config/roundtables/documentation.json`):
+
+- seats: `codex:gpt-5.6-sol` as `reviewer`, `antigravity` as `qa`, optional `claude:claude-fable-5` as `architect`
+- chairman: `claude:claude-fable-5`, chairman fallback: `codex:gpt-5.6-sol`, enabled, `min_successful` 2
+
+## Setup and auth
+
+Authenticate as the OS user that runs `aimee-server`, because delegates inherit that home directory.
 
 ```bash
-codex login          # ChatGPT subscription; verify with: codex doctor
-claude               # sign in once; verify with: claude -p "hi"
-opencode auth login  # verify with: opencode models
-agy                  # launch with no arguments to sign in; verify with: agy models
-# Give the agy review seat read-only repo access (writes/commands stay
-# denied). In ~/.gemini/antigravity-cli/settings.json set:
-#   "permissions": { "allow": ["read_file(*)", "list_dir(*)",
-#                              "grep_search(*)", "find_by_name(*)"] }
-
-# OPTIONAL, only if you enable the oracle consultation seat. Oracle keeps
-# its own Chrome profile; sign in there once:
-npm install -g @steipete/oracle
-oracle --engine browser --browser-manual-login --browser-keep-browser -p "HI"
+codex login          # ChatGPT subscription; verify: codex doctor
+claude               # sign in once; verify: claude -p "hi"
+opencode auth login  # verify: opencode models
+agy                  # launch with no arguments to sign in; verify: agy models
 ```
 
-Sign in as the same OS user that runs `aimee-server`, because delegates
-inherit that home directory.
+Give the Antigravity review seat read-only repo access. In `~/.config/antigravity/settings.json` set `permissions.allow` to `read_file(*)`, `list_dir(*)`, `grep_search(*)`, `find_by_name(*)`. Writes and commands stay denied; the `agy` adapter never passes `--dangerously-skip-permissions` and slash commands are disabled.
 
-### 2. Discover the exact model ids
+Discover exact model ids from each CLI vendor before pinning them in the agent file.
+
+### Agent file
+
+The file is `$AIMEE_HOME/models.json` (fallback `$AIMEE_HOME/agents.json` for pre-rename installs). It is an object with a `models` array. Example fragment showing the Muse seat:
+
+```json
+{
+  "models": [
+    {
+      "name": "muse",
+      "backend": "provider-cli",
+      "cli_kind": "acp",
+      "cli_cmd": "/home/midnight/.local/bin/opencode acp",
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "reasoning_effort": "xhigh",
+      "roles": ["code", "execute"],
+      "timeout_ms": 1800000,
+      "cli_idle_timeout_ms": 1800000,
+      "tier_price_exempt": "flat-rate subscription seat",
+      "enabled": true,
+      "tools_enabled": true
+    },
+    {
+      "name": "luna",
+      "backend": "provider-cli",
+      "cli_kind": "codex",
+      "cli_cmd": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "xhigh",
+      "roles": ["code", "execute"],
+      "tier_price_exempt": "flat-rate subscription seat",
+      "enabled": true
+    },
+    {
+      "name": "opus-ui",
+      "backend": "provider-cli",
+      "cli_kind": "claude",
+      "cli_cmd": "claude",
+      "model": "opus",
+      "reasoning_effort": "high",
+      "roles": ["code", "execute"],
+      "tier_price_exempt": "flat-rate subscription seat",
+      "enabled": true
+    }
+  ]
+}
+```
+
+Add `fable`, `sol`, `antigravity`, and `sol-review` entries similarly with their models and `review` roles. Write capability is derived per call from the role; premium seats must not carry `code` or `execute`.
+
+Claude terms: set `primary_only: false` deliberately. Check the provider terms for unattended use before running a Claude seat as a delegate.
+
+## Validation
 
 ```bash
-codex exec -m gpt-5.6-luna "say ok"      # premium tier list comes from your plan
-opencode models | grep deepseek           # for example opencode-go/deepseek-v4-flash
-agy models                                # pick a reviewer model
+# Docs and links
+make -C src docs-check
+python3 scripts/check-docs.py
+
+# Workflow and roundtable shape
+aimee workflow validate
+diff -u config/workflows/build.yaml "$AIMEE_HOME/workflows/build.yaml"
+diff -u config/workflows/slice.yaml "$AIMEE_HOME/workflows/slice.yaml"
+diff -u config/roundtables/plan.json "$AIMEE_HOME/roundtables/plan.json"
+diff -u config/roundtables/implementation.json "$AIMEE_HOME/roundtables/implementation.json"
+diff -u config/roundtables/documentation.json "$AIMEE_HOME/roundtables/documentation.json"
+
+# ACP and seat checks
+opencode models | grep muse-spark-1.2-contributor
+codex exec -m gpt-5.6-luna "Reply with exactly: luna-ok"
+agy -p "Reply with exactly: agy-ok" --output-format stream-json
+
+# Canary assertions on this guide
+grep -q muse-spark-1.2-contributor docs/SOFTWARE_FACTORY.md
+grep -q xhigh docs/SOFTWARE_FACTORY.md
+grep -q 1800000 docs/SOFTWARE_FACTORY.md
+grep -q implementation_kind docs/SOFTWARE_FACTORY.md
+grep -q '"name": "plan"' config/roundtables/plan.json
+grep -q '"name": "implementation"' config/roundtables/implementation.json
+grep -q '"name": "documentation"' config/roundtables/documentation.json
 ```
 
-Pinned means exact-or-fail: a delegate configured with a model the CLI cannot
-serve fails the dispatch instead of silently substituting.
+## Canary expectations
 
-### 3. Configure the agents
+Validate slice routing with small proposals:
 
-Add the seats to `$AIMEE_HOME/agents.json` (or use `aimee agent add`). The
-shipped workflows reference the delegate names below; keep them.
+- Backend general work: a packet with `implementation_kind: general` is implemented by `muse` (primary) and produces one slice PR that passes CI and merges into `aimee/feat/<parent>`. On pre-response availability failure of `muse`, the same prompt retries on `luna` with identical persona and tools.
+- UI work: a packet with `implementation_kind: ui` is implemented by `opus-ui` and follows the same `freeze` then `rt_gate` then `pr` then `ci` then `merge` path. General fallback does not apply to UI packets.
+- Mixed dependent work: a split that emits one `general` and one `ui` packet where the UI packet depends on the general one. The general slice merges first, the UI slice integrates `aimee/feat/<parent>` at its next `impl` entry, and both slices converge before `accept_freeze`. Mixed work does not heuristically reclassify packets on retry or replay.
 
-```jsonc
-[
-  {
-    "name": "fable",
-    "backend": "provider-cli",
-    "cli_kind": "claude",
-    "cli_cmd": "claude",
-    "reasoning_effort": "medium",
-    "roles": ["draft", "review", "explain"],
-    "primary_only": false,
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "sol",
-    "backend": "provider-cli",
-    "cli_kind": "codex",
-    "cli_cmd": "codex",
-    "model": "gpt-5.6-sol",
-    "reasoning_effort": "high",
-    "roles": ["review", "draft", "diagnose"],
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "luna",
-    "backend": "provider-cli",
-    "cli_kind": "codex",
-    "cli_cmd": "codex",
-    "model": "gpt-5.6-luna",
-    "reasoning_effort": "xhigh",
-    "roles": ["draft", "review", "explain", "search"],
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "deepseek",
-    "backend": "provider-cli",
-    "cli_kind": "acp",
-    "cli_cmd": "opencode acp",
-    "model": "opencode-go/deepseek-v4-flash",
-    "roles": ["code", "execute"],
-    "cli_idle_timeout_ms": 600000,
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "antigravity",
-    "backend": "provider-cli",
-    "cli_kind": "agy",
-    "cli_cmd": "agy",
-    "model": "gemini-3.7-flash-high",
-    "roles": ["review", "explain"],
-    "cli_idle_timeout_ms": 1800000,
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "opus-ui",
-    "backend": "provider-cli",
-    "cli_kind": "claude",
-    "cli_cmd": "claude",
-    "model": "opus",
-    "reasoning_effort": "high",
-    "roles": ["code", "execute"],
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "sol-review",
-    "backend": "provider-cli",
-    "cli_kind": "codex",
-    "cli_cmd": "codex",
-    "model": "gpt-5.6-sol",
-    "reasoning_effort": "high",
-    "roles": ["review", "explain"],
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": true
-  },
-  {
-    "name": "oracle",
-    "backend": "provider-cli",
-    "cli_kind": "oracle",
-    "cli_cmd": "oracle -e browser --browser-thinking-time pro",
-    "model": "gpt-5.6",
-    "roles": ["review", "explain"],
-    "cli_idle_timeout_ms": 2700000,
-    "tier_price_exempt": "flat-rate subscription seat",
-    "enabled": false
-  }
-]
-```
+## Security notes
 
-Notes:
-
-- Write capability is derived per call from the role, never trusted from
-  disk. Only `deepseek` carries write roles; the engine additionally refuses
-  any write-capable dispatch of a premium delegate.
-- The ACP adapter pins the model with `session/set_model` after `session/new`
-  and fails the dispatch if the agent does not accept the pin. For a
-  read-only role it also refuses `fs/write_text_file` and answers permission
-  prompts with reject or cancel.
-- The `agy` adapter never passes `--dangerously-skip-permissions`. In
-  headless print mode Antigravity auto-denies every permission-gated tool,
-  which seals its subagent tools (`define_subagent`, `invoke_subagent`,
-  `browser_subagent`) and mutating tools. Slash-command expansion is disabled
-  with `--disable-slash-commands`. Grant nothing under `permissions.allow` in
-  agy's settings for this seat.
-- Nested delegation is refused everywhere else too: `subagent_ban_enabled`
-  guards aimee's own tool surface, the Claude CLI argv disallows
-  `Task`/`Agent`, and `max_delegation_depth` bounds the chain.
-- Claude terms: set `primary_only: false` deliberately; check the provider's
-  terms for unattended use before running Fable as a delegate.
-
-### 4. Pick a workflow
-
-The definitions ship in `config/workflows/` and are seeded to
-`$AIMEE_HOME/workflows` on container start. Admit work as usual (watch-dir
-trigger, API submit, or browser) and select `quick-change` for routine fixes,
-`orchestrated-change` for anything that deserves a plan, or
-`orchestrated-change-pro` when the frozen diff must clear the
-gemini-then-sol review ladder before you ever see the draft pull request.
-Frontend/UI work uses the `-ui` variants (`quick-change-ui`,
-`orchestrated-change-pro-ui`): the same graphs with the implementer seat
-swapped from `deepseek` to `opus-ui`. Note the trade: UI runs spend Claude
-subscription turns on implementation and repairs, not just the one
-planning call.
-All three are `enforced` and end in a human gate. From the browser Workflow
-Actions page or `POST /v1/workflow/items/{id}/gate` the gate takes three
-decisions:
-
-- `{"decision":"approve","gate":"human_gate"}` releases the run.
-- `{"decision":"reject",...}` ends it.
-- `{"decision":"changes","gate":"human_gate","findings":[{"location":"file:line","summary":"...","recommendation":"..."}]}`
-  turns the human's pull-request review comments into review feedback
-  (persona `human`, blocking) and sends the run back to the implementer
-  through the gate's `on_fail` edge; the repaired diff climbs the whole
-  review ladder again to a fresh gate. Leaving PR comments therefore loops
-  back into the factory: distill them into findings (your front-door agent
-  can read them with `gh pr view --comments` and make this call for you).
-
-Reviewer commentary also reaches the pull request itself: `suggestion` and
-`nit` severity findings no longer hold the review gate; they are recorded,
-surfaced in the draft PR body's Review history section alongside each
-stage's change-round count, and posted as INLINE review comments at their
-file:line, attributed to the reviewer seat. The seats author the findings;
-the ENGINE posts them (via the forge's ReviewComments capability or a gh
-CLI fallback run by aimee-server), because delegates hold no forge
-credentials. Posting is best-effort: a failure degrades presentation only.
-
-## Agent-agnostic operation
-
-The factory has no privileged orchestrator. Every control surface is plain
-HTTP, CLI, or browser: admit with the watch directory or `POST /v1`, monitor
-with `GET /v1/workflow/items`, decide gates with the dashboard or the gate
-endpoint. Any coding agent that can run `gh` and `curl` can serve as the
-front door by following the repository's `aimee-factory` skill, and a human
-with the dashboard needs no agent at all.
-
-The one correlated dependency is the `fable` seat: it spends the same Claude
-subscription as a Claude-based front-door agent, so exhausting that quota
-takes out both at once. Reseating is configuration, never a definition
-edit, at two scopes:
-
-- Per run: pass `"delegate_aliases": {"fable": "sol"}` on the `POST /v1`
-  submit ("factory this using sol"). Stored as the run's config artifact
-  and applied at every dispatch of that run only.
-- Server-wide: set `AIMEE_DELEGATE_ALIASES=fable=sol` in the aimee-server
-  environment and restart; it remaps every run, including already-pinned
-  workflow versions, until removed.
-
-A run's own alias wins over the environment. The premium ledger always
-charges the delegate that actually runs, so a reseated planner stays
-capped. Seat identity (model and effort) lives in agents.json: `sol` is
-gpt-5.6-sol at high effort, `fable` is the Claude default at medium.
+Every delegate runs with forge and git credentials stripped. The only Git route is aimee's own tooling. The ACP adapter refuses `fs/write_text_file` and rejects permission prompts for read-only roles. Antigravity is headless print mode with auto-denied permission-gated tools. Nested delegation is refused: `subagent_ban_enabled` guards aimee's tool surface, Claude argv disallows `Task` and `Agent`, and `max_delegation_depth` bounds the chain.
 
 ## Troubleshooting
 
 | Symptom | Meaning | Action |
 |---------|---------|--------|
-| park `premium_cap` | the run tree spent its premium allowance | finish on standard seats, or raise `AIMEE_PREMIUM_CALL_CAP` and resume |
-| park `premium_write_refused` | a workflow pinned a premium delegate on a write node | fix the workflow definition |
-| park `retry_limit` at `prep` | Luna kept returning an invalid ContextBrief | inspect the node artifact; adjust the request or the seat's model |
-| `premium planning input rejected` in the plan detail | the brief was malformed or over 32 KiB | the run loops back to prep without premium spend; usually resolves itself |
+| park `premium_cap` | run tree spent its planning allowance | finish on standard seats, or raise `AIMEE_PREMIUM_CALL_CAP` and resume |
+| park `premium_write_refused` | workflow pinned a premium delegate on a write node | fix the workflow definition |
+| park `retry_limit` at `prep` | Luna kept returning an invalid `ContextBrief` | inspect the node artifact; adjust the request or seat model |
+| `premium planning input rejected` in plan detail | brief was malformed or over 32 KiB | run loops to `prep` without premium spend |
 | `agent did not accept pinned model` | ACP peer refused `session/set_model` | re-check `opencode models` for the exact id |
+| `agent did not accept reasoning effort` | ACP peer refused `session/set_config_option` with `configId` `effort` | verify the CLI supports effort `xhigh` |
 | `agy` returns `Please sign in` | Antigravity has no cached login | run `agy` interactively once |
-| oracle: `manual-login profile is not initialized` | Oracle's private Chrome profile has no ChatGPT session | run the one-time `--browser-manual-login` flow from setup step 1 |
-| `oracle adapter: exit N with no answer output` | browser automation failed mid-run | check `oracle status`, re-login if needed; the run parks and resumes cleanly |
-| oracle reviews park `runner_unavailable` when aimee runs in a container | the container has no browser | run `oracle serve` (or `oracle bridge` from Windows) next to the browser and point `cli_cmd` at the remote engine flags |
-| oracle runs GPT-5.5 instead of the current Pro tier | oracle's `gpt-5-pro` alias mis-normalizes (steipete/oracle#373) | pin `"model": "gpt-5.6"` plus `--browser-thinking-time pro` in `cli_cmd`; switch to the `gpt-5-pro` alias once the upstream fix ships |
-| oracle runs an unexpected effort tier (for example Pro when you wanted fast) | ChatGPT's Effort picker is sticky account state; oracle pins and verifies the model but leaves effort wherever the last run set it unless told | always pass an explicit `--browser-thinking-time` on every oracle seat: `pro` for the review ladder, `standard` for cheap consultations (valid: light, standard, extended, extra-high, pro, heavy) |
-| codex dispatch runs the wrong model | the agent entry has no `model` pin | set the exact id from your plan's model list |
-| everything parks `runner_unavailable` | delegate CLI missing from PATH of aimee-server | install the CLI for the service user |
+| everything parks `runner_unavailable` | delegate CLI missing from PATH of `aimee-server` | install the CLI for the service user |
 
 ## Manual smoke tests
 
-Each takes under a minute and proves one seam end to end.
-
 ```bash
-# 1. Codex seats respond on the subscription
+# Codex seats respond on subscription
 codex exec -m gpt-5.6-luna "Reply with exactly: luna-ok"
 codex exec -m gpt-5.6-sol  "Reply with exactly: sol-ok"
 
-# 2. Claude seat responds
+# Claude seat responds
 claude -p "Reply with exactly: fable-ok"
 
-# 3. OpenCode serves the pinned DeepSeek model over ACP
-opencode models | grep deepseek-v4-flash
+# OpenCode serves the pinned Muse model over ACP
+opencode models | grep muse-spark-1.2-contributor
 
-# 4. Antigravity responds in headless stream-json (prompt travels in argv)
+# Antigravity responds in headless stream-json
 agy -p "Reply with exactly: agy-ok" --output-format stream-json
 
-# 4b. Oracle reaches ChatGPT web through its signed-in profile
-echo "smoke context" > /tmp/ctx.txt
-oracle -p "Reply with exactly: oracle-ok" -f /tmp/ctx.txt -e browser \
-  -m gpt-5.5 --no-notify --write-output /tmp/oracle-ok.txt --timeout 240
-cat /tmp/oracle-ok.txt
-
-# 5. Factory dry run: admit a small request on quick-change, watch it reach
-#    the human gate, approve, and confirm zero premium calls in the ledger:
-#    sqlite3 $AIMEE_HOME/db1.sqlite 'SELECT COUNT(*) FROM wfe_premium_call;'
+# Factory dry run: admit a small request on build
+# Watch it reach the draft PR, then check ledger:
+# sqlite3 $AIMEE_HOME/db1.sqlite 'SELECT COUNT(*) FROM wfe_premium_call;'
 ```

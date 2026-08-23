@@ -24,7 +24,7 @@ import (
 //	AIMEE_FACTORY_LIVE_SMOKE=1 \
 //	AIMEE_SMOKE_WORKROOT=/mnt/c/Users/you/AppData/Local/Temp/aimee-smoke \
 //	AIMEE_SMOKE_CMD_LUNA="codex.exe exec -m gpt-5.6-luna -c sandbox_mode=read-only -o {OUT_FILE} -" \
-//	AIMEE_SMOKE_CMD_DEEPSEEK="opencode.exe run -m opencode-go/deepseek-v4-flash {PROMPT}" \
+//	AIMEE_SMOKE_CMD_MUSE="opencode run -m opencode-go/muse-spark-1.2-contributor --variant xhigh {PROMPT}" \
 //	... go test ./internal/engine -run TestFactoryLiveSmoke -v -timeout 60m
 //
 // Command templates come from AIMEE_SMOKE_CMD_<DELEGATE> (upper-cased

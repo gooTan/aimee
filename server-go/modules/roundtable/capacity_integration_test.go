@@ -15,6 +15,13 @@ import (
 	"github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
+func TestMain(m *testing.M) {
+	if handled, code := delegatemodule.RunWatchdog(os.Args); handled {
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
+}
+
 // moduleStageBridge crosses the same JSON stage contract as the process bus.
 // Holding successful group-plan replies until every campaign has planned makes
 // the subsequent limiter contention a real admission race rather than ten

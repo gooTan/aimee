@@ -1970,6 +1970,12 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	if err != nil {
 		return StepResult{}, err
 	}
+	if lease && item.ParentID == "" {
+		expected, err = reviewedRemoteHead(ctx, workdir, branch)
+		if err != nil {
+			return StepResult{}, err
+		}
+	}
 	var pr PullRequest
 	if lease {
 		if f, ok := r.forge.(expectedOpenForge); ok {
@@ -1998,6 +2004,22 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	}
 	encoded, _ := json.Marshal(pr)
 	return StepResult{Status: StepAdvanced, ArtifactType: "pr", Artifact: string(encoded), ContentHash: wfe.Hash(encoded)}, nil
+}
+
+func reviewedRemoteHead(ctx context.Context, workdir, branch string) (string, error) {
+	remoteRef := "refs/remotes/origin/" + branch
+	refspec := "+refs/heads/" + branch + ":" + remoteRef
+	if _, err := gitText(ctx, workdir, "fetch", "--no-tags", "origin", refspec); err != nil {
+		return "", fmt.Errorf("refresh managed publication branch: %w", err)
+	}
+	remote, err := gitText(ctx, workdir, "rev-parse", "--verify", remoteRef+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	if _, err := gitText(ctx, workdir, "merge-base", "--is-ancestor", remote, "HEAD"); err != nil {
+		return "", &ForgePublicationError{Code: "lease_mismatch", Detail: "managed remote branch changed outside the reviewed head"}
+	}
+	return strings.TrimSpace(remote), nil
 }
 
 func (r *NativeRunner) integrateRootBase(ctx context.Context, item db1.WorkItem, workdir, stage string) (bool, bool, string, error) {

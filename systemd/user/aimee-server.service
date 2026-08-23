@@ -6,6 +6,10 @@ After=network.target aimee-kb.service
 # (kb_client.c::kb_ensure_server). Long-term aimee-kb may live on a separate
 # host and this dependency disappears entirely.
 Wants=aimee-kb.service
+# The Git policy module is PartOf the server and therefore stops with it. Pull
+# it into every server start transaction so a restart cannot leave publication
+# fail-closed until the next login.
+Wants=aimee-module-git.service
 PartOf=aimee.slice
 
 [Service]

@@ -773,6 +773,34 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       }
    }
 
+   /* 2c. Reasoning effort. Generic ACP exact-or-fail transport for a
+    * configured non-empty reasoning effort: any ACP peer configured with an
+    * explicit effort must accept it or fail rather than silently choose a
+    * default. Mirrors the model-pinning pattern (JSON escaping + 10s window,
+    * id 5, exact-or-fail). Prompt id 3 stays unchanged. */
+   if (cfg->agent->reasoning_effort[0])
+   {
+      char *sid_esc = cJSON_PrintUnformatted(cJSON_CreateString(acp_session));
+      char *eff_esc = cJSON_PrintUnformatted(cJSON_CreateString(cfg->agent->reasoning_effort));
+      char msg[1024];
+      snprintf(msg, sizeof(msg),
+               "{\"jsonrpc\":\"2.0\",\"method\":\"session/set_config_option\","
+               "\"params\":{\"sessionId\":%s,\"configId\":\"effort\",\"value\":%s},\"id\":5}",
+               sid_esc ? sid_esc : "\"\"", eff_esc ? eff_esc : "\"\"");
+      free(sid_esc);
+      free(eff_esc);
+      if (acp_write_line(&p, msg) != 0 ||
+          acp_read_request_status(&p, 5, util_now_ms() + 10000) != 1)
+      {
+         snprintf(
+             out->error, sizeof(out->error),
+             "acp adapter: agent did not accept reasoning effort '%s' (session/set_config_option)",
+             cfg->agent->reasoning_effort);
+         acp_proc_close(&p);
+         return -1;
+      }
+   }
+
    /* 3. session/prompt: the prompt is an array of typed content blocks. */
    {
       char *text_esc = cJSON_PrintUnformatted(cJSON_CreateString(cfg->user_prompt));

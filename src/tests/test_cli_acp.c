@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "cli_acp.h"
+#include "cJSON.h"
 #include "provider_cli_adapter.h"
 #include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
@@ -370,6 +371,150 @@ static void test_serve_permission_denied_when_read_only(void)
    printf("PASS: read-only gate rejects/cancels permission requests\n");
 }
 
+/* ---- reasoning-effort exact-or-fail transport (integration) ---- */
+
+static void do_effort_case(const char *effort, const char *mode, int expect_ok,
+                           int expect_has_effort, int expect_has_prompt)
+{
+   char tpath[256];
+   snprintf(tpath, sizeof(tpath), "%s/acp_transcript_XXXXXX", platform_tmpdir());
+   int tf = mkstemp(tpath);
+   assert(tf >= 0);
+   close(tf);
+
+   char fpath[256];
+   snprintf(fpath, sizeof(fpath), "%s/aimee-fake-acp-XXXXXX", platform_tmpdir());
+   int fd = mkstemp(fpath);
+   assert(fd >= 0);
+   FILE *f = fdopen(fd, "w");
+   assert(f != NULL);
+   fprintf(
+       f,
+       "#!/bin/sh\n"
+       "TRANSCRIPT=\"%s\"\n"
+       "MODE=\"%s\"\n"
+       "while IFS= read -r line; do\n"
+       "  printf '%%s\\n' \"$line\" >> \"$TRANSCRIPT\"\n"
+       "  case \"$line\" in\n"
+       "    *initialize*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
+       "      ;;\n"
+       "    *session/new*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-test\"}}\\n'\n"
+       "      ;;\n"
+       "    *session/set_model*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}\\n'\n"
+       "      ;;\n"
+       "    *session/set_config_option*)\n"
+       "      if [ \"$MODE\" = \"reject\" ]; then\n"
+       "        printf "
+       "'{\"jsonrpc\":\"2.0\",\"id\":5,\"error\":{\"code\":-32603,\"message\":\"rejected\"}}\\n'\n"
+       "      else\n"
+       "        printf '{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}\\n'\n"
+       "      fi\n"
+       "      ;;\n"
+       "    *session/prompt*)\n"
+       "      printf "
+       "'{\"jsonrpc\":\"2.0\",\"method\":\"session/"
+       "update\",\"params\":{\"sessionId\":\"sess-test\",\"update\":{\"sessionUpdate\":\"agent_"
+       "message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello\"}}}}\\n'\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"stopReason\":\"end_turn\"}}\\n'\n"
+       "      ;;\n"
+       "  esac\n"
+       "done\n",
+       tpath, mode);
+   fclose(f);
+   chmod(fpath, 0700);
+
+   char cwdbuf[256];
+   snprintf(cwdbuf, sizeof(cwdbuf), "%s/acp_cwd_XXXXXX", platform_tmpdir());
+   char *cwd = mkdtemp(cwdbuf);
+   assert(cwd != NULL);
+
+   agent_t agent;
+   memset(&agent, 0, sizeof(agent));
+   snprintf(agent.name, sizeof(agent.name), "fake-acp");
+   snprintf(agent.backend, sizeof(agent.backend), "%s", AGENT_BACKEND_PROVIDER_CLI);
+   snprintf(agent.cli_kind, sizeof(agent.cli_kind), "acp");
+   snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "%s", fpath);
+   snprintf(agent.model, sizeof(agent.model), "test-model");
+   if (effort)
+      snprintf(agent.reasoning_effort, sizeof(agent.reasoning_effort), "%s", effort);
+   agent.timeout_ms = 5000;
+   agent.cli_idle_timeout_ms = 5000;
+
+   const provider_cli_adapter_t *acp = provider_cli_adapter_get("acp");
+   assert(acp != NULL);
+   provider_cli_cfg_t cfg = {.agent = &agent, .cwd = cwd, .user_prompt = "hi"};
+   agent_result_t out;
+   memset(&out, 0, sizeof(out));
+   int rc = acp->execute(&cfg, &out);
+
+   FILE *tf2 = fopen(tpath, "rb");
+   assert(tf2 != NULL);
+   fseek(tf2, 0, SEEK_END);
+   long sz = ftell(tf2);
+   rewind(tf2);
+   char *trans = malloc((size_t)sz + 1);
+   assert(trans != NULL);
+   size_t n = fread(trans, 1, (size_t)sz, tf2);
+   trans[n] = '\0';
+   fclose(tf2);
+
+   if (expect_ok)
+   {
+      assert(rc == 0);
+      assert(out.success == 1);
+   }
+   else
+   {
+      assert(rc != 0);
+      assert(strstr(out.error, effort) != NULL);
+      assert(strstr(out.error, "session/set_config_option") != NULL);
+   }
+
+   int has_effort = strstr(trans, "configId\":\"effort\"") != NULL;
+   int has_prompt = strstr(trans, "session/prompt") != NULL;
+   assert(has_effort == expect_has_effort);
+   assert(has_prompt == expect_has_prompt);
+
+   if (expect_has_effort)
+   {
+      assert(strstr(trans, "\"value\":\"xhigh\"") != NULL);
+      assert(strstr(trans, "sess-test") != NULL);
+      assert(strstr(trans, "\"id\":5") != NULL);
+      if (expect_has_prompt)
+      {
+         char *p_eff = strstr(trans, "session/set_config_option");
+         char *p_pr = strstr(trans, "session/prompt");
+         assert(p_eff && p_pr && p_eff < p_pr);
+      }
+   }
+   else
+   {
+      assert(strstr(trans, "\"id\":5") == NULL);
+   }
+
+   free(trans);
+   free(out.response);
+   unlink(fpath);
+   unlink(tpath);
+   rmdir(cwd);
+}
+
+static void test_effort_handshake(void)
+{
+   // accepted xhigh: effort before prompt, success
+   do_effort_case("xhigh", "accept", 1, 1, 1);
+   printf("PASS: accepted xhigh produces id-5 effort before prompt\n");
+   // rejected xhigh: fails naming effort/method, no prompt
+   do_effort_case("xhigh", "reject", 0, 1, 0);
+   printf("PASS: rejected xhigh fails with effort-naming error, no prompt\n");
+   // empty effort: no id-5, reaches prompt
+   do_effort_case("", "accept", 1, 0, 1);
+   printf("PASS: empty effort sends no id-5 and reaches prompt\n");
+}
+
 int main(void)
 {
    test_acp_adapter_registered();
@@ -390,6 +535,7 @@ int main(void)
    test_serve_unknown_and_nonrequests();
    test_serve_write_denied_when_read_only();
    test_serve_permission_denied_when_read_only();
+   test_effort_handshake();
    printf("ALL PASS\n");
    return 0;
 }

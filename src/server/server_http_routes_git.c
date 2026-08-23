@@ -579,9 +579,33 @@ static int wfe_managed_repo(const char *workdir_in, const char *head, char *work
  * default (`main`). Binding the base to this trusted checkout prevents an item
  * from selecting an arbitrary remote branch while preserving non-default
  * integration lanes. */
-static int wfe_managed_base(const char *repo, const char *base, char *err, size_t errlen)
+static int wfe_managed_base(const char *trusted_repo, const char *repo_in, const char *base,
+                            char *err, size_t errlen)
 {
-   char branch[256];
+   char repo[MAX_PATH_LEN], top[MAX_PATH_LEN], common_raw[MAX_PATH_LEN], common[MAX_PATH_LEN];
+   char trusted_common_raw[MAX_PATH_LEN], trusted_common[MAX_PATH_LEN], branch[256];
+   if (!repo_in || !realpath(repo_in, repo))
+   {
+      snprintf(err, errlen, "admitted repository is unavailable");
+      return -1;
+   }
+   const char *top_argv[] = {"git", "-C", repo, "rev-parse", "--show-toplevel", NULL};
+   if (wfe_git_capture(repo, top_argv, top, sizeof(top)) != 0 || strcmp(top, repo) != 0)
+   {
+      snprintf(err, errlen, "admitted repository top-level is invalid");
+      return -1;
+   }
+   const char *common_argv[] = {
+       "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir", NULL};
+   if (wfe_git_capture(repo, common_argv, common_raw, sizeof(common_raw)) != 0 ||
+       !realpath(common_raw, common) ||
+       (size_t)snprintf(trusted_common_raw, sizeof(trusted_common_raw), "%s/.git", trusted_repo) >=
+           sizeof(trusted_common_raw) ||
+       !realpath(trusted_common_raw, trusted_common) || strcmp(common, trusted_common) != 0)
+   {
+      snprintf(err, errlen, "admitted repository does not match the managed repository");
+      return -1;
+   }
    const char *branch_argv[] = {"git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD", NULL};
    if (wfe_git_capture(repo, branch_argv, branch, sizeof(branch)) != 0 || !branch[0] ||
        strcmp(branch, "HEAD") == 0)
@@ -595,7 +619,7 @@ static int wfe_managed_base(const char *repo, const char *base, char *err, size_
 static int wfe_forge_body_fields_valid(const cJSON *body)
 {
    static const char *const allowed[] = {"op",   "workdir", "head",   "base", "title",
-                                          "body", "draft",   "number", "expected_remote", NULL};
+                                          "body", "draft",   "number", "expected_remote", "repo", NULL};
    for (const cJSON *field = body ? body->child : NULL; field; field = field->next)
    {
       int index = -1;
@@ -635,7 +659,7 @@ static int wfe_slice_ref_matches_workdir(const char *workdir, const char *prefix
    return n > 0 && (size_t)n < sizeof(expected) && strcmp(expected, ref) == 0;
 }
 
-static int wfe_forge_operation_valid(const char *op, const char *head, const char *base,
+static int wfe_forge_operation_valid(const char *op, const char *repo, const char *head, const char *base,
                                       const char *title, const char *body, const cJSON *jdraft,
                                       int draft, const cJSON *jnumber, int number,
                                       const cJSON *jexpected)
@@ -647,21 +671,21 @@ static int wfe_forge_operation_valid(const char *op, const char *head, const cha
    if (has_number && (!cJSON_IsNumber(jnumber) || jnumber->valuedouble != (double)number))
       return 0;
    if (strcmp(op, "push") == 0)
-       return head && !base && !title && !body && !has_draft && !has_number &&
+       return !repo && head && !base && !title && !body && !has_draft && !has_number &&
               (!jexpected || (cJSON_IsString(jexpected) && jexpected->valuestring[0]));
    if (strcmp(op, "identity") == 0)
-      return !head && !base && !title && !body && !has_draft && !has_number;
+      return !repo && !head && !base && !title && !body && !has_draft && !has_number;
    if (strcmp(op, "open") == 0)
    {
       int final_head = head && strncmp(head, "aimee/feat/wi_", 14) == 0;
-      return head && base && title && title[0] && body && body[0] && has_draft &&
+      return repo && repo[0] && head && base && title && title[0] && body && body[0] && has_draft &&
               cJSON_IsBool(jdraft) && draft == final_head && !has_number &&
                (!jexpected || (cJSON_IsString(jexpected) && jexpected->valuestring[0]));
    }
    if (strcmp(op, "info") == 0 || strcmp(op, "ci") == 0)
-      return !head && !base && !title && !body && !has_draft && has_number && number > 0;
+      return !repo && !head && !base && !title && !body && !has_draft && has_number && number > 0;
    if (strcmp(op, "merge") == 0)
-      return !head && base && !title && !body && !has_draft && has_number && number > 0;
+      return !repo && !head && base && !title && !body && !has_draft && has_number && number > 0;
    return 0;
 }
 
@@ -676,6 +700,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
       return err_json(resp, cap, 403, "local Unix peer required");
    cJSON *body = (rq->body && rq->body[0]) ? cJSON_Parse(rq->body) : NULL;
    const char *op = route_json_string(body, "op");
+   const char *repo_in = route_json_string(body, "repo");
    const char *workdir_in = route_json_string(body, "workdir");
    const char *head = route_json_string(body, "head");
    const char *base = route_json_string(body, "base");
@@ -690,7 +715,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    if (!body || !wfe_forge_body_fields_valid(body) || !op || !workdir_in ||
        (head && !wfe_ref_valid(head)) || (base && !wfe_ref_valid(base)) ||
        (title && strlen(title) > 256) || (pr_body && strlen(pr_body) > 60000) ||
-        !wfe_forge_operation_valid(op, head, base, title, pr_body, jdraft, draft, jnumber, number,
+        !wfe_forge_operation_valid(op, repo_in, head, base, title, pr_body, jdraft, draft, jnumber, number,
                                     jexpected))
    {
       cJSON_Delete(body);
@@ -747,7 +772,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    {
       int base_ok = slice_head && wfe_slice_ref_matches_workdir(workdir, "aimee/feat/", 1, base);
       if (feature_head)
-         base_ok = wfe_managed_base(trusted_repo, base, err, sizeof(err));
+         base_ok = wfe_managed_base(trusted_repo, repo_in, base, err, sizeof(err));
       if (base_ok == 0)
          snprintf(err, sizeof(err), "pull request base is outside the managed target");
       if (base_ok == 1)

@@ -226,7 +226,7 @@ func TestHTTPForgeOpenCarriesCompleteDraftHandoff(t *testing.T) {
 		t.Fatalf("PR = %+v", pr)
 	}
 	for key, want := range map[string]any{"op": "open", "title": spec.Title, "body": spec.Body,
-		"draft": true, "head": "aimee/feat/wi_example", "base": "testing"} {
+		"draft": true, "head": "aimee/feat/wi_example", "base": "testing", "repo": repo} {
 		if request[key] != want {
 			t.Fatalf("request[%q] = %#v, want %#v; request=%#v", key, request[key], want, request)
 		}

@@ -216,7 +216,7 @@ func (f *HTTPForge) open(ctx context.Context, repo, workdir, head, base, expecte
 	var result struct {
 		URL string `json:"url"`
 	}
-	input := map[string]any{"op": "open", "workdir": workdir,
+	input := map[string]any{"op": "open", "repo": repo, "workdir": workdir,
 		"head": head, "base": base, "title": spec.Title, "body": spec.Body,
 		"draft": spec.Draft}
 	if expectedRemote != "" {

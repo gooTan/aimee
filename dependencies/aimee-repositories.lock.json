@@ -241,12 +241,12 @@
       "repository": "https://github.com/gooTan/aimee-module-git.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "b14e8bc6dc230a6f42e865bb83e20f5e5dbe3eb3",
+      "commit": "edf16d773a34b8e8180d239c8ab93f70d58b3824",
       "execution": "process",
       "placements": [
         "server"
       ],
-      "source_sha256": "f3fe1ee6b6707cc22a1529f9ec2027c054038d07988742c443ac2f478acc5382",
+      "source_sha256": "20b3cedc7ebef138c12481f78585909018f7ed279bb0dbd37dfba6e451826eaa",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 13,
@@ -301,16 +301,16 @@
     {
       "id": "vault",
       "classification": "required",
-      "repository": "https://github.com/RakuenSoftware/aimee-module-vault.git",
+      "repository": "https://github.com/gooTan/aimee-module-vault.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "15f28fd9b678007c0af28f6b6ed6c31e12fa6b56",
+      "commit": "2768f61e2421b53590dc3a14ca89cc4711d33900",
       "execution": "core",
       "placements": [
         "server",
         "kb"
       ],
-      "source_sha256": "5b2fb18d701b42300470d662eea22b212f90a5aa364856f884b4ca34a8363e0a"
+      "source_sha256": "33f197af2258bf393dff15a2d541c9d1b03436d8234909114b8005fcdad29f90"
     },
     {
       "id": "execution-policy",

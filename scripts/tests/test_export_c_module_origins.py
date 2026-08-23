@@ -24,6 +24,7 @@ EXPECTED_OVERRIDES = {
     "git": "https://github.com/gooTan/aimee-module-git.git",
     "workflows": "https://github.com/gooTan/aimee-module-workflows.git",
     "roundtable": "https://github.com/gooTan/aimee-module-roundtable.git",
+    "vault": "https://github.com/gooTan/aimee-module-vault.git",
 }
 
 

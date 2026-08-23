@@ -1390,7 +1390,7 @@ static void test_tool_bash(void)
    free(result);
 
    /* Timeout */
-   result = tool_bash("sleep 60", 200);
+   result = tool_bash("while :; do :; done", 200);
    json = cJSON_Parse(result);
    assert(json != NULL);
    ec = cJSON_GetObjectItem(json, "exit_code");
@@ -1398,7 +1398,7 @@ static void test_tool_bash(void)
    cJSON_Delete(json);
    free(result);
 
-   result = tool_bash("yes x | head -c 65536", 5000);
+   result = tool_bash("printf '%65536s' x", 5000);
    assert(result && strstr(result, "\"exit_code\":0") != NULL);
    free(result);
 }

@@ -32,9 +32,10 @@ int main(void)
    assert(stmt && kind == AIMEE_PG_PREPARE_OK);
    aimee_pg_finalize(stmt);
 
-   sqlite3_int64 old_limit = sqlite3_hard_heap_limit64(1);
+   sqlite3_int64 used = sqlite3_memory_used();
+   sqlite3_int64 old_limit = sqlite3_hard_heap_limit64(used > 0 ? used : 1);
    kind = AIMEE_PG_PREPARE_INVALID;
-   stmt = aimee_pg_prepare_ex(test_db, "SELECT 1", &kind, err, sizeof(err));
+   stmt = aimee_pg_prepare_ex(test_db, "SELECT * FROM sqlite_master", &kind, err, sizeof(err));
    sqlite3_hard_heap_limit64(old_limit);
    assert(!stmt && kind == AIMEE_PG_PREPARE_RESOURCE);
 

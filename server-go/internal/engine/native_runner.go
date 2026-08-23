@@ -1945,6 +1945,20 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 	if err := ensureFrozenHead(ctx, workdir, req.Inputs["src"]); err != nil {
 		return StepResult{}, err
 	}
+	if item.ParentID == "" {
+		if r.verifier == nil {
+			return StepResult{}, errors.New("final pull request requires a verifier")
+		}
+		if err := r.worktrees.prepareDependencies(ctx, item.ID, item.Repo, workdir); err != nil {
+			return StepResult{}, err
+		}
+		if err := r.verifier.Verify(ctx, workdir); err != nil {
+			return StepResult{}, fmt.Errorf("verify final pull request head: %w", err)
+		}
+		if err := r.recordDependencyVerification(ctx, item, workdir, req.Node.ID); err != nil {
+			return StepResult{}, err
+		}
+	}
 	spec, err := r.pullRequestSpec(ctx, req, item, workdir, head, base)
 	if err != nil {
 		return StepResult{}, err

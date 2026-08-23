@@ -9,9 +9,8 @@ python3 scripts/export_c_repositories.py \
 
 The command refuses to overwrite an existing output directory. It creates one
 `aimee-core-c` Git repository and one `aimee-module-<id>` Git repository for
-every required and optional canonical module. Each repository receives an
-`origin` URL under `RakuenSoftware`, a tag matching `src/core/VERSION`, and an exact commit
-pin. It does not push or create remote repositories.
+every required and optional canonical module. Each repository receives a tag matching `src/core/VERSION` and an exact commit
+pin; the exporter uses `RakuenSoftware` by default and the five explicit ownership overrides in `MODULE_ORIGIN_OVERRIDES` publish to the matching `gooTan` forks. It does not push or create remote repositories.
 
 The core repository is a standalone installable CMake package. Every module
 repository preserves its descriptor-owned sources, headers, tests, and docs,
@@ -23,6 +22,6 @@ event schema.
 `dependencies/aimee-repositories.lock.json` records repository URLs, semantic
 versions, exact commits, stable principal identities, and source digests.
 `python3 scripts/check_c_repository_lock.py` fails when a vendored core/module
-mirror drifts from its external repository pin. The vendored mirrors remain in
+mirror drifts from its external repository pin. The checker enforces that exact map and rejects other origins. The vendored mirrors remain in
 the main repository during behavioral migration so existing builds do not
 silently switch implementations.

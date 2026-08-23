@@ -311,46 +311,94 @@ int mcp_git_build_explicit_push_command(char *out, size_t out_cap, const char *c
       free(esc_branch);
       return -1;
    }
+   char *esc_tag = NULL;
+   if (force && tags)
+   {
+      esc_tag = shell_escape("+refs/tags/*:refs/tags/*");
+      if (!esc_tag)
+      {
+         free(esc_url);
+         free(esc_branch);
+         return -1;
+      }
+   }
    int pos = snprintf(out, out_cap, "git push");
    if (pos < 0 || (size_t)pos >= out_cap)
    {
       free(esc_url);
       free(esc_branch);
+      free(esc_tag);
       return -1;
    }
-   if (force)
+   if (force && tags)
+   {
+      char lease_raw[1024];
+      snprintf(lease_raw, sizeof(lease_raw), "--force-with-lease=refs/heads/%s", branch);
+      char *esc_lease = shell_escape(lease_raw);
+      if (!esc_lease)
+      {
+         free(esc_url);
+         free(esc_branch);
+         free(esc_tag);
+         return -1;
+      }
+      int n = snprintf(out + pos, out_cap - (size_t)pos, " '%s'", esc_lease);
+      free(esc_lease);
+      if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
+      {
+         free(esc_url);
+         free(esc_branch);
+         free(esc_tag);
+         return -1;
+      }
+      pos += n;
+   }
+   else if (force)
    {
       int n = snprintf(out + pos, out_cap - (size_t)pos, " --force-with-lease");
       if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
       {
          free(esc_url);
          free(esc_branch);
+         free(esc_tag);
          return -1;
       }
       pos += n;
    }
-   if (tags)
+   if (tags && !(force && tags))
    {
       int n = snprintf(out + pos, out_cap - (size_t)pos, " --tags");
       if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
       {
          free(esc_url);
          free(esc_branch);
+         free(esc_tag);
          return -1;
       }
       pos += n;
    }
-   int n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' 2>&1", esc_url, esc_branch,
-                    esc_branch);
+   int n;
+   if (force && tags)
+   {
+      n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' '%s' 2>&1", esc_url,
+                   esc_branch, esc_branch, esc_tag);
+   }
+   else
+   {
+      n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' 2>&1", esc_url, esc_branch,
+                   esc_branch);
+   }
    if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
    {
       free(esc_url);
       free(esc_branch);
+      free(esc_tag);
       return -1;
    }
    pos += n;
    free(esc_url);
    free(esc_branch);
+   free(esc_tag);
    return 0;
 }
 

@@ -3179,27 +3179,42 @@ static void test_git_push_explicit_builder(void)
    assert(strstr(cmd, "git push") == cmd);
    assert(strstr(cmd, "2>&1") != NULL);
 
-   /* Force flag */
+   /* Force flag – generic lease, no tags, no forced tag refspec */
    assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
                                               "https://github.com/acme/widgets.git", "spy-feature",
                                               1, 0) == 0);
    assert(strstr(cmd, "--force-with-lease") != NULL);
    assert(strstr(cmd, "--tags") == NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") == NULL);
    assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
 
-   /* Tags flag */
+   /* Tags flag – generic --tags, no lease, no forced tag refspec */
    assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
                                               "https://github.com/acme/widgets.git", "spy-feature",
                                               0, 1) == 0);
    assert(strstr(cmd, "--tags") != NULL);
    assert(strstr(cmd, "--force-with-lease") == NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") == NULL);
 
-   /* Both flags */
+   /* Both flags – branch-scoped lease + forced tag refspec, no generic --tags or bare --force */
    assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
                                               "https://github.com/acme/widgets.git", "spy-feature",
                                               1, 1) == 0);
-   assert(strstr(cmd, "--force-with-lease") != NULL);
-   assert(strstr(cmd, "--tags") != NULL);
+   assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
+   assert(strstr(cmd, "spy-feature") != NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") != NULL);
+   assert(strstr(cmd, "'+refs/tags/*:refs/tags/*'") != NULL);
+   assert(strstr(cmd, " --tags") == NULL);
+   assert(strstr(cmd, "--tags") == NULL || strstr(cmd, "refs/tags") != NULL);
+   /* No bare/global --force (only --force-with-lease=...) */
+   assert(strstr(cmd, " --force ") == NULL);
+   {
+      const char *p = strstr(cmd, "--force");
+      assert(p != NULL);
+      assert(strncmp(p, "--force-with-lease=refs/heads/", 27) == 0);
+      p = strstr(p + 1, "--force");
+      assert(p == NULL);
+   }
    assert(strstr(cmd, "https://github.com/acme/widgets.git") != NULL);
    assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
 
@@ -3217,6 +3232,27 @@ static void test_git_push_explicit_builder(void)
                                               "my branch; rm -rf /", 0, 0) == 0);
    assert(strstr(cmd, "my branch; rm -rf /") != NULL);
    assert(strstr(cmd, "'my branch; rm -rf /:my branch; rm -rf /'") != NULL);
+
+   /* Branch escaping remains safe in scoped lease and tag refspec (force+tags) */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git", "a'b", 1,
+                                              1) == 0);
+   assert(strstr(cmd, "'\\''") != NULL);
+   assert(strstr(cmd, "a'b:a'b") == NULL);
+   assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") != NULL);
+   assert(strstr(cmd, " --tags") == NULL);
+   assert(strstr(cmd, "'+refs/tags/*:refs/tags/*'") != NULL);
+
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git",
+                                              "my branch; rm -rf /", 1, 1) == 0);
+   assert(strstr(cmd, "my branch; rm -rf /") != NULL);
+   assert(strstr(cmd, "'my branch; rm -rf /:my branch; rm -rf /'") != NULL);
+   assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
+   assert(strstr(cmd, "'+refs/tags/*:refs/tags/*'") != NULL);
+   /* Scoped lease must contain the escaped branch safely */
+   assert(strstr(cmd, "my branch; rm -rf /") != NULL);
 
    /* URL shell escaping: single quote in canonical URL */
    assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),

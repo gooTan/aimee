@@ -1669,6 +1669,11 @@ func (r *NativeRunner) roundtable(ctx context.Context, req StepRequest) (StepRes
 	// instead of paying for a re-review of identical bytes.
 	if req.Feedback != nil && req.Feedback.ArtifactHash == reviewed.Hash && len(req.Feedback.Findings) > 0 {
 		unchanged := *req.Feedback
+		if !hasBlockingReviewFinding(unchanged.Findings) {
+			return StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved",
+				ContentHash: reviewed.Hash, Feedback: &unchanged,
+				Detail: "artifact unchanged with only advisory findings"}, nil
+		}
 		return StepResult{Status: StepChanges, Feedback: &unchanged,
 			Detail: "artifact unchanged since the previous review; prior findings still apply"}, nil
 	}
@@ -1722,6 +1727,17 @@ func (r *NativeRunner) roundtable(ctx context.Context, req StepRequest) (StepRes
 		return StepResult{}, err
 	}
 	return roundtableStepResult(result, reviewed.Hash), nil
+}
+
+func hasBlockingReviewFinding(findings []wfe.Finding) bool {
+	for _, finding := range findings {
+		switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+		case "suggestion", "nit":
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // roundtableStepResult maps the panel's own verdict onto a workflow step. The

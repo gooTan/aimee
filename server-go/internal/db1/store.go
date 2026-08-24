@@ -1241,8 +1241,8 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var stage, reason string
-	if err := tx.QueryRowContext(ctx, `SELECT current_stage, pause_reason FROM lifecycle_work_item WHERE work_item_id=? AND state='active'`, workItemID).Scan(&stage, &reason); err != nil {
+	var stage, reason, pausedState string
+	if err := tx.QueryRowContext(ctx, `SELECT current_stage, pause_reason, paused_state FROM lifecycle_work_item WHERE work_item_id=? AND state='active'`, workItemID).Scan(&stage, &reason, &pausedState); err != nil {
 		return fmt.Errorf("load resumable workflow: %w", err)
 	}
 	if reason == "" {
@@ -1264,11 +1264,20 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE lifecycle_work_item SET pause_reason='', paused_state='', updated_at=datetime('now') WHERE work_item_id=? AND state='active'`, workItemID); err != nil {
 		return err
 	}
-	if reason == "retry_limit" {
+	if reason == "retry_limit" || reason == "convergence_limit" || reason == "convergence_no_progress" {
 		// A human resume is an explicit request for another bounded repair cycle.
 		// Keeping the exhausted value made the very next failed repair park again,
 		// effectively reducing recovery to one attempt per manual resume.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_stage_attempt WHERE work_item_id=? AND stage=?`, workItemID, stage); err != nil {
+		attemptStage := stage
+		if pausedState != "" {
+			attemptStage = pausedState
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_stage_attempt WHERE work_item_id=? AND stage=?`, workItemID, attemptStage); err != nil {
+			return err
+		}
+	}
+	if reason == "convergence_limit" || reason == "convergence_no_progress" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM wfe_convergence WHERE work_item_id=? AND gate=?`, workItemID, pausedState); err != nil {
 			return err
 		}
 	}

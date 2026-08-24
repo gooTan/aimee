@@ -161,12 +161,12 @@
       "repository": "https://github.com/gooTan/aimee-module-delegates.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "5010fe459f66f843ac1fef06c58996ccfd51e747",
+      "commit": "6069ed1e2357c144d7f509c22516f9deb3e3876e",
       "execution": "process",
       "placements": [
         "server"
       ],
-      "source_sha256": "abf4c902cbec9430a2c9a04f584bea2b62e609fcb31d53becbc8c2035dfb2585",
+      "source_sha256": "bd9f43514f34575fe5f23d7aace6f89db99134027f30043e06dc08eda0492809",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 10,

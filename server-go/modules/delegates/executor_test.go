@@ -162,6 +162,54 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	}
 }
 
+func TestRegistryExecutorLoadsCanonicalModelsKey(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "delegate-helper")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nread prompt\nprintf 'answer:%s' \"$prompt\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{"default_agent": "helper", "models": []map[string]any{{
+		"name": "helper", "model": "test", "cli_kind": "generic", "cli_cmd": script, "enabled": true,
+		"roles": []string{"code"},
+	}}}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
+		Persona: "security", Prompt: "inspect", Workdir: workdir, Tools: true})
+	if result.Status != "done" || !strings.Contains(result.Response, "You are acting as security.") {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRegistryExecutorRejectsMixedRegistryKeys(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "delegate-helper")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{
+		"agents": []map[string]any{{"name": "helper-a", "cli_kind": "generic", "cli_cmd": script, "roles": []string{"code"}}},
+		"models": []map[string]any{{"name": "helper-b", "cli_kind": "generic", "cli_cmd": script, "roles": []string{"code"}}},
+	}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRegistryExecutor(home); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("mixed registry error = %v", err)
+	}
+}
+
 func TestRegistryExecutorEnforcesMaxParallelWithoutPoisoningAgentHealth(t *testing.T) {
 	home := t.TempDir()
 	workdir := filepath.Join(home, "worktree")

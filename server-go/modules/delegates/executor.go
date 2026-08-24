@@ -44,23 +44,26 @@ func NewDefaultHandler() bus.ModuleHandler {
 }
 
 type agentEntry struct {
-	Name        string   `json:"name"`
-	Model       string   `json:"model"`
-	Backend     string   `json:"backend"`
-	Provider    string   `json:"provider"`
-	CLIKind     string   `json:"cli_kind"`
-	CLICmd      string   `json:"cli_cmd"`
-	Enabled     *bool    `json:"enabled"`
-	PrimaryOnly bool     `json:"primary_only"`
-	Roles       []string `json:"roles"`
-	Personas    []string `json:"personas"`
-	MaxParallel *int     `json:"max_parallel"`
-	Available   *bool    `json:"delegate_available"`
+	Name             string   `json:"name"`
+	Model            string   `json:"model"`
+	Backend          string   `json:"backend"`
+	Provider         string   `json:"provider"`
+	CLIKind          string   `json:"cli_kind"`
+	CLICmd           string   `json:"cli_cmd"`
+	Enabled          *bool    `json:"enabled"`
+	PrimaryOnly      bool     `json:"primary_only"`
+	Roles            []string `json:"roles"`
+	Personas         []string `json:"personas"`
+	MaxParallel      *int     `json:"max_parallel"`
+	Available        *bool    `json:"delegate_available"`
+	ReasoningEffort  string   `json:"reasoning_effort"`
+	CLIIdleTimeoutMS *int64   `json:"cli_idle_timeout_ms"`
 }
 
 type agentRegistry struct {
 	DefaultAgent string       `json:"default_agent"`
 	Agents       []agentEntry `json:"agents"`
+	Models       []agentEntry `json:"models"`
 }
 
 // RegistryExecutor is the Go-owned delegate producer. It selects a configured
@@ -115,12 +118,22 @@ func (r *RegistryExecutor) load() (agentRegistry, error) {
 	if err := json.Unmarshal(body, &registry); err != nil {
 		return agentRegistry{}, fmt.Errorf("decode agent registry: %w", err)
 	}
+	if len(registry.Agents) > 0 && len(registry.Models) > 0 {
+		return agentRegistry{}, fmt.Errorf("decode agent registry: registry must use a single top-level key: both \"agents\" and \"models\" are populated")
+	}
+	if len(registry.Agents) == 0 && len(registry.Models) > 0 {
+		registry.Agents = registry.Models
+	}
+	registry.Models = nil
 	if len(registry.Agents) == 0 {
 		return agentRegistry{}, errors.New("agent registry has no agents")
 	}
 	for _, agent := range registry.Agents {
 		if agent.MaxParallel != nil && *agent.MaxParallel < 0 {
 			return agentRegistry{}, fmt.Errorf("agent %q has negative max_parallel", agent.Name)
+		}
+		if agent.CLIIdleTimeoutMS != nil && (*agent.CLIIdleTimeoutMS < 0 || *agent.CLIIdleTimeoutMS > int64(24*time.Hour/time.Millisecond)) {
+			return agentRegistry{}, fmt.Errorf("agent %q has invalid cli_idle_timeout_ms %d", agent.Name, *agent.CLIIdleTimeoutMS)
 		}
 	}
 	r.registry, r.stamp = registry, info.ModTime().UnixNano()
@@ -446,6 +459,8 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 		} else if !RoleIsWrite(request.Role) {
 			argv = append(argv, "--allowedTools", "Read", "Glob", "Grep")
 		}
+	case "acp":
+		return argv, nil
 	case "", "generic":
 		// A generic adapter consumes the prompt on stdin and writes its final
 		// response on stdout. This keeps custom CLIs argv-only and testable.
@@ -483,6 +498,33 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	_, _ = b.Buffer.Write(p)
 	b.remaining -= len(p)
 	return n, nil
+}
+
+func (b *limitedBuffer) ReadFrom(r io.Reader) (int64, error) {
+	var total int64
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			b.mu.Lock()
+			toWrite := n
+			if toWrite > b.remaining {
+				toWrite = b.remaining
+			}
+			if toWrite > 0 {
+				_, _ = b.Buffer.Write(buf[:toWrite])
+				b.remaining -= toWrite
+			}
+			b.mu.Unlock()
+			total += int64(n)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+	}
 }
 
 func (b *limitedBuffer) String() string {
@@ -762,6 +804,9 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	defer closeCommand()
 	if request.Workdir != "" {
 		cmd.Dir = request.Workdir
+	}
+	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "acp") {
+		return r.executeACP(ctx, runCancel, closeCommand, cmd, agent, request, prompt)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	output := &limitedBuffer{remaining: maxExecutorOutput}

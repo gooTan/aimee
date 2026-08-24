@@ -223,8 +223,8 @@ func TestCanonicalBuildWorkflowBindings(t *testing.T) {
 	if !mustParamBool(prep, "brief") {
 		t.Fatalf("prep brief=%v, want true", prep.Params["brief"])
 	}
-	if mustParamString(prep, "delegate") != "luna" {
-		t.Fatalf("prep delegate=%q, want luna", prep.Params["delegate"])
+	if mustParamString(prep, "delegate") != "muse" {
+		t.Fatalf("prep delegate=%q, want muse", prep.Params["delegate"])
 	}
 	if mustParamInt(prep, "max_rounds") != 2 {
 		t.Fatalf("prep max_rounds=%v, want 2", prep.Params["max_rounds"])

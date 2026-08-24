@@ -39,7 +39,7 @@ The general implementation seat is named exactly `muse`:
 - `cli_cmd`: `/home/midnight/.local/bin/opencode acp`
 - `model`: `opencode-go/muse-spark-1.2-contributor`
 - `reasoning_effort`: `xhigh`
-- `roles`: `code`, `execute`
+- `roles`: `draft`, `code`, `execute`
 - `timeout_ms`: `1800000`
 - `cli_idle_timeout_ms`: `1800000`
 - `tier_price_exempt`: `flat-rate subscription seat`
@@ -121,7 +121,7 @@ The file is `$AIMEE_HOME/models.json` (fallback `$AIMEE_HOME/agents.json` for pr
       "cli_cmd": "/home/midnight/.local/bin/opencode acp",
       "model": "opencode-go/muse-spark-1.2-contributor",
       "reasoning_effort": "xhigh",
-      "roles": ["code", "execute"],
+      "roles": ["draft", "code", "execute"],
       "timeout_ms": 1800000,
       "cli_idle_timeout_ms": 1800000,
       "tier_price_exempt": "flat-rate subscription seat",

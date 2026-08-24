@@ -69,6 +69,8 @@
   "go_sources": [
     "server-go/modules/delegates/delegates.go",
     "server-go/modules/delegates/executor.go",
+    "server-go/modules/delegates/acp.go",
+    "server-go/modules/delegates/acp_protocol.go",
     "server-go/modules/delegates/capabilities.go",
     "server-go/modules/delegates/chain.go",
     "server-go/modules/delegates/paths.go",
@@ -115,6 +117,9 @@
   "go_tests": [
     "server-go/modules/delegates/delegates_test.go",
     "server-go/modules/delegates/executor_test.go",
+    "server-go/modules/delegates/acp_test.go",
+    "server-go/modules/delegates/acp_protocol_test.go",
+    "server-go/modules/delegates/acp_fake_test.go",
     "server-go/modules/delegates/capabilities_test.go",
     "server-go/modules/delegates/chain_test.go",
     "server-go/modules/delegates/paths_test.go",

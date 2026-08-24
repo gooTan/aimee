@@ -40,7 +40,7 @@ nodes:
     block: understand
     params:
       brief: true
-      delegate: luna
+      delegate: muse
       max_rounds: 2
     next: plan
     on_fail: prep

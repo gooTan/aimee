@@ -1047,13 +1047,14 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	if err := r.commitChanges(ctx, workdir, req.Node.ID); err != nil {
 		return StepResult{}, err
 	}
-	// A delegate that reported partial AND left no commit did not implement the
-	// task -- it said so itself. Advancing turns that into an empty diff at freeze,
+	// A write delegate that left no commit and no branch work did not implement the
+	// task. Advancing turns that into an empty diff at freeze,
 	// which reads as "the work is already in the base" and accepts the slice, so a
-	// run can reach done=N with no commits, no artifact and no PR. Only the partial
-	// case fails here: a completed delegate that legitimately had nothing to do is
-	// still the freeze no-op path.
-	if result.Partial && baseHeadErr == nil {
+	// run can reach done=N with no commits, no artifact and no PR. Completed results
+	// need the same guard: provider completion describes the turn, not the task.
+	// Completed documentation no-ops remain valid because that prompt explicitly
+	// permits an unchanged tree.
+	if baseHeadErr == nil && (result.Partial || !docs) {
 		head, headErr := gitText(ctx, workdir, "rev-parse", "HEAD")
 		// baseHead is HEAD at the start of THIS attempt, so on a redispatch it
 		// already contains whatever earlier attempts committed. A delegate that
@@ -1088,7 +1089,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 				!branchHasWorkOverBase(ctx, workdir, req.WorkItem.ParentID))) {
 			detail := strings.TrimSpace(result.Response)
 			if detail == "" {
-				detail = "delegate returned a partial result and produced no commit"
+				detail = "delegate produced no commit"
 			}
 			return StepResult{Status: StepChanges, Detail: safeDiagnostic(detail),
 				CostUSD: cost, CostUnknown: costUnknown}, nil

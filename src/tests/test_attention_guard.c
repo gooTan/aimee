@@ -650,6 +650,17 @@ static void test_isolation_enforcement(void)
    g_stdin_json = EDIT_WORKTREE_HOOK;
    assert(handle_attention_guard() == 0);
 
+   /* Workflow-owned slice worktrees are already isolated. The CLI delegate's
+    * MCP proxy must stay in this tree instead of creating a nested session
+    * worktree that hides its edits from the workflow engine. */
+   char wfe_hook[1024];
+   snprintf(wfe_hook, sizeof(wfe_hook),
+            "{\"session_id\":\"isotest\",\"tool_name\":\"Edit\",\"tool_input\":{"
+            "\"file_path\":\"%s/wfe-worktrees/wi_child/src/x.c\"}}",
+            g_home);
+   g_stdin_json = wfe_hook;
+   assert(handle_attention_guard() == 0);
+
    /* (5) Enabled: a Read on the primary checkout is allowed (non-mutating). */
    g_stdin_json = READ_PRIMARY_HOOK;
    assert(handle_attention_guard() == 0);

@@ -261,6 +261,36 @@ static void test_ensure_requires_a_session_id_and_a_repo(void)
    printf("  ensure: no session id / no repo -> not applicable: ok\n");
 }
 
+static void test_ensure_reuses_workflow_worktree(void)
+{
+   char home[512], repo[512], cwd_before[512];
+   snprintf(home, sizeof home, "%s/wfe-home", g_tmp_root);
+   make_repo("wfe-home/wfe-worktrees/wi_child", "slice", repo, sizeof repo);
+   assert(getcwd(cwd_before, sizeof cwd_before));
+   assert(chdir(repo) == 0);
+
+   const char *old_home = getenv("AIMEE_HOME");
+   char old_home_copy[512] = "";
+   if (old_home)
+      snprintf(old_home_copy, sizeof old_home_copy, "%s", old_home);
+   setenv("AIMEE_HOME", home, 1);
+
+   char wt[4200];
+   assert(client_session_worktree_ensure("delegate-session", wt, sizeof wt) == -1);
+   assert(wt[0] == '\0');
+   char nested[1024];
+   snprintf(nested, sizeof nested, "%s/.aimee/worktrees", repo);
+   struct stat st;
+   assert(stat(nested, &st) != 0);
+
+   if (old_home)
+      setenv("AIMEE_HOME", old_home_copy, 1);
+   else
+      unsetenv("AIMEE_HOME");
+   assert(chdir(cwd_before) == 0);
+   printf("  ensure: workflow worktree reused without nesting: ok\n");
+}
+
 /* Reproduce the pre-rekey layout by hand: <root>/.aimee/worktrees/<old_key>/main
  * on branch aimee/session/<old_key>, exactly as the old truncating derivation
  * would have left it. Returns the old key in old_key[cap]. */
@@ -519,6 +549,7 @@ int main(void)
    test_base_explicit_ref_override();
    test_ensure_creates_branch_and_worktree();
    test_ensure_requires_a_session_id_and_a_repo();
+   test_ensure_reuses_workflow_worktree();
    test_ensure_reclaims_pre_rekey_worktree();
    test_reclaim_keeps_a_dirty_pre_rekey_worktree();
    test_publish_reaches_the_parent();

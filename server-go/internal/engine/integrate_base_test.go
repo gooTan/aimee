@@ -249,6 +249,16 @@ func (partialNoCommitAgents) Delegate(_ context.Context, _ DelegateRequest) (Del
 	}, nil
 }
 
+type completedNoCommitAgents struct{}
+
+func (completedNoCommitAgents) Delegate(_ context.Context, _ DelegateRequest) (DelegateResult, error) {
+	return DelegateResult{Response: "Implementation complete."}, nil
+}
+
+func (completedNoCommitAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	return make([]DelegateGroupResult, len(requests))
+}
+
 type documentedNoopAgents struct{}
 
 func (documentedNoopAgents) Delegate(_ context.Context, _ DelegateRequest) (DelegateResult, error) {
@@ -504,6 +514,20 @@ func TestPartialImplementWithNoCommitDoesNotAdvance(t *testing.T) {
 	// The delegate already said exactly what was wrong; that is the finding.
 	if !strings.Contains(out.Detail, "was not created by delegate") {
 		t.Fatalf("delegate's own diagnosis must survive into the step detail: %q", out.Detail)
+	}
+
+	completedVerifier := &recordingVerifier{}
+	completedRunner := &NativeRunner{agents: completedNoCommitAgents{}, worktrees: manager, db: store,
+		verifier: completedVerifier}
+	out, err = completedRunner.mutate(ctx, StepRequest{WorkItem: child, Node: wfe.Node{ID: "impl"}}, false)
+	if err != nil {
+		t.Fatalf("completed no-commit mutate: %v", err)
+	}
+	if out.Status != StepChanges {
+		t.Fatalf("completed delegate with no branch work status=%q detail=%q, want changes", out.Status, out.Detail)
+	}
+	if completedVerifier.calls != 0 {
+		t.Fatalf("completed delegate with no branch work verifier calls=%d, want 0", completedVerifier.calls)
 	}
 
 	// The write-role guard also reports a legitimate sibling-satisfied no-op as

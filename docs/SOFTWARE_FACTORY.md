@@ -119,7 +119,7 @@ opencode auth login  # verify: opencode models
 agy                  # launch with no arguments to sign in; verify: agy models
 ```
 
-Give the Antigravity review seat read-only repo access. In `~/.config/antigravity/settings.json` set `permissions.allow` to `read_file(*)`, `list_dir(*)`, `grep_search(*)`, `find_by_name(*)`. Writes and commands stay denied; the `agy` adapter never passes `--dangerously-skip-permissions` and slash commands are disabled.
+Give the Antigravity review seat read-only repo access. In `~/.gemini/antigravity-cli/settings.json` set `permissions.allow` to `read_file(*)`, `list_dir(*)`, `grep_search(*)`, `find_by_name(*)`, `mcp(aimee/*)`. `mcp(aimee/*)` permits only the registered Aimee MCP server so memory recall can reuse shared vector context and save prompt tokens. Writes, commands, slash commands, and `--dangerously-skip-permissions` remain denied and the `mcp(aimee/*)` allowance grants no write access; the `agy` adapter never passes `--dangerously-skip-permissions` and slash commands are disabled.
 
 Discover exact model ids from each CLI vendor before pinning them in the agent file.
 
@@ -167,6 +167,15 @@ The file is `$AIMEE_HOME/models.json` (fallback `$AIMEE_HOME/agents.json` for pr
       "timeout_ms": 1800000,
       "cli_idle_timeout_ms": 1800000,
       "tier_price_exempt": "flat-rate subscription seat",
+      "enabled": true
+    },
+    {
+      "name": "antigravity",
+      "backend": "provider-cli",
+      "cli_kind": "agy",
+      "cli_cmd": "/home/midnight/.local/bin/agy",
+      "model": "<discovered>",
+      "roles": ["review"],
       "enabled": true
     }
   ]

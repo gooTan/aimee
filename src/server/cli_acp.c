@@ -731,8 +731,8 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       char *cwd_esc = cJSON_PrintUnformatted(cJSON_CreateString(cfg->cwd ? cfg->cwd : "."));
       char msg[1024];
       snprintf(msg, sizeof(msg),
-               "{\"jsonrpc\":\"2.0\",\"method\":\"session/new\"," 
-               "\"params\":{\"cwd\":%s,\"mcpServers\":[{\"name\":\"aimee\"," 
+               "{\"jsonrpc\":\"2.0\",\"method\":\"session/new\","
+               "\"params\":{\"cwd\":%s,\"mcpServers\":[{\"name\":\"aimee\","
                "\"command\":\"aimee\",\"args\":[\"mcp-serve\"],\"env\":[]}]},\"id\":2}",
                cwd_esc ? cwd_esc : "\".\"");
       free(cwd_esc);

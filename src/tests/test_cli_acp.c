@@ -473,11 +473,11 @@ static void do_effort_case(const char *effort, const char *mode, int expect_ok,
       assert(strstr(out.error, "session/set_config_option") != NULL);
    }
 
-	int has_effort = strstr(trans, "configId\":\"effort\"") != NULL;
-	int has_prompt = strstr(trans, "session/prompt") != NULL;
-	assert(strstr(trans, "\"mcpServers\":[{\"name\":\"aimee\"") != NULL);
-	assert(strstr(trans, "\"args\":[\"mcp-serve\"]") != NULL);
-	assert(has_effort == expect_has_effort);
+   int has_effort = strstr(trans, "configId\":\"effort\"") != NULL;
+   int has_prompt = strstr(trans, "session/prompt") != NULL;
+   assert(strstr(trans, "\"mcpServers\":[{\"name\":\"aimee\"") != NULL);
+   assert(strstr(trans, "\"args\":[\"mcp-serve\"]") != NULL);
+   assert(has_effort == expect_has_effort);
    assert(has_prompt == expect_has_prompt);
 
    if (expect_has_effort)

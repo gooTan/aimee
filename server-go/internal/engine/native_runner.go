@@ -1529,11 +1529,14 @@ func frozenWorktreeBase(ctx context.Context, item db1.WorkItem, workdir string) 
 			return "", errors.New("parent feature branch is unavailable")
 		}
 	} else {
-		trunk, e := repoDefaultBranch(ctx, workdir)
+		integration, e := repoIntegrationBranch(ctx, item.Repo)
 		if e != nil {
 			return "", e
 		}
-		base = "origin/" + trunk
+		base = "origin/" + integration
+		if _, checkErr := gitText(ctx, workdir, "rev-parse", "--verify", base+"^{commit}"); checkErr != nil {
+			base = integration
+		}
 	}
 	return base, nil
 }

@@ -2,7 +2,7 @@
 #
 # input (proposal | user request)
 #   -> author.proposal
-#   -> branch.open (durable feature branch from the repository default branch)
+#   -> branch.open (durable feature branch from the admitted checkout branch)
 #   -> author.plan -> roundtable (bounded refinement loop)
 #   -> split (plan -> per-slice packets)
 #   -> foreach.workflow (each packet runs slice: implement -> review -> sub-PR -> CI -> merge)
@@ -13,9 +13,9 @@
 # the artifact against the original request. The final PR remains a draft for human
 # review and merge.
 #
-# `branch.open base: trunk` starts the feature from the repository default branch.
+# `branch.open base: trunk` starts the feature from the admitted checkout branch.
 # `pr.open base: trunk` targets the branch checked out when Go admitted the repo.
-# Those branches can differ by design. Only slice PRs merge automatically.
+# Both seams therefore use the same integration lane. Only slice PRs merge automatically.
 name: build
 intent_tags:
   - proposal
@@ -30,7 +30,7 @@ nodes:
     next: feature
     on_fail: draft
   # Open the durable feature branch before the plan. Slice PRs merge into it.
-  # branch.open needs no input; base: trunk selects the repository default branch.
+  # branch.open needs no input; base: trunk selects the admitted checkout branch.
   - id: feature
     block: branch.open
     params:

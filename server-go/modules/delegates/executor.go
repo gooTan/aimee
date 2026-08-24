@@ -456,7 +456,7 @@ func splitCommand(command string) ([]string, error) {
 	return out, nil
 }
 
-func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]string, error) {
+func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt string) ([]string, error) {
 	argv, err := splitCommand(agent.CLICmd)
 	if err != nil {
 		return nil, err
@@ -497,6 +497,15 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 		}
 	case "acp":
 		return argv, nil
+	case "agy":
+		if !request.Tools {
+			return nil, errors.New("agy CLI cannot guarantee a tools-disabled invocation")
+		}
+		argv = append(argv, "-p", prompt, "--output-format", "stream-json",
+			"--disable-slash-commands", "--mode", "plan", "--sandbox")
+		if agent.Model != "" {
+			argv = append(argv, "--model", agent.Model)
+		}
 	case "", "generic":
 		// A generic adapter consumes the prompt on stdin and writes its final
 		// response on stdout. This keeps custom CLIs argv-only and testable.
@@ -679,6 +688,13 @@ func finalOutput(kind string, output []byte) string {
 				}
 			}
 		}
+		if kind == "agy" && item["event"] == "result" {
+			if nested, ok := item["result"].(map[string]any); ok {
+				if value, ok := nested["response"].(string); ok {
+					final = value
+				}
+			}
+		}
 	}
 	return strings.TrimSpace(final)
 }
@@ -823,13 +839,13 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			return fail(err, "delegate workdir is not a git checkout")
 		}
 	}
-	argv, err := executorArgv(agent, request)
-	if err != nil {
-		return fail(err, err.Error())
-	}
 	prompt := request.Prompt
 	if persona := strings.TrimSpace(request.Persona); persona != "" {
 		prompt = "You are acting as " + persona + ".\n\n" + prompt
+	}
+	argv, err := executorArgv(agent, request, prompt)
+	if err != nil {
+		return fail(err, err.Error())
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
@@ -844,7 +860,9 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "acp") {
 		return r.executeACP(ctx, runCancel, closeCommand, cmd, agent, request, prompt)
 	}
-	cmd.Stdin = strings.NewReader(prompt)
+	if !strings.EqualFold(strings.TrimSpace(agent.CLIKind), "agy") {
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 	output := &limitedBuffer{remaining: maxExecutorOutput}
 	monitor := newTurnMonitor(agent.CLIKind, request.MaxTurns, runCancel, output)
 	cmd.Stdout, cmd.Stderr = output, output

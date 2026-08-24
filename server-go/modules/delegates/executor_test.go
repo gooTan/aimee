@@ -555,22 +555,45 @@ func TestRegistryRejectsMissingCLIKind(t *testing.T) {
 
 func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	_, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
-		delegatecontract.Invocation{Role: "review", Tools: false})
+		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
 	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
 		t.Fatalf("codex tools-disabled error = %v", err)
 	}
 	argv, err := executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
-		delegatecontract.Invocation{Role: "review", Tools: false})
+		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
 	tools := slices.Index(argv, "--tools")
 	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" {
 		t.Fatalf("claude tools-disabled argv = %q, %v", argv, err)
 	}
 	argv, err = executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
-		delegatecontract.Invocation{Role: "review", Tools: true})
+		delegatecontract.Invocation{Role: "review", Tools: true}, "prompt")
 	mcp := slices.Index(argv, "--mcp-config")
 	if err != nil || mcp < 0 || mcp+1 >= len(argv) || !strings.Contains(argv[mcp+1], `"aimee"`) ||
 		!strings.Contains(argv[mcp+1], `"mcp-serve"`) {
 		t.Fatalf("claude Aimee MCP argv = %q, %v", argv, err)
+	}
+}
+
+func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
+	agent := agentEntry{CLIKind: "agy", CLICmd: "agy", Model: "gemini-test"}
+	argv, err := executorArgv(agent,
+		delegatecontract.Invocation{Role: "review", Tools: true}, "composed prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"agy", "-p", "composed prompt", "--output-format", "stream-json",
+		"--disable-slash-commands", "--mode", "plan", "--sandbox", "--model", "gemini-test"}
+	if !slices.Equal(argv, want) {
+		t.Fatalf("agy argv = %q, want %q", argv, want)
+	}
+	output := []byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"remembered\"}}\n")
+	if got := finalOutput("agy", output); got != "remembered" {
+		t.Fatalf("agy final output = %q", got)
+	}
+	if _, err := executorArgv(agent,
+		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt"); err == nil ||
+		!strings.Contains(err.Error(), "tools-disabled") {
+		t.Fatalf("agy tools-disabled error = %v", err)
 	}
 }
 

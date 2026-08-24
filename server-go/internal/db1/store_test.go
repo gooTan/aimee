@@ -374,6 +374,33 @@ func TestRetryLimitResumeStartsFreshBudgetAndKeepsDiagnostic(t *testing.T) {
 	}
 }
 
+func TestConvergenceResumeStartsFreshReviewBudget(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	createTestItem(t, store, "wi_convergence_resume")
+	for i := 0; i < 3; i++ {
+		out, err := store.RecordRequestedChanges(ctx, "wi_convergence_resume", "doc_gate", "document",
+			"same-doc", "same-feedback", "", 24, 3, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 2 && out.PauseReason != "convergence_no_progress" {
+			t.Fatalf("pause reason=%q, want convergence_no_progress", out.PauseReason)
+		}
+	}
+	if err := store.Resume(ctx, "wi_convergence_resume"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := store.RecordRequestedChanges(ctx, "wi_convergence_resume", "doc_gate", "document",
+		"same-doc", "same-feedback", "", 24, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Parked || out.Attempts != 1 || out.IdenticalRepeats != 1 {
+		t.Fatalf("first review after resume=%+v, want fresh budget", out)
+	}
+}
+
 func TestWorkflowBudgetHeartbeatExtendsReplayReservations(t *testing.T) {
 	for _, state := range []string{"actual", "unresolved"} {
 		t.Run(state, func(t *testing.T) {

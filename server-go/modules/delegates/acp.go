@@ -323,8 +323,11 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 		cwd = "."
 	}
 	newParams := map[string]any{
-		"cwd":        cwd,
-		"mcpServers": []any{},
+		"cwd": cwd,
+		"mcpServers": []map[string]any{{
+			"name": "aimee", "command": "aimee", "args": []string{"mcp-serve"},
+			"env": []any{},
+		}},
 	}
 	if err := transport.send(2, "session/new", newParams); err != nil {
 		return fail(err, err.Error(), false)

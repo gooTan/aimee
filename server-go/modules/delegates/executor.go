@@ -135,6 +135,9 @@ func (r *RegistryExecutor) load() (agentRegistry, error) {
 		if agent.CLIIdleTimeoutMS != nil && (*agent.CLIIdleTimeoutMS < 0 || *agent.CLIIdleTimeoutMS > int64(24*time.Hour/time.Millisecond)) {
 			return agentRegistry{}, fmt.Errorf("agent %q has invalid cli_idle_timeout_ms %d", agent.Name, *agent.CLIIdleTimeoutMS)
 		}
+		if strings.TrimSpace(agent.CLICmd) != "" && strings.TrimSpace(agent.CLIKind) == "" {
+			return agentRegistry{}, fmt.Errorf("agent %q with cli_cmd requires cli_kind", agent.Name)
+		}
 	}
 	r.registry, r.stamp = registry, info.ModTime().UnixNano()
 	return registry, nil
@@ -483,8 +486,14 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 			// Claude documents an empty --tools value as the explicit mechanism
 			// for disabling every built-in tool; preserve the empty argv element.
 			argv = append(argv, "--tools", "")
-		} else if !RoleIsWrite(request.Role) {
-			argv = append(argv, "--allowedTools", "Read", "Glob", "Grep")
+		} else {
+			argv = append(argv, "--mcp-config",
+				`{"mcpServers":{"aimee":{"command":"aimee","args":["mcp-serve"]}}}`)
+			if RoleIsWrite(request.Role) {
+				argv = append(argv, "--allowedTools", "mcp__aimee")
+			} else {
+				argv = append(argv, "--allowedTools", "Read", "Glob", "Grep", "mcp__aimee")
+			}
 		}
 	case "acp":
 		return argv, nil

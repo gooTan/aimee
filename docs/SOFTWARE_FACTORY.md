@@ -57,6 +57,22 @@ Luna carries `code` and `execute` roles only so it can serve the explicit genera
 
 `opus-ui` is the normal route for `implementation_kind: ui`. `opus-ui-recovery` remains explicit recovery only when a workflow or operator explicitly mentions it. Do not route UI work to `muse` and do not route general work to `opus-ui`.
 
+`opus-ui` and `opus-ui-recovery` use `timeout_ms: 1800000`,
+`cli_idle_timeout_ms: 1800000`, and `max_turns: 0`. Do not add Claude's
+`--max-turns` flag: UI implementation may legitimately need more than twelve
+turns, while the 30-minute call and idle deadlines remain the bounded stop.
+
+### Shared brain
+
+Every routed model must be able to call Aimee memory so delegates can recall
+the shared vector context instead of repeating it in prompts. Claude dispatches
+receive the `aimee` MCP server explicitly, and ACP sessions receive the same
+`aimee mcp-serve` server in `session/new`. Codex uses the installed Aimee plugin;
+Antigravity must register `aimee mcp-serve` in its user MCP configuration.
+Deployment validation must ask each enabled seat to retrieve a fact with
+`memory recall` whose value is absent from the prompt, and confirm the returned
+memory id or retrieval event as well as the answer.
+
 ## Premium policy
 
 Premium write refusal applies to all premium seats. A premium delegate dispatched with write tools or role `code` is refused before dispatch with `premium_write_refused` and the run parks for operator fix of the workflow definition.
@@ -147,6 +163,9 @@ The file is `$AIMEE_HOME/models.json` (fallback `$AIMEE_HOME/agents.json` for pr
       "model": "opus",
       "reasoning_effort": "high",
       "roles": ["code", "execute"],
+      "max_turns": 0,
+      "timeout_ms": 1800000,
+      "cli_idle_timeout_ms": 1800000,
       "tier_price_exempt": "flat-rate subscription seat",
       "enabled": true
     }
@@ -177,6 +196,7 @@ diff -u config/roundtables/documentation.json "$AIMEE_HOME/roundtables/documenta
 opencode models | grep muse-spark-1.2-contributor
 codex exec -m gpt-5.6-luna "Reply with exactly: luna-ok"
 agy -p "Reply with exactly: agy-ok" --output-format stream-json
+aimee memory recall --query "shared brain verification phrase" --limit-tokens 1000
 
 # Canary assertions on this guide
 grep -q muse-spark-1.2-contributor docs/SOFTWARE_FACTORY.md

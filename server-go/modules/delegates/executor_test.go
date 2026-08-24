@@ -541,6 +541,18 @@ func TestRegistryRejectsNegativeMaxParallel(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsMissingCLIKind(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(
+		`{"models":[{"name":"bad","backend":"tmux-cli","cli_cmd":"claude","roles":["code"]}]}`),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRegistryExecutor(home); err == nil || !strings.Contains(err.Error(), "cli_kind") {
+		t.Fatalf("missing cli_kind error = %v", err)
+	}
+}
+
 func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	_, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "review", Tools: false})
@@ -552,6 +564,13 @@ func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	tools := slices.Index(argv, "--tools")
 	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" {
 		t.Fatalf("claude tools-disabled argv = %q, %v", argv, err)
+	}
+	argv, err = executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
+		delegatecontract.Invocation{Role: "review", Tools: true})
+	mcp := slices.Index(argv, "--mcp-config")
+	if err != nil || mcp < 0 || mcp+1 >= len(argv) || !strings.Contains(argv[mcp+1], `"aimee"`) ||
+		!strings.Contains(argv[mcp+1], `"mcp-serve"`) {
+		t.Fatalf("claude Aimee MCP argv = %q, %v", argv, err)
 	}
 }
 

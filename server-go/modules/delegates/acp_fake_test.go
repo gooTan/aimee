@@ -207,7 +207,21 @@ func TestACPHelperProcess(t *testing.T) {
 		validateInit(p1)
 		reply(1, map[string]interface{}{}, "")
 		p2 := readRequest(2, "session/new")
-		_ = p2
+		var newSession struct {
+			MCPServers []struct {
+				Name    string   `json:"name"`
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(p2, &newSession); err != nil {
+			fail("session/new invalid params json: %v %s", err, string(p2))
+		}
+		if len(newSession.MCPServers) != 1 || newSession.MCPServers[0].Name != "aimee" ||
+			newSession.MCPServers[0].Command != "aimee" ||
+			len(newSession.MCPServers[0].Args) != 1 || newSession.MCPServers[0].Args[0] != "mcp-serve" {
+			fail("session/new missing Aimee MCP server: %s", string(p2))
+		}
 		reply(2, map[string]interface{}{"sessionId": "fake-session"}, "")
 	}
 	acceptModel := func() {

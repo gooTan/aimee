@@ -6,7 +6,7 @@
  * Protocol (standard Agent Client Protocol, JSON-RPC over stdio):
  *   1. spawn subprocess (cli_cmd = "claude-code-acp", "aider --acp", etc.)
  *   2. initialize  {protocolVersion, clientCapabilities:{fs:{read,write}}}  id 1
- *   3. session/new {cwd, mcpServers:[]}  id 2  -> capture result.sessionId
+ *   3. session/new {cwd, mcpServers:[aimee]}  id 2 -> capture result.sessionId
  *   4. session/prompt {sessionId, prompt:[{type:text,text}]}  id 3
  *   5. read session/update notifications (accumulate agent_message_chunk text,
  *      count tool_call), serve agent fs/permission requests against the
@@ -731,8 +731,9 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       char *cwd_esc = cJSON_PrintUnformatted(cJSON_CreateString(cfg->cwd ? cfg->cwd : "."));
       char msg[1024];
       snprintf(msg, sizeof(msg),
-               "{\"jsonrpc\":\"2.0\",\"method\":\"session/new\","
-               "\"params\":{\"cwd\":%s,\"mcpServers\":[]},\"id\":2}",
+               "{\"jsonrpc\":\"2.0\",\"method\":\"session/new\"," 
+               "\"params\":{\"cwd\":%s,\"mcpServers\":[{\"name\":\"aimee\"," 
+               "\"command\":\"aimee\",\"args\":[\"mcp-serve\"],\"env\":[]}]},\"id\":2}",
                cwd_esc ? cwd_esc : "\".\"");
       free(cwd_esc);
       if (acp_write_line(&p, msg) != 0)

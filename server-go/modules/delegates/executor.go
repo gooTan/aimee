@@ -229,6 +229,27 @@ func selectorUnbound(selector string) bool {
 	return selector == "" || selector == "$random"
 }
 
+func agentMatchesSelector(agent agentEntry, selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	if selector == agent.Name || selector == agent.Model {
+		return true
+	}
+	if strings.TrimSpace(agent.Model) == "" {
+		return false
+	}
+	model := strings.TrimSpace(agent.Model)
+	if cli := strings.TrimSpace(agent.CLIKind); cli != "" && selector == cli+":"+model {
+		return true
+	}
+	if provider := strings.TrimSpace(agent.Provider); provider != "" && selector == provider+":"+model {
+		return true
+	}
+	return false
+}
+
 type groupCandidate struct {
 	agent    agentEntry
 	provider string
@@ -281,6 +302,12 @@ func (r *RegistryExecutor) PlanGroup(ctx context.Context,
 		bySelector[agent.Name] = candidate
 		if strings.TrimSpace(agent.Model) != "" {
 			bySelector[agent.Model] = candidate
+			if cli := strings.TrimSpace(agent.CLIKind); cli != "" {
+				bySelector[cli+":"+strings.TrimSpace(agent.Model)] = candidate
+			}
+			if providerKey := strings.TrimSpace(agent.Provider); providerKey != "" {
+				bySelector[providerKey+":"+strings.TrimSpace(agent.Model)] = candidate
+			}
 		}
 	}
 	models := make([]string, len(seats))
@@ -359,7 +386,7 @@ func selectAgent(registry agentRegistry, model, role, persona string) (agentEntr
 	if name != "" {
 		for _, a := range registry.Agents {
 			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && eligible(a, role, persona) &&
-				(a.Name == name || a.Model == name) {
+				agentMatchesSelector(a, name) {
 				return a, nil
 			}
 		}

@@ -667,3 +667,42 @@ func TestExecutorCancellationTerminatesDelegateProcessGroup(t *testing.T) {
 		t.Fatalf("delegate process %d survived module cancellation: %v", pid, err)
 	}
 }
+
+func TestQualifiedSelectorResolvesForGroupAndSingleDelegate(t *testing.T) {
+	enabled := true
+	registry := agentRegistry{Agents: []agentEntry{{
+		Name: "sol", Model: "gpt-5.6-sol", Provider: "chatgpt", CLIKind: "codex", CLICmd: "codex",
+		Enabled: &enabled, Roles: []string{"review"}, Personas: []string{"reviewer"},
+	}}}
+	selected, err := selectAgent(registry, "codex:gpt-5.6-sol", "review", "reviewer")
+	if err != nil {
+		t.Fatalf("selectAgent error = %v", err)
+	}
+	if selected.Name != "sol" {
+		t.Fatalf("selectAgent name = %q, want %q", selected.Name, "sol")
+	}
+	home := t.TempDir()
+	registryPath := filepath.Join(home, "models.json")
+	if err := os.WriteFile(registryPath, []byte(`{"agents":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &RegistryExecutor{
+		path:     registryPath,
+		registry: registry,
+		stamp:    info.ModTime().UnixNano(),
+		limits:   make(map[string]*agentLimiter),
+	}
+	models, err := executor.PlanGroup(t.Context(), []delegatecontract.GroupPlanSeat{
+		{Model: "codex:gpt-5.6-sol", Role: "review", Persona: "reviewer"},
+	})
+	if err != nil {
+		t.Fatalf("PlanGroup error = %v", err)
+	}
+	if !slices.Equal(models, []string{"sol"}) {
+		t.Fatalf("PlanGroup models = %v, want %v", models, []string{"sol"})
+	}
+}

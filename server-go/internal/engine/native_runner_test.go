@@ -1497,6 +1497,31 @@ func TestRoundtableSkipsReviewWhenArtifactIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestRoundtableAcceptsUnchangedArtifactWithOnlyAdvisoryFeedback(t *testing.T) {
+	agents := &recordingAgents{}
+	runner := withPanel(&NativeRunner{agents: agents}, configuredTestRoundtable(t))
+	artifact := wfe.Artifact{Type: "frozen_diff", Content: []byte("unchanged reviewed diff")}
+	artifact.Hash = wfe.Hash(artifact.Content)
+	prior := &wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: artifact.Hash, Findings: []wfe.Finding{{
+		ID: "polish", Persona: "chairman", Severity: "nit", Summary: "optional wording polish",
+	}}}
+	result, err := runner.roundtable(context.Background(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_advisory", Worktree: "/worktree"},
+		Node:     wfe.Node{ID: "doc_gate", Block: "gate.roundtable", Params: map[string]any{"roundtable": "default"}},
+		Inputs:   map[string]wfe.Artifact{"src": artifact},
+		Feedback: prior,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 0 {
+		t.Fatalf("panel was re-invoked on an unchanged artifact: %d delegate requests", len(agents.requests))
+	}
+	if result.Status != StepAdvanced || result.Feedback == nil || len(result.Feedback.Findings) != 1 {
+		t.Fatalf("result=%+v, want advanced with advisory feedback preserved", result)
+	}
+}
+
 func TestForeachRejectsInvalidImplementationKindBeforeCreatingChildren(t *testing.T) {
 	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
 	if err != nil {

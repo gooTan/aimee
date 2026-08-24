@@ -68,16 +68,16 @@
     {
       "id": "protocols",
       "classification": "required",
-      "repository": "https://github.com/RakuenSoftware/aimee-module-protocols.git",
+      "repository": "https://github.com/gooTan/aimee-module-protocols.git",
       "ref": "v0.3.0",
       "version": "0.3.0",
-      "commit": "aab036b93f591a4c2b600247be30a55e9a7dfb74",
+      "commit": "de210316e5ebdacfbf47c20bf7eb5904d1ba3048",
       "execution": "core",
       "placements": [
         "server",
         "kb"
       ],
-      "source_sha256": "cbc5def150393c3c6fb3875683f0deecf139bc0e384d8b49cc76af523a71d4a7"
+      "source_sha256": "ee3cf0f99089b79009b5112d175bf8f242d859b50b2460ef0e59db8e4889178c"
     },
     {
       "id": "gateway",

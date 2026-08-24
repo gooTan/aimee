@@ -612,8 +612,7 @@ static int attn_path_in_managed_worktree(const char *norm)
 {
    if (!norm)
       return 0;
-   if (strstr(norm, "/.aimee/worktrees/") != NULL ||
-       strstr(norm, "/.claude/worktrees/") != NULL ||
+   if (strstr(norm, "/.aimee/worktrees/") != NULL || strstr(norm, "/.claude/worktrees/") != NULL ||
        strstr(norm, "/.codex/worktrees/") != NULL)
       return 1;
 

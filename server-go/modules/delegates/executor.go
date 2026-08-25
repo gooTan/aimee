@@ -730,7 +730,7 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 }
 
 func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
-	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed"}
+	result := delegatecontract.InvocationResult{Version: request.Version, Status: "failed"}
 	if ctx == nil {
 		ctx = context.Background()
 	}

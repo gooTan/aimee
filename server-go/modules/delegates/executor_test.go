@@ -75,6 +75,16 @@ func TestExecutionStageCanonicalizesRoleAndReturnsTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestExecutionStageAcceptsVersionThreeCaller(t *testing.T) {
+	executor := &fixedExecutor{result: delegatecontract.InvocationResult{Version: 3, Status: "done"}}
+	request, _ := json.Marshal(delegatecontract.Invocation{Version: 3, Role: "draft", Persona: "architect", Prompt: "prepare"})
+	reply, status := NewHandler(executor)(bus.ModuleInvocation{StageID: StageInvoke}, request)
+	var result delegatecontract.InvocationResult
+	if status != bus.ModuleStatusOK || json.Unmarshal(reply, &result) != nil || result.Version != 3 {
+		t.Fatalf("status = %d result = %s", status, reply)
+	}
+}
+
 func TestExecutionStageAppliesProducerDeadline(t *testing.T) {
 	request, _ := json.Marshal(delegatecontract.Invocation{Version: 2, Role: "review",
 		Persona: "reviewer", Prompt: "inspect", ExecutionTimeoutMS: 20})

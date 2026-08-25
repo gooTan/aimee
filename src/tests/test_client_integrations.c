@@ -215,7 +215,7 @@ static void test_codex_delegate_policy_is_explicit(void)
        * 'pre' or 'post'" and codex allows the tool -- a hook that is installed,
        * declared, well-formed, and enforces nothing. The first version of this
        * assertion pinned exactly that defect by matching the prefix. */
-      assert(strstr(hooks, "/usr/local/bin/aimee hooks pre") != NULL);
+      assert(strstr(hooks, "AIMEE_HOOK_CLIENT=codex /usr/local/bin/aimee hooks pre") != NULL);
       cJSON *parsed = cJSON_Parse(hooks);
       assert(parsed != NULL); /* codex refuses a malformed hooks file outright */
       cJSON_Delete(parsed);

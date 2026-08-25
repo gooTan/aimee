@@ -490,7 +490,7 @@ static const char *codex_hooks_json(const char *aimee_bin)
             /* `hooks` alone exits with "hooks requires 'pre' or 'post'" and codex then
              * allows the tool. The subcommand is the whole difference between a
              * registered hook and an enforcing one. */
-            "            \"command\": \"%s hooks pre\",\n"
+            "            \"command\": \"AIMEE_HOOK_CLIENT=codex %s hooks pre\",\n"
             "            \"timeout\": 10\n"
             "          }\n"
             "        ]\n"

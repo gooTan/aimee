@@ -61,6 +61,9 @@ static const elig_row_t g_eligibility[] = {
     {"ingress_compress_enabled", 1},
     {"ingress_cache_placement_enabled", 0},
     {"ingress_compress_min_chars", 0},
+    {"delegates_enabled", 0},
+    {"prompt_manager_block_enabled", 0},
+    {"prompt_manager_review_enabled", 0},
     {"gateway_prevent_subagents", 1},
     {"gateway_pin_model", 1},
     {"ingress_preinject_assembly_budget", 0},
@@ -72,7 +75,6 @@ static const elig_row_t g_eligibility[] = {
     {"require_aimee_memory", 1},
     {"require_aimee_git", 1},
     {"subagent_ban_enabled", 1},
-    {"delegate_sandbox", 0},
     {"delegate_sandbox_package_access", 0},
     {"delegate_sandbox_require_isolation", 1},
     {"delegate_sandbox_learn_packages", 1},
@@ -178,6 +180,10 @@ static const elig_row_t g_eligibility[] = {
     {"reasoning_cap_enabled", 0},
     {"dedup_enabled", 0},
     {"cache_shaping_enabled", 0},
+    /* Nested under an "extended_thinking" object, so bespoke like cache_shaping
+     * above rather than a table-drivable flat scalar. The companion
+     * budget_tokens key is gone: the shape it fed was removed by Anthropic. */
+    {"extended_thinking_enabled", 0},
     {"ingress_usage_accounting_enabled", 0},
     {"ingress_audit_async", 0},
     {"ingress_trusted_proxy_secret", 0},

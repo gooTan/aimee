@@ -11,6 +11,7 @@
 #include "cli_client.h"
 #include "platform_path.h"
 #include "cJSON.h"
+#include "server.h" /* SHTTP_MAX_BODY: the cap the CLI mirrors */
 
 #define V1_PROTOCOL_VERSION 1
 
@@ -20,6 +21,8 @@
 #include "../cli_v1_routes_b.c"
 #include "../cli_v1_routes_c.c"
 #include "../cli_v1_routes_d.c"
+#include "../cli_v1_routes_e.c"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
 static void test_delegate_max_turns_marshaled(void)
 {
@@ -343,7 +346,8 @@ static void test_delegate_roundtable_invalid_brief_json_exits(void)
  * test_delegate_context_file_folded_into_prompt for the roundtable path. */
 static void test_delegate_roundtable_context_file_folded_into_prompt(void)
 {
-   char path[] = "/tmp/aimee_rt_ctx_test_XXXXXX";
+   char path[256];
+   snprintf(path, sizeof path, "%s/aimee_rt_ctx_test_XXXXXX", platform_tmpdir());
    int fd = mkstemp(path);
    assert(fd >= 0);
    const char *marker = "ROUNDTABLE_PRELOAD_MARKER_77 review_block_body";
@@ -452,7 +456,8 @@ static void test_roundtable_stdin_is_authoritative_artifact(void)
 
 static void test_roundtable_path_is_read_not_forwarded(void)
 {
-   char path[] = "/tmp/aimee_rt_artifact_test_XXXXXX";
+   char path[256];
+   snprintf(path, sizeof path, "%s/aimee_rt_artifact_test_XXXXXX", platform_tmpdir());
    int fd = mkstemp(path);
    assert(fd >= 0);
    const char *artifact = "diff --git a/ONLY1828 b/ONLY1828\n+exact bytes\n";
@@ -654,23 +659,23 @@ static void test_provider_routes_and_marshaling(void)
    printf("  PASS: test_provider_routes_and_marshaling\n");
 }
 
-static void test_model_routes_and_marshaling(void)
+static void test_catalog_routes_and_marshaling(void)
 {
    cli_v1_route_t route;
 
    char *show_lookup[] = {"show", "openrouter:anthropic/claude-opus-4.6"};
-   assert(cli_v1_lookup("model", 2, show_lookup, &route));
-   assert(strcmp(route.method, "model.show") == 0);
+   assert(cli_v1_lookup("catalog", 2, show_lookup, &route));
+   assert(strcmp(route.method, "catalog.show") == 0);
    assert(route.skip_subcmd == 1);
 
    char *list_lookup[] = {"list", "--capability", "vision"};
-   assert(cli_v1_lookup("model", 3, list_lookup, &route));
-   assert(strcmp(route.method, "model.list") == 0);
+   assert(cli_v1_lookup("catalog", 3, list_lookup, &route));
+   assert(strcmp(route.method, "catalog.list") == 0);
    assert(route.skip_subcmd == 1);
 
    cJSON *req = marshal_model_show(1, &show_lookup[1]);
    assert(req != NULL);
-   assert(strcmp(cJSON_GetObjectItem(req, "method")->valuestring, "model.show") == 0);
+   assert(strcmp(cJSON_GetObjectItem(req, "method")->valuestring, "catalog.show") == 0);
    assert(strcmp(cJSON_GetObjectItem(req, "name")->valuestring,
                  "openrouter:anthropic/claude-opus-4.6") == 0);
    assert(strcmp(cJSON_GetObjectItem(req, "provider")->valuestring, "openrouter") == 0);
@@ -680,7 +685,7 @@ static void test_model_routes_and_marshaling(void)
    char *list_argv[] = {"--capability", "vision", "--json", "--open-weights"};
    req = marshal_model_list(4, list_argv);
    assert(req != NULL);
-   assert(strcmp(cJSON_GetObjectItem(req, "method")->valuestring, "model.list") == 0);
+   assert(strcmp(cJSON_GetObjectItem(req, "method")->valuestring, "catalog.list") == 0);
    assert(strcmp(cJSON_GetObjectItem(req, "capability")->valuestring, "vision") == 0);
    assert(cJSON_IsTrue(cJSON_GetObjectItem(req, "json")));
    assert(cJSON_IsTrue(cJSON_GetObjectItem(req, "open_weights_only")));
@@ -689,13 +694,13 @@ static void test_model_routes_and_marshaling(void)
    char *show_argv[] = {"openai:gpt-4o"};
    req = marshal_model_show(1, show_argv);
    assert(req != NULL);
-   assert(strcmp(cJSON_GetObjectItem(req, "method")->valuestring, "model.show") == 0);
+   assert(strcmp(cJSON_GetObjectItem(req, "method")->valuestring, "catalog.show") == 0);
    assert(strcmp(cJSON_GetObjectItem(req, "name")->valuestring, "openai:gpt-4o") == 0);
    assert(strcmp(cJSON_GetObjectItem(req, "provider")->valuestring, "openai") == 0);
    assert(strcmp(cJSON_GetObjectItem(req, "model")->valuestring, "gpt-4o") == 0);
    cJSON_Delete(req);
 
-   printf("  PASS: test_model_routes_and_marshaling\n");
+   printf("  PASS: test_catalog_routes_and_marshaling\n");
 }
 
 static void test_memory_show_alias_route(void)
@@ -833,6 +838,36 @@ static void test_server_status_route_lookup(void)
    printf("  PASS: test_server_status_route_lookup\n");
 }
 
+/* Asking for a review and not getting one must not look like approval.
+ *
+ * Measured against a real aimee-server with the roundtable module attached: a
+ * review with no saved roundtable came back status=pending,
+ * pause_reason=panel_unreachable, artifact="" -- and `aimee roundtable review`
+ * printed zero bytes and exited 0. A pre-merge hook, CI job or agent gating on
+ * that exit code would have read "no review happened" as "the panel approved
+ * it", which is the one conclusion it must never draw. */
+static void test_roundtable_review_without_an_artifact_is_a_failure(void)
+{
+   cJSON *resp = cJSON_CreateObject();
+   cJSON_AddStringToObject(resp, "status", "pending");
+   cJSON_AddStringToObject(resp, "pause_reason", "panel_unreachable");
+   cJSON_AddStringToObject(resp, "artifact", "");
+   assert(roundtable_review_response_is_failure(resp) == 1);
+
+   /* An actual review is a success, whatever else the envelope carries. */
+   cJSON_ReplaceItemInObject(resp, "artifact", cJSON_CreateString("## Findings\n- one"));
+   assert(roundtable_review_response_is_failure(resp) == 0);
+
+   /* A missing artifact field is the same as an empty one: no review. */
+   cJSON_DeleteItemFromObject(resp, "artifact");
+   assert(roundtable_review_response_is_failure(resp) == 1);
+   cJSON_Delete(resp);
+
+   /* No response at all cannot be an approval either. */
+   assert(roundtable_review_response_is_failure(NULL) == 1);
+   printf("  PASS: a review without an artifact fails\n");
+}
+
 static void test_agent_probe_failure_controls_exit_status(void)
 {
    cJSON *resp = cJSON_CreateObject();
@@ -857,8 +892,10 @@ static void test_agent_probe_failure_controls_exit_status(void)
 static void test_kb_docs_push_route_and_marshal(void)
 {
    cli_v1_route_t route;
-   char path1[] = "/tmp/aimee-cli-doc-one-XXXXXX";
-   char path2[] = "/tmp/aimee-cli-doc-two-XXXXXX";
+   char path1[256];
+   snprintf(path1, sizeof path1, "%s/aimee-cli-doc-one-XXXXXX", platform_tmpdir());
+   char path2[256];
+   snprintf(path2, sizeof path2, "%s/aimee-cli-doc-two-XXXXXX", platform_tmpdir());
    int fd1 = mkstemp(path1), fd2 = mkstemp(path2);
    assert(fd1 >= 0 && fd2 >= 0);
    assert(write(fd1, "alpha doc\n", 10) == 10);
@@ -998,6 +1035,54 @@ static void test_git_verify_marshaled_with_session_id(void)
       unsetenv("AIMEE_SESSION_ID");
 
    printf("  PASS: test_git_verify_marshaled_with_session_id\n");
+}
+
+/* An explicit path= must actually reach the server.
+ *
+ * cJSON permits duplicate keys and cJSON_GetObjectItemCaseSensitive returns the
+ * FIRST match. path=<cwd> was added before the caller's arguments were parsed, so
+ * `aimee git verify path=<repo>` produced two "path" entries and the server read
+ * the cwd every time. Measured: verify resolved /var/lib (the shell's directory)
+ * while explicitly told path=/repo. The error message's own advice to pass path
+ * was therefore impossible to act on.
+ *
+ * Assert the value the server will actually read, and that exactly one exists. */
+static int count_keys(cJSON *obj, const char *key)
+{
+   int n = 0;
+   for (cJSON *it = obj ? obj->child : NULL; it; it = it->next)
+      if (it->string && strcmp(it->string, key) == 0)
+         n++;
+   return n;
+}
+
+static void test_git_verify_explicit_path_wins_over_cwd(void)
+{
+   char path_arg[] = "path=/tmp/some-other-repo";
+   char *argv[] = {path_arg};
+   cJSON *req = marshal_git_verify(1, argv);
+   assert(req != NULL);
+   cJSON *args = cJSON_GetObjectItem(req, "arguments");
+   assert(cJSON_IsObject(args));
+
+   assert(count_keys(args, "path") == 1);
+   cJSON *p = cJSON_GetObjectItemCaseSensitive(args, "path");
+   assert(cJSON_IsString(p));
+   assert(strcmp(p->valuestring, "/tmp/some-other-repo") == 0);
+   cJSON_Delete(req);
+
+   /* With no path given, the cwd is still the default. */
+   char async_arg2[] = "--async=false";
+   char *argv2[] = {async_arg2};
+   req = marshal_git_verify(1, argv2);
+   assert(req != NULL);
+   args = cJSON_GetObjectItem(req, "arguments");
+   assert(count_keys(args, "path") == 1);
+   p = cJSON_GetObjectItemCaseSensitive(args, "path");
+   assert(cJSON_IsString(p) && p->valuestring[0] == '/');
+   cJSON_Delete(req);
+
+   printf("  PASS: test_git_verify_explicit_path_wins_over_cwd\n");
 }
 
 static void test_get_help_route_marshaled(void)
@@ -1498,7 +1583,8 @@ static void test_insights_text_output(void)
    cJSON_AddNumberToObject(resp, "estimated_cost_usd", 0.25);
    cJSON_AddItemToObject(resp, "models", cJSON_CreateArray());
 
-   char path[] = "/tmp/aimee-insights-output-XXXXXX";
+   char path[256];
+   snprintf(path, sizeof path, "%s/aimee-insights-output-XXXXXX", platform_tmpdir());
    int fd = mkstemp(path);
    assert(fd >= 0);
    int old_stdout = dup(STDOUT_FILENO);
@@ -1637,7 +1723,8 @@ static void test_client_endpoint_selection(void)
    unsetenv("AIMEE_API_ENDPOINT");
    unsetenv("AIMEE_API_BEARER");
 
-   char home[] = "/tmp/aimee-rpce-XXXXXX";
+   char home[256];
+   snprintf(home, sizeof home, "%s/aimee-rpce-XXXXXX", platform_tmpdir());
    assert(mkdtemp(home) != NULL);
    setenv("AIMEE_HOME", home, 1);
    unsetenv("AIMEE_PROFILE");
@@ -1692,7 +1779,8 @@ static void test_client_endpoint_selection(void)
  * the bug where these advertised flags were silently dropped. */
 static void test_delegate_context_file_folded_into_prompt(void)
 {
-   char path[] = "/tmp/aimee_ctx_test_XXXXXX";
+   char path[256];
+   snprintf(path, sizeof path, "%s/aimee_ctx_test_XXXXXX", platform_tmpdir());
    int fd = mkstemp(path);
    assert(fd >= 0);
    const char *marker = "UNIQUE_PRELOAD_MARKER_42 token_normalize_xyz";
@@ -1819,8 +1907,10 @@ static void grant_render(const char *method, const char *json, char *out, size_t
    cJSON *resp = cJSON_Parse(json);
    assert(resp != NULL);
 
-   char opath[] = "/tmp/aimee-grant-out-XXXXXX";
-   char epath[] = "/tmp/aimee-grant-err-XXXXXX";
+   char opath[256];
+   snprintf(opath, sizeof opath, "%s/aimee-grant-out-XXXXXX", platform_tmpdir());
+   char epath[256];
+   snprintf(epath, sizeof epath, "%s/aimee-grant-err-XXXXXX", platform_tmpdir());
    int ofd = mkstemp(opath), efd = mkstemp(epath);
    assert(ofd >= 0 && efd >= 0);
    int old_out = dup(STDOUT_FILENO), old_err = dup(STDERR_FILENO);
@@ -1996,8 +2086,21 @@ static void test_grant_show_shares_the_list_renderer(void)
    assert(strstr(out, "full") != NULL);
 }
 
+/* The CLI refuses an oversized /v1 body itself, because the listener drops one
+ * before parsing and the client could otherwise only report it as "could not
+ * reach the endpoint" -- blaming a server that is up and answering. That refusal
+ * is only correct while the mirrored cap equals the server's real one. */
+static void test_cli_v1_body_cap_matches_server(void)
+{
+   assert(CLI_V1_MAX_BODY == SHTTP_MAX_BODY);
+   assert(CLI_V1_MAX_ROUNDTABLE_BODY == SHTTP_MAX_ROUNDTABLE_BODY);
+   printf("  cli_v1_body_cap_matches_server: ok (%d / %d)\n", (int)CLI_V1_MAX_BODY,
+          (int)CLI_V1_MAX_ROUNDTABLE_BODY);
+}
+
 int main(void)
 {
+   test_cli_v1_body_cap_matches_server();
    printf("test_cli_v1_delegate\n");
    test_remote_workspace_hidden_roots_are_rejected();
    test_json_error_envelopes_remain_structured();
@@ -2025,17 +2128,19 @@ int main(void)
    test_delegate_prompt_stdin_rejects_prompt_file();
    test_delegate_depth_requires_parent_env();
    test_provider_routes_and_marshaling();
-   test_model_routes_and_marshaling();
+   test_catalog_routes_and_marshaling();
    test_memory_show_alias_route();
    test_memory_stats_route();
    test_ordered_memory_commands_marshal_active_scope();
    test_memory_delete_and_supersede_routes();
    test_server_status_route_lookup();
    test_agent_probe_failure_controls_exit_status();
+   test_roundtable_review_without_an_artifact_is_a_failure();
    test_kb_docs_push_route_and_marshal();
    test_kb_remote_status_routes();
    test_git_verify_failure_detection();
    test_git_verify_marshaled_with_session_id();
+   test_git_verify_explicit_path_wins_over_cwd();
    test_get_help_route_marshaled();
    test_subcommand_json_flag_is_output_mode();
    test_grant_set_created_vs_changed_from_off();

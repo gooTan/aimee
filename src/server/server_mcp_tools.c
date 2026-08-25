@@ -220,10 +220,25 @@ int handle_mcp_tools_list(server_ctx_t *ctx, server_conn_t *conn, cJSON *req)
    {
       const char *profile = mcp_tool_profile_effective(NULL);
       int total = cJSON_GetArraySize(tools);
-      int removed = mcp_filter_tools_for_profile(tools, NULL);
+      /* The server owns the config read: the protocols module may not reach the
+       * config module directly, so the delegation state arrives as an argument. */
+      int removed = mcp_filter_tools_for_profile(tools, NULL, config_delegates_enabled());
       if (removed > 0)
          LOG_INFO("mcp-tools", "tools/list profile '%s': presenting %d tools (hid %d)", profile,
                   total - removed, removed);
+      /* Same choke point, different axis: the profile decides WHICH tools are
+       * presented, this decides how much prose each one carries. Off by default. */
+      if (mcp_tool_prose_lean())
+      {
+         char *before = cJSON_PrintUnformatted(tools);
+         int visited = mcp_compact_tool_prose(tools);
+         char *after = cJSON_PrintUnformatted(tools);
+         if (before && after)
+            LOG_INFO("mcp-tools", "tools/list prose lean: %d tools, %zu -> %zu bytes", visited,
+                     strlen(before), strlen(after));
+         free(before);
+         free(after);
+      }
    }
 
    cJSON_AddStringToObject(resp, "status", "ok");

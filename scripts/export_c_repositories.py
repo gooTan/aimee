@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize the versioned C core and module repositories from this tree.
+"""Materialize the versioned C core and language-specific module repositories.
 
 The monorepo remains a checked vendored mirror during the migration.  This
 export is deliberately fail-closed: it only writes into a new output directory,
@@ -28,6 +28,25 @@ INVENTORY = ROOT / "tests/baselines/modules/canonical-inventory.yaml"
 LOCK = ROOT / "dependencies/aimee-repositories.lock.json"
 CORE_VERSION_FILE = ROOT / "src/core/VERSION"
 REMOTE_ROOT = "https://github.com/RakuenSoftware"
+MODULE_ORIGIN_OVERRIDES = {
+    "config": "https://github.com/gooTan/aimee-module-config.git",
+    "delegates": "https://github.com/gooTan/aimee-module-delegates.git",
+    "git": "https://github.com/gooTan/aimee-module-git.git",
+    "protocols": "https://github.com/gooTan/aimee-module-protocols.git",
+    "workflows": "https://github.com/gooTan/aimee-module-workflows.git",
+    "roundtable": "https://github.com/gooTan/aimee-module-roundtable.git",
+    "vault": "https://github.com/gooTan/aimee-module-vault.git",
+}
+
+
+def module_remote(module_id: str) -> str:
+    override = MODULE_ORIGIN_OVERRIDES.get(module_id)
+    if override is not None:
+        return override
+    return f"{REMOTE_ROOT}/aimee-module-{module_id}.git"
+
+
+HOSTED_BY_EXECUTABLE = {"wfe": "/usr/local/bin/aimee-wfe"}
 PRINCIPAL_CLASS = 1
 
 
@@ -201,7 +220,8 @@ jobs:
 
 def module_owned_files(module_id: str, descriptor: dict[str, object]) -> list[str]:
     result = [f"src/modules/{module_id}/module.yaml"]
-    for key in ("sources", "private_headers", "public_headers", "tests", "docs"):
+    for key in ("sources", "private_headers", "public_headers", "tests", "docs",
+                "go_sources", "go_tests"):
         values = descriptor.get(key, [])
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
             raise ExportError(f"{module_id}: descriptor field {key} must be a string array")
@@ -257,6 +277,111 @@ int main(int argc, char **argv)
 """
 
 
+def go_module_main(module_id: str, principal_ref: int,
+                   stages: list[dict[str, object]]) -> str:
+    """Generate one independently buildable Go process entry point."""
+    entries = "\n".join(
+        f"\t\t{{EventKind: {stage['event_kind']}, StageID: {stage['id']}}},"
+        for stage in stages
+    )
+    handler = "handler.NewDefaultHandler()" if module_id == "delegates" else "handler.Handle"
+    watchdog = """\tif handled, code := handler.RunWatchdog(os.Args); handled {
+\t\tos.Exit(code)
+\t}
+""" if module_id == "delegates" else ""
+    return f"""package main
+
+import (
+\t"context"
+\t"fmt"
+\t"os"
+\t"os/signal"
+\t"syscall"
+
+\t"github.com/JBailes/aimee/server-go/bus"
+\thandler "github.com/JBailes/aimee/server-go/modules/{module_id}"
+)
+
+func main() {{
+{watchdog}\
+\tif len(os.Args) != 2 {{
+\t\tfmt.Fprintf(os.Stderr, "usage: %s DAEMON_MODULE_BUS_SOCKET\\n", os.Args[0])
+\t\tos.Exit(2)
+\t}}
+\tctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+\tdefer stop()
+\tconfig := bus.ModuleProcessConfig{{
+\t\tSocketPath: os.Args[1], ModuleName: "{module_id}",
+\t\tPrincipalClass: {PRINCIPAL_CLASS}, PrincipalRef: {principal_ref},
+\t\tStages: []bus.ModuleStage{{
+{entries}
+\t\t}},
+\t\tHandler: {handler},
+\t}}
+\tif err := bus.RunModuleProcess(ctx, config); err != nil {{
+\t\tfmt.Fprintf(os.Stderr, "aimee-module-{module_id}: %v\\n", err)
+\t\tos.Exit(1)
+\t}}
+}}
+"""
+
+
+def go_bus_sources(module_id: str | None = None) -> list[str]:
+    """Return the canonical, non-test Go bus implementation shared by exports."""
+    return sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "server-go/bus").glob("*.go")
+        if not path.name.endswith("_test.go") and
+        (path.name != "concurrent_module_caller.go" or module_id in {"delegates", "roundtable"})
+    )
+
+
+def go_process_shared_sources(module_id: str) -> list[str]:
+    """Return shared caller contracts needed by independently built Go modules.
+
+    ``server-go/delegate`` is intentionally outside any implementation module:
+    every module that calls delegates may import it. Add such module IDs here in
+    lockstep with their process contract and runtime-bundle coverage.
+    """
+    if module_id not in {"delegates", "roundtable"}:
+        return []
+    sources = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "server-go/delegate").glob("*.go")
+        if not path.name.endswith("_test.go")
+    ]
+    if module_id == "roundtable":
+        sources.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "server-go/modules/delegates").glob("*.go")
+            if not path.name.endswith("_test.go")
+        )
+        sources.extend(
+            [
+                "config/roundtables/default.json",
+                "config/roundtables/plan.json",
+                "config/roundtables/implementation.json",
+                "config/roundtables/documentation.json",
+            ]
+        )
+    if module_id == "delegates":
+        sources.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "server-go/modules/delegates/testdata").glob("*")
+            if path.is_file()
+        )
+    return sorted(sources)
+
+
+def go_xsys_version() -> str:
+    """Read the one external bus dependency from the canonical Go module."""
+    text = (ROOT / "server-go/go.mod").read_text(encoding="utf-8")
+    match = re.search(r"^\s*golang\.org/x/sys\s+(v\S+)\s*(?://.*)?$", text, re.MULTILINE)
+    if match is None:
+        raise ExportError("server-go/go.mod: missing golang.org/x/sys dependency")
+    return match.group(1)
+
+
 def export_module(
     output_root: Path,
     module_id: str,
@@ -279,15 +404,12 @@ def export_module(
     shutil.copy2(ROOT / "LICENSE", repository / "LICENSE")
     binary = f"aimee-module-{module_id}"
     execution = contract["execution"]
+    runtime = contract.get("runtime")
     if execution == "process":
         principal_ref = contract["principal_ref"]
         stages = contract["stages"]
         assert isinstance(principal_ref, int) and isinstance(stages, list)
         serve = ",".join(str(stage["event_kind"]) for stage in stages)
-        write_text(
-            repository / "runtime/main.c",
-            module_main(module_id, principal_ref, stages, has_handler),
-        )
         write_text(
             repository / "grants/module.grant.in",
             f"""version=1
@@ -301,9 +423,14 @@ request=
 serve={serve}
 """,
         )
-        write_text(
-            repository / "CMakeLists.txt",
-            f"""cmake_minimum_required(VERSION 3.16)
+        if runtime == "c":
+            write_text(
+                repository / "runtime/main.c",
+                module_main(module_id, principal_ref, stages, has_handler),
+            )
+            write_text(
+                repository / "CMakeLists.txt",
+                f"""cmake_minimum_required(VERSION 3.16)
 project(aimee_module_{module_id.replace('-', '_')} VERSION {version} LANGUAGES C)
 
 include(GNUInstallDirs)
@@ -320,37 +447,19 @@ install(TARGETS {binary} RUNTIME DESTINATION ${{CMAKE_INSTALL_BINDIR}})
 install(FILES ${{CMAKE_CURRENT_BINARY_DIR}}/{module_id}.grant
         DESTINATION ${{CMAKE_INSTALL_DATADIR}}/aimee/module-grants)
 """,
-        )
-        handler_text = (
-            "Its repository-owned handler implements the declared stage contract."
-            if has_handler
-            else "The boundary returns typed `capability_absent` until its repository-owned handler is ported; it never echoes a request or reports false success."
-        )
-        runtime_text = f"""It builds `{binary}` as a separate process for the
+            )
+            handler_text = (
+                "Its repository-owned handler implements the declared stage contract."
+                if has_handler
+                else "The boundary returns typed `capability_absent` until its "
+                     "repository-owned handler is ported; it never echoes a request or "
+                     "reports false success."
+            )
+            runtime_text = f"""It builds `{binary}` as a separate C process for the
 {', '.join(contract['placements'])} bus. Its generated grant serves exactly the
 declared stage event kinds. {handler_text}
-
-The daemon admits the process only when its installed absolute executable path,
-UID, principal class, principal reference, and event-kind grants match the
-installed `.grant` file. Copy that generated grant into each declared daemon
-policy directory under `modules.d`.
 """
-    else:
-        write_text(
-            repository / "CMakeLists.txt",
-            f"""cmake_minimum_required(VERSION 3.16)
-project(aimee_module_{module_id.replace('-', '_')} VERSION {version} LANGUAGES NONE)
-include(GNUInstallDirs)
-install(DIRECTORY src/ DESTINATION ${{CMAKE_INSTALL_DATADIR}}/aimee/sources/{module_id}/src)
-install(DIRECTORY docs/ DESTINATION ${{CMAKE_INSTALL_DATADIR}}/aimee/sources/{module_id}/docs)
-""",
-        )
-        runtime_text = """This component executes inside the trusted C core. It
-does not receive a bus principal, a process shim, or a grant. The repository is
-the independently versioned source owner consumed by the server/KB core build.
-"""
-    if execution == "process":
-        workflow = f"""name: module
+            workflow = f"""name: module
 on: [push, pull_request]
 permissions:
   contents: read
@@ -371,7 +480,104 @@ jobs:
       - run: cmake --build build --parallel 2
       - run: test -x build/{binary}
 """
+        elif runtime == "go":
+            go_sources = descriptor.get("go_sources", [])
+            if not isinstance(go_sources, list) or not go_sources:
+                raise ExportError(f"{module_id}: Go process has no go_sources")
+            bus_sources = go_bus_sources(module_id)
+            if not bus_sources:
+                raise ExportError("canonical Go bus has no production sources")
+            shared_sources = go_process_shared_sources(module_id)
+            for relative in bus_sources:
+                copy_file(relative, repository)
+            for relative in shared_sources:
+                copy_file(relative, repository)
+            shutil.copy2(ROOT / "server-go/go.sum", repository / "go.sum")
+            write_text(
+                repository / "go.mod",
+                f"""module github.com/JBailes/aimee
+
+go 1.25.0
+
+require golang.org/x/sys {go_xsys_version()}
+""",
+            )
+            write_text(
+                repository / "runtime/main.go",
+                go_module_main(module_id, principal_ref, stages),
+            )
+            cmake_dependencies = "\n".join(
+                f"        ${{CMAKE_CURRENT_SOURCE_DIR}}/{relative}"
+                for relative in ["runtime/main.go", *go_sources, *bus_sources, *shared_sources,
+                                 "go.mod", "go.sum"]
+            )
+            write_text(
+                repository / "CMakeLists.txt",
+                f"""cmake_minimum_required(VERSION 3.16)
+project(aimee_module_{module_id.replace('-', '_')} VERSION {version} LANGUAGES NONE)
+
+include(GNUInstallDirs)
+find_program(GO_EXECUTABLE NAMES go REQUIRED)
+set(MODULE_BINARY "${{CMAKE_CURRENT_BINARY_DIR}}/{binary}")
+add_custom_command(
+    OUTPUT "${{MODULE_BINARY}}"
+    COMMAND ${{CMAKE_COMMAND}} -E env CGO_ENABLED=0 ${{GO_EXECUTABLE}} build -trimpath
+            -o "${{MODULE_BINARY}}" ./runtime
+    WORKING_DIRECTORY "${{CMAKE_CURRENT_SOURCE_DIR}}"
+    DEPENDS
+{cmake_dependencies}
+    VERBATIM)
+add_custom_target({binary} ALL DEPENDS "${{MODULE_BINARY}}")
+configure_file(grants/module.grant.in ${{CMAKE_CURRENT_BINARY_DIR}}/{module_id}.grant @ONLY)
+install(PROGRAMS "${{MODULE_BINARY}}" DESTINATION ${{CMAKE_INSTALL_BINDIR}})
+install(FILES ${{CMAKE_CURRENT_BINARY_DIR}}/{module_id}.grant
+        DESTINATION ${{CMAKE_INSTALL_DATADIR}}/aimee/module-grants)
+""",
+            )
+            runtime_text = f"""It builds `{binary}` as a separate Go process for the
+{', '.join(contract['placements'])} bus. The exported repository includes the
+exact canonical Go bus client/runtime snapshot and its repository-owned handler;
+the retained C adapter is a wire-parity fixture, not the production executable.
+"""
+            workflow = f"""name: module
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - run: go test ./server-go/bus ./server-go/modules/{module_id}
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: test -x build/{binary}
+"""
+        else:
+            raise ExportError(f"{module_id}: unsupported process runtime {runtime!r}")
+        runtime_text += """
+The daemon admits the process only when its installed absolute executable path,
+UID, principal class, principal reference, and event-kind grants match the
+installed `.grant` file. Copy that generated grant into each declared daemon
+policy directory under `modules.d`.
+"""
     else:
+        write_text(
+            repository / "CMakeLists.txt",
+            f"""cmake_minimum_required(VERSION 3.16)
+project(aimee_module_{module_id.replace('-', '_')} VERSION {version} LANGUAGES NONE)
+include(GNUInstallDirs)
+install(DIRECTORY src/ DESTINATION ${{CMAKE_INSTALL_DATADIR}}/aimee/sources/{module_id}/src)
+install(DIRECTORY docs/ DESTINATION ${{CMAKE_INSTALL_DATADIR}}/aimee/sources/{module_id}/docs)
+""",
+        )
+        runtime_text = """This component executes inside the trusted C core. It
+does not receive a bus principal, a process shim, or a grant. The repository is
+the independently versioned source owner consumed by the server/KB core build.
+"""
         workflow = """name: source-package
 on: [push, pull_request]
 permissions:
@@ -404,6 +610,7 @@ preserved at their canonical paths so their migration history remains auditable.
         "module": module_id,
         "classification": classification,
         "execution": execution,
+        "runtime": runtime,
         "placements": contract["placements"],
         "principal_class": PRINCIPAL_CLASS if execution == "process" else None,
         "principal_ref": contract.get("principal_ref"),
@@ -412,7 +619,7 @@ preserved at their canonical paths so their migration history remains auditable.
         "owned_files": owned,
     }
     write_text(repository / "SOURCE_MANIFEST.json", json.dumps(manifest, indent=2) + "\n")
-    remote = f"{REMOTE_ROOT}/aimee-module-{module_id}.git"
+    remote = module_remote(module_id)
     commit = initialize_repository(repository, remote, timestamp, version)
     pin = {
         "id": module_id,
@@ -426,6 +633,7 @@ preserved at their canonical paths so their migration history remains auditable.
         "source_sha256": manifest["source_sha256"],
     }
     if execution == "process":
+        pin["runtime"] = contract["runtime"]
         pin["principal_class"] = PRINCIPAL_CLASS
         pin["principal_ref"] = contract["principal_ref"]
         pin["serve"] = [stage["event_kind"] for stage in contract["stages"]]
@@ -441,6 +649,8 @@ def export_runtime_bundle(output_root: Path) -> int:
     required = set(inventory.get("required", []))
     contracts = process_contracts.validate()
     placement_rows: dict[str, list[str]] = {"server": [], "kb": []}
+    runtimes: dict[str, str] = {}
+    go_modules: list[str] = []
     count = 0
     for module_id, contract in contracts.items():
         if contract["execution"] != "process":
@@ -454,16 +664,31 @@ def export_runtime_bundle(output_root: Path) -> int:
         stages = contract["stages"]
         assert isinstance(principal_ref, int) and isinstance(stages, list)
         binary = f"aimee-module-{module_id}"
-        generated = module_main(module_id, principal_ref, stages, has_handler)
-        if has_handler:
-            generated += "\n" + (ROOT / adapter_source).read_text(encoding="utf-8")
-        write_text(output_root / "src" / f"{binary}.c", generated)
+        # The grant pins the exact executable that may attach as this principal.
+        # An externally hosted process is a different program at a different path.
+        hosted_by = contract.get("hosted_by")
+        executable = (HOSTED_BY_EXECUTABLE[hosted_by] if hosted_by
+                      else f"/usr/local/libexec/aimee-modules/{binary}")
+        runtime = contract["runtime"]
+        assert isinstance(runtime, str)
+        runtimes[module_id] = runtime
+        if runtime == "c":
+            generated = module_main(module_id, principal_ref, stages, has_handler)
+            if has_handler:
+                generated += "\n" + (ROOT / adapter_source).read_text(encoding="utf-8")
+            write_text(output_root / "src" / f"{binary}.c", generated)
+        else:
+            go_sources = descriptor.get("go_sources", [])
+            if not isinstance(go_sources, list) or not go_sources:
+                raise ExportError(f"{module_id}: Go process has no go_sources")
+            if hosted_by is None:
+                go_modules.append(module_id)
         serve = ",".join(str(stage["event_kind"]) for stage in stages)
         grant = f"""version=1
 principal_class={PRINCIPAL_CLASS}
 principal_ref={principal_ref}
 uid=self
-executable=/usr/local/libexec/aimee-modules/{binary}
+executable={executable}
 publish=
 subscribe=
 request=
@@ -471,16 +696,37 @@ serve={serve}
 """
         for placement in contract["placements"]:
             write_text(output_root / "grants" / placement / f"{module_id}.grant", grant)
-            if enabled:
-                placement_rows[placement].append(f"{module_id}\t/usr/local/libexec/aimee-modules/{binary}")
+            # A process hosted by an already-supervised program is never spawned by
+            # the module supervisor. Listing it would start a second holder of the
+            # principal, and the bus denies a live duplicate.
+            if enabled and hosted_by is None:
+                placement_rows[placement].append(f"{module_id}\t{executable}")
         count += 1
+    # Bus clients request stages but serve none, so they get a grant and no
+    # manifest row: nothing supervises them, they are already running.
+    contract_doc = load_json(process_contracts.CONTRACTS)
+    for client in contract_doc.get("clients", []):
+        request = ",".join(str(kind) for kind in client["request"])
+        client_grant = f"""version=1
+principal_class={PRINCIPAL_CLASS}
+principal_ref={client["principal_ref"]}
+uid=self
+executable={client["executable"]}
+publish=
+subscribe=
+request={request}
+serve=
+"""
+        for placement in client["placements"]:
+            write_text(output_root / "grants" / placement / f"{client['id']}.grant", client_grant)
     for placement, rows in placement_rows.items():
         write_text(output_root / f"{placement}.modules", "\n".join(rows) + "\n")
+    write_text(output_root / "go.modules", "\n".join(go_modules) + "\n")
     write_text(
         output_root / "MANIFEST.json",
         json.dumps(
             {"schema_version": 1, "contracts": str(process_contracts.CONTRACTS.relative_to(ROOT)),
-             "process_count": count, "placements": placement_rows},
+             "process_count": count, "runtimes": runtimes, "placements": placement_rows},
             indent=2,
         ) + "\n",
     )
@@ -563,7 +809,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.runtime_bundle is not None:
             count = export_runtime_bundle(output_root)
-            print(f"export_c_repositories: wrote {count} process adapters to {output_root}")
+            print(f"export_c_repositories: wrote runtime bundle for {count} processes to "
+                  f"{output_root}")
             return 0
         if output_root.exists():
             raise ExportError(f"refusing to overwrite existing output root: {output_root}")

@@ -59,3 +59,49 @@ Keep one purpose per PR. Include:
 - security and failure behavior when the change crosses a trust boundary.
 
 Do not include generated artifacts without their source change.
+
+### The public-surface baseline gates `main`, not `testing`
+
+`tests/baselines/refactor/index.json` is a digest of the PUBLIC surface: 370
+public headers, the routes, the schemas, the CLI help. Asking "did the public
+surface change, and did you mean it?" is a release question, so it is enforced
+on pull requests into `main` and not on the integration branch.
+
+On `testing` it was answering a question nobody asked. A branch whose job is to
+absorb in-flight work touches public headers constantly, so every PR re-froze
+the digest, and any two concurrent PRs then collided on the same regenerated
+lines. It cost nineteen rebases in one migration and surfaced no real change to
+the surface in any of them.
+
+So on `testing`: do not re-freeze it. `make -C src lint` no longer asks you to,
+and CI now REFUSES a pull request into `testing` that changes the baseline. If
+you have already re-frozen it, revert that one file and push again:
+
+    git checkout origin/testing -- tests/baselines/refactor/index.json
+
+Adding or changing a public header does NOT require a re-freeze. The baseline is
+expected to be stale on `testing`; that is what makes the promotion diff worth
+reading.
+
+When promoting `testing` into `main`:
+
+    make -C src refactor-baseline-check              # what changed on the surface?
+    python3 -I -S scripts/refactor_baselines.py freeze
+
+That diff is the point. One review of everything a release changes on the public
+surface beats a mechanical re-freeze per PR that nobody reads.
+
+If you do hit a conflict in a generated baseline anyway, do not merge two
+digests by hand. Take either side and re-derive it:
+
+    git checkout --theirs -- tests/baselines/refactor/index.json
+    python3 -I -S scripts/refactor_baselines.py freeze --accept-dirty
+    git add tests/baselines/refactor/index.json && git rebase --continue
+
+Do NOT reach for a git merge driver here, however tempting. A driver runs DURING
+the merge, before git has necessarily written every merged file, so a whole-tree
+digest computed there is computed against a half-written tree. Measured: with a
+driver configured the rebase completed CLEAN and produced a baseline that did
+not match the tree, where the same rebase without it conflicted loudly. A quiet
+mismatch is worse than a conflict, so regenerate after the merge, when the tree
+is final.

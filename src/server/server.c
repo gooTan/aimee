@@ -29,8 +29,6 @@
 #include <aimee/delegates/delegate_backend_docker.h>
 #include "modules/workspace/workspace_provider.h" /* the shared provider: probe docker for the sandbox posture */
 #include "modules/workspace/workspace_turn.h" /* the ONE workspace bound, shared with the delegate turn */
-#include <aimee/delegates/delegate_backend_local.h>
-#include <aimee/delegates/delegate_backend_ssh.h>
 #include "server_delegate_monitor.h"
 #include "server_coord_dispatcher.h"
 #include "server_skill.h"
@@ -1412,29 +1410,29 @@ static const server_method_dispatch_t server_dispatch_table[] = {
     {"provider.quota", handle_provider_quota},
     {"provider.get", handle_provider_get},
     {"provider.set", handle_provider_set},
-    {"model.list", handle_model_list},
-    {"model.show", handle_model_show},
-    {"model.refresh", handle_model_refresh},
+    {"catalog.list", handle_model_list},
+    {"catalog.show", handle_model_show},
+    {"catalog.refresh", handle_model_refresh},
     {"init.run", handle_init_run},
     {"launch.run", handle_launch_run},
     {"hud.status", handle_hud_status},
-    {"agent.list", handle_agent_list},
-    {"agent.add", handle_agent_add},
-    {"agent.local", handle_agent_local},
-    {"agent.remove", handle_agent_remove},
-    {"agent.enable", handle_agent_enable},
-    {"agent.roles", handle_agent_roles},
-    {"agent.personas", handle_agent_personas},
-    {"agent.set", handle_agent_set},
-    {"agent.disable", handle_agent_disable},
-    {"agent.probe", handle_agent_probe},
-    {"agent.stats", handle_agent_stats},
-    {"agent.draft", handle_agent_draft},
-    {"agent.setup", handle_agent_setup},
-    {"agent.setup_poll", handle_agent_setup_poll},
-    {"agent.cli_oauth_start", handle_agent_cli_oauth_start},
-    {"agent.cli_oauth_code", handle_agent_cli_oauth_code},
-    {"agent.cli_oauth_poll", handle_agent_cli_oauth_poll},
+    {"model.list", handle_agent_list},
+    {"model.add", handle_agent_add},
+    {"model.local", handle_agent_local},
+    {"model.remove", handle_agent_remove},
+    {"model.enable", handle_agent_enable},
+    {"model.roles", handle_agent_roles},
+    {"model.personas", handle_agent_personas},
+    {"model.set", handle_agent_set},
+    {"model.disable", handle_agent_disable},
+    {"model.probe", handle_agent_probe},
+    {"model.stats", handle_agent_stats},
+    {"model.draft", handle_agent_draft},
+    {"model.setup", handle_agent_setup},
+    {"model.setup_poll", handle_agent_setup_poll},
+    {"model.cli_oauth_start", handle_agent_cli_oauth_start},
+    {"model.cli_oauth_code", handle_agent_cli_oauth_code},
+    {"model.cli_oauth_poll", handle_agent_cli_oauth_poll},
     {"hooks.pre", handle_hooks_pre},
     {"hooks.post", handle_hooks_post},
     {"hooks.session_start", handle_hooks_session_start},
@@ -1469,6 +1467,9 @@ static const server_method_dispatch_t server_dispatch_table[] = {
     {"index.list", handle_index_list},
     {"index.blast_radius", handle_index_blast_radius},
     {"index.structure", handle_index_structure},
+    {"index.span", handle_index_span},
+    {"index.investigate", handle_index_investigate},
+    {"index.hybrid", handle_index_hybrid},
     {"index.find_callers", handle_index_find_callers},
     {"index.deps", handle_index_deps},
     {"graph.sync_code", handle_graph_sync_code},
@@ -1577,10 +1578,12 @@ static const server_method_dispatch_t server_dispatch_table[] = {
      * rh_dispatch_op_async. Direct raw dispatch remains synchronous for
      * compatibility with the dispatch-method surface. */
     {"delegate.aggregate", handle_delegate_aggregate},
-    {"roundtable.review", handle_roundtable_review_proxy},
+    {"roundtable.review", handle_roundtable_review},
     {"dev.sweep", handle_dev_sweep},
     {"delegate.launch", handle_delegate_launch},
     {"delegate.status", handle_delegate_status},
+    {"delegate.reservation.forget", handle_delegate_reservation_forget},
+    {"delegate.cancel_unassigned", handle_delegate_cancel_unassigned},
     {"vault.unlock", handle_vault_unlock},
     {"vault.rekey", handle_vault_rekey},
     {"vault.set", handle_vault_set},
@@ -1604,6 +1607,7 @@ static const server_method_dispatch_t server_dispatch_table[] = {
     {"aux.config_show", handle_aux_config_show},
     {"config.show", handle_config_show},
     {"config.get", handle_config_get},
+    {"config.deploy_env", handle_config_deploy_env},
     {"config.set", handle_config_set},
     {"pipeline.start", handle_pipeline_start},
     {"pipeline.status", handle_pipeline_status},
@@ -1616,7 +1620,7 @@ static const server_method_dispatch_t server_dispatch_table[] = {
     {"delegate.reply", handle_delegate_reply},
     {"delegate.log", handle_delegate_log},
     {"episode.list", handle_episode_list},
-    {"agent.episodes", handle_agent_episodes},
+    {"model.episodes", handle_agent_episodes},
     {"chat.send_stream", handle_chat_send_stream},
     /* MCP proxy */
     {"mcp.tools_list", handle_mcp_tools_list},
@@ -2034,20 +2038,12 @@ static int server_shell_git_blocked(const char *command, const char *cwd)
  * prevent. An operator must not have to read the code to learn that. */
 static void delegate_sandbox_log_posture(void)
 {
-   int dial_on = config_present() && config_delegate_sandbox();
-   if (!dial_on)
-   {
-      aimee_log(LOG_INFO, "delegate-sandbox",
-                "OFF: delegate_sandbox=false — a delegate's shell and file ops run IN-PROCESS "
-                "inside aimee-server, with the server's filesystem and environment");
-      return;
-   }
    delegate_backend_t *b = delegate_backend_lookup("docker");
    if (!b || !b->acquire)
    {
       aimee_log(LOG_ERROR, "delegate-sandbox",
-                "INERT: delegate_sandbox is ON but the docker backend is not registered — every "
-                "delegate will run on the HOST while appearing sandboxed");
+                "UNAVAILABLE: the docker backend is not registered — no delegate can be given a "
+                "container, so every delegation will REFUSE to run");
       return;
    }
 
@@ -2067,9 +2063,8 @@ static void delegate_sandbox_log_posture(void)
    if (rc != 0)
    {
       aimee_log(LOG_ERROR, "delegate-sandbox",
-                "INERT: delegate_sandbox is ON and the docker backend is registered, but `%s "
-                "version` failed (rc=%d) — no daemon reachable, so every delegate will run on "
-                "the HOST while appearing sandboxed",
+                "UNAVAILABLE: the docker backend is registered, but `%s version` failed (rc=%d) — "
+                "no daemon reachable, so every delegation will REFUSE to run",
                 bin, rc);
       free(ver);
       return;
@@ -2309,10 +2304,6 @@ int server_init(server_ctx_t *ctx, const char *socket_path)
     * to register is non-fatal: the legacy local-exec path keeps
     * working, callers that explicitly opt into the new dispatcher
     * just won't find a backend. */
-   if (delegate_backend_register_local() != 0)
-      LOG_WARN("server", "delegate_backend_register_local failed (already registered?)");
-   if (delegate_backend_register_ssh() != 0)
-      LOG_WARN("server", "delegate_backend_register_ssh failed (already registered?)");
    if (delegate_backend_register_docker() != 0)
       LOG_WARN("server", "delegate_backend_register_docker failed (already registered?)");
    /* Log what's actually in the registry so operators can confirm

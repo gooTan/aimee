@@ -60,6 +60,10 @@ void aimee_ir_apply_request_stages(aimee_request_t *ir, int memory_enabled)
     * stay on gw_memory_system_prompt until agent_execute itself moves onto the IR. */
    const aimee_ir_transform_t stages[] = {
        {"memory", ir_stage_memory, NULL, memory_enabled},
+       /* Runs AFTER memory, so the opening turn already carries the guidance that
+        * names what replaces the shell it is about to lose. Always on: an agent
+        * that never reaches aimee's tools is not using aimee. */
+       {"first_turn_shell_block", ir_stage_first_turn_shell_block, NULL, 1},
    };
    aimee_ir_run_transforms(ir, stages, sizeof stages / sizeof stages[0]);
 }
@@ -335,6 +339,9 @@ void aimee_ir_response_to_parsed(const aimee_response_t *r, parsed_response_t *o
          snprintf(c->id, sizeof(c->id), "%s", b->tool_id);
       if (b->tool_name)
          snprintf(c->name, sizeof(c->name), "%s", b->tool_name);
+      /* Carried with the name: a namespaced call is only routable as the pair. */
+      if (b->tool_namespace)
+         snprintf(c->tool_namespace, sizeof(c->tool_namespace), "%s", b->tool_namespace);
       c->arguments = b->tool_input ? cJSON_PrintUnformatted(b->tool_input) : NULL;
       if (!c->arguments)
          c->arguments = strdup("{}");

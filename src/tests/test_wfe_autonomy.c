@@ -12,8 +12,11 @@
 #include "wfe_autonomy.h"
 #include "wfe_blocks.h"
 #include "wfe_engine.h"
+
+#include "support/module_bus_stub.h"
 #include "wfe_iface.h"
 #include "wfe_roundtable.h"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
 /* plain human gate — inviolable: autonomous mode parks at it, never auto-satisfies */
 static const char *AUTO = "name: auto\n"
@@ -126,7 +129,8 @@ static void write_wf(const char *dir, const char *name, const char *body)
 int main(void)
 {
    printf("wfe-autonomy: ");
-   char d[] = "/tmp/wfe_auto_XXXXXX";
+   char d[256];
+   snprintf(d, sizeof d, "%s/wfe_auto_XXXXXX", platform_tmpdir());
    char *dir = wfe_test_mkdtemp(d);
    assert(dir);
    char wf[128];
@@ -331,17 +335,22 @@ int main(void)
       assert(wfe_work_item_create("rta", "a10", "a10", "autonomous", id, err, sizeof err) == 0);
       db1_work_item_t wi;
       /* run 1: initial convene -> degraded -> parks panel_degraded (no retry yet). */
+      module_bus_stub_reply(
+          "{\"decision\":\"degraded\",\"reason\":\"panel could not be composed\"}");
       assert(wfe_autonomy_run(id, err, sizeof err) == 0);
       assert(db1_work_item_get(id, &wi) == 1);
       assert(strcmp(wi.pause_reason, "panel_degraded") == 0);
       assert(g_stub_panel_calls == 1);
       /* run 2: retry #1 -> convene #2 -> still degraded -> re-parks. */
+      module_bus_stub_reply(
+          "{\"decision\":\"degraded\",\"reason\":\"panel could not be composed\"}");
       assert(wfe_autonomy_run(id, err, sizeof err) == 0);
       assert(db1_work_item_get(id, &wi) == 1);
       assert(strcmp(wi.pause_reason, "panel_degraded") == 0);
       assert(g_stub_panel_calls == 2);
       /* run 3: retry #2 -> convene #3 -> APPROVE -> advances past the gate. The
        * convene count reaching 3 proves the pause-clear actually RE-RAN the node. */
+      module_bus_stub_reply("{\"decision\":\"approve\",\"reason\":\"panel approved\"}");
       assert(wfe_autonomy_run(id, err, sizeof err) == 0);
       assert(g_stub_panel_calls == 3);
       assert(db1_work_item_get(id, &wi) == 1);
@@ -361,6 +370,8 @@ int main(void)
    {
       g_stub_panel_calls = 0;
       g_stub_degrade_calls = ALWAYS_DEGRADE; /* always degrade */
+      module_bus_stub_reply(
+          "{\"decision\":\"degraded\",\"reason\":\"panel could not be composed\"}");
       g_stub_return_unreachable = 0;
       wfe_set_panel_provider(stub_panel);
       setenv("AIMEE_AUTONOMY_PANEL_RETRIES", "2", 1);

@@ -1,10 +1,11 @@
 package api
 
 import (
+	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -15,14 +16,22 @@ import (
 
 func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Proposal string `json:"proposal_md"`
-		Workflow string `json:"workflow"`
-		Repo     string `json:"repo"`
+		Proposal   string `json:"proposal_md"`
+		Workflow   string `json:"workflow"`
+		Repo       string `json:"repo"`
+		SourcePath string `json:"source_path"`
+		// DelegateAliases reseats pinned workflow delegates for this run only
+		// (for example {"fable":"sol"} to plan on sol). Stored as the run's
+		// config artifact; the engine applies it at every dispatch.
+		DelegateAliases map[string]string `json:"delegate_aliases,omitempty"`
 	}
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
+	decoder := jsonDecoder(r.Body)
 	if err := decoder.Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, http.StatusBadRequest, errors.New("request must contain one JSON value"))
 		return
 	}
 	if strings.TrimSpace(request.Proposal) == "" || request.Repo == "" {
@@ -37,6 +46,11 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	sourcePath, err := validateManualProposalSource(r.Context(), repo, request.SourcePath, request.Proposal)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(idempotencyKey) > 128 {
 		writeError(w, http.StatusBadRequest, errors.New("Idempotency-Key is too long"))
@@ -44,7 +58,11 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	identity := ""
 	if idempotencyKey != "" {
-		identity = fmt.Sprintf("manual:%s:%s", wfe.Hash([]byte(idempotencyKey)), request.Workflow)
+		// Idempotency belongs to the authenticated submitter, not merely the repo.
+		// Otherwise two browser users choosing the same client key would cause the
+		// second request to return the first user's work-item ID and silently skip
+		// the second proposal.
+		identity = manualSubmissionIdentity(workflowPrincipal(r), idempotencyKey, request.Workflow)
 	}
 	if identity != "" {
 		if existing, findErr := s.db.WorkItemByProposal(r.Context(), repo, identity); findErr == nil {
@@ -88,13 +106,33 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if len(request.DelegateAliases) > 0 {
+		if len(request.DelegateAliases) > 8 {
+			writeError(w, http.StatusBadRequest, errors.New("too many delegate aliases"))
+			return
+		}
+		aliases := make(map[string]string, len(request.DelegateAliases))
+		for from, to := range request.DelegateAliases {
+			from = strings.ToLower(strings.TrimSpace(from))
+			to = strings.TrimSpace(to)
+			if from == "" || to == "" || len(from) > 64 || len(to) > 64 {
+				writeError(w, http.StatusBadRequest, errors.New("delegate aliases must map non-empty delegate names"))
+				return
+			}
+			aliases[from] = to
+		}
+		if err := s.artifacts.PutRunConfig(id, wfe.RunConfig{DelegateAliases: aliases}); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	start := definition.Start
 	if start == "" {
 		start = definition.Nodes[0].ID
 	}
 	if err := s.db.AdmitRoot(r.Context(), db1.CreateWorkItem{ID: id, Repo: repo,
 		ProposalPath: identity, WorkflowName: definition.Name, WorkflowVersion: definition.Version,
-		StartStage: start, Mode: "autonomous", Submitter: r.Header.Get("X-Aimee-Webuser")}, cap); err != nil {
+		StartStage: start, Mode: "autonomous", Submitter: workflowPrincipal(r), SourcePath: sourcePath}, cap); err != nil {
 		_ = s.artifacts.DeleteWorkItem(id)
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			if existing, findErr := s.db.WorkItemByProposal(r.Context(), repo, identity); findErr == nil {
@@ -109,4 +147,58 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 		s.notify()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "work_item_id": id})
+}
+
+func validateManualProposalSource(ctx context.Context, repo, source, proposal string) (string, error) {
+	if source == "" {
+		return "", nil
+	}
+	if source != strings.TrimSpace(source) || filepath.IsAbs(source) || strings.Contains(source, `\`) ||
+		strings.IndexFunc(source, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+				!(r >= '0' && r <= '9') && !strings.ContainsRune("._-/", r)
+		}) >= 0 {
+		return "", errors.New("source_path must be a plain repository-relative proposal path")
+	}
+	clean := filepath.Clean(source)
+	const pending = "docs/proposals/pending/"
+	if clean != source || !strings.HasPrefix(clean, pending) || clean == pending || filepath.Ext(clean) != ".md" {
+		return "", errors.New("source_path must name a Markdown file under docs/proposals/pending")
+	}
+	sourceContent, err := gitOutput(ctx, repo, "show", "HEAD:"+clean)
+	if err != nil {
+		return "", fmt.Errorf("read source_path from repository HEAD: %w", err)
+	}
+	if !sameProposalExceptLifecycleState(string(sourceContent), proposal) {
+		return "", errors.New("source_path does not identify the submitted proposal at repository HEAD")
+	}
+	return clean, nil
+}
+
+func sameProposalExceptLifecycleState(source, submitted string) bool {
+	if source == submitted {
+		return true
+	}
+	sourceLines := strings.Split(source, "\n")
+	submittedLines := strings.Split(submitted, "\n")
+	if len(sourceLines) != len(submittedLines) {
+		return false
+	}
+	stateDifference := false
+	for i := range sourceLines {
+		if sourceLines[i] == submittedLines[i] {
+			continue
+		}
+		if stateDifference || !strings.HasPrefix(sourceLines[i], "- **State:**") ||
+			!strings.HasPrefix(submittedLines[i], "- **State:**") {
+			return false
+		}
+		stateDifference = true
+	}
+	return stateDifference
+}
+
+func manualSubmissionIdentity(submitter, idempotencyKey, workflow string) string {
+	scope := submitter + "\x00" + idempotencyKey
+	return fmt.Sprintf("manual:%s:%s", wfe.Hash([]byte(scope)), workflow)
 }

@@ -3,6 +3,7 @@
 #include "kb/kb_mgmt_jwks_publication.h"
 #include "kb/kb_mgmt_token_roots_provision.h"
 #include "server/server_mgmt_jwks_cache.h"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
 #include <assert.h>
 #include <fcntl.h>
@@ -22,13 +23,40 @@ typedef struct
    const char *envelope;
    size_t envelope_n;
    atomic_int calls;
+   /* Test-controlled overlap window; see fetch_fixture. */
+   pthread_mutex_t gate;
+   pthread_cond_t signal;
+   int entered;       /* threads that have reached the refresh */
+   int fetch_started; /* the winner is inside the fetch */
+   int release;       /* the test has let the fetch finish */
 } refresh_ctx_t;
 
+/* The refresh under test coalesces only the callers that arrive WHILE a fetch is
+ * in flight: one thread wins, the rest wait on a condition variable and then
+ * just load. A caller arriving after the winner finishes legitimately starts a
+ * second fetch — that is what "refresh" means, and is not a bug.
+ *
+ * So `calls == 1` is only true if all 32 threads reach the refresh before the
+ * winner's fetch returns. That used to be a bet on a fixed usleep(50000)
+ * outlasting 32 pthread_creates, which the test wins on an idle machine and
+ * loses under the parallel suite — it failed roughly 1 run in 5 there while
+ * passing 240/240 in isolation. Proven by shrinking the sleep to zero, which
+ * fails the assertion every time.
+ *
+ * The window is now held open by the TEST instead of by a clock: the winner's
+ * fetch blocks until the test has seen every thread arrive and releases it. */
 static int fetch_fixture(void *opaque, char *out, size_t cap, size_t *out_n)
 {
    refresh_ctx_t *ctx = opaque;
    atomic_fetch_add(&ctx->calls, 1);
-   usleep(50000);
+
+   pthread_mutex_lock(&ctx->gate);
+   ctx->fetch_started = 1;
+   pthread_cond_broadcast(&ctx->signal);
+   while (!ctx->release)
+      pthread_cond_wait(&ctx->signal, &ctx->gate);
+   pthread_mutex_unlock(&ctx->gate);
+
    if (ctx->envelope_n + 1 > cap)
       return -1;
    memcpy(out, ctx->envelope, ctx->envelope_n + 1);
@@ -39,6 +67,13 @@ static int fetch_fixture(void *opaque, char *out, size_t cap, size_t *out_n)
 static void *refresh_thread(void *opaque)
 {
    refresh_ctx_t *ctx = opaque;
+   /* Announce arrival BEFORE entering the refresh, so the test can wait for all
+    * of them rather than guessing how long they take to spawn. */
+   pthread_mutex_lock(&ctx->gate);
+   ctx->entered++;
+   pthread_cond_broadcast(&ctx->signal);
+   pthread_mutex_unlock(&ctx->gate);
+
    assert(server_mgmt_jwks_cache_refresh(ctx->bundle, ctx->bundle_n, 100, fetch_fixture, ctx) ==
           SERVER_MGMT_JWKS_CACHE_OK);
    return NULL;
@@ -78,7 +113,12 @@ static void fixture(int64_t from, int64_t until, unsigned char manifest_seed[32]
 
 int main(void)
 {
-   char db_path[] = "/tmp/aimee-management-jwks-cache-XXXXXX";
+   /* Built from TMPDIR, not hardcoded to /tmp. The runner exports TMPDIR and
+    * removes it on exit, so a test that hardcodes /tmp escapes that sandbox and
+    * leaves one entry behind on every run — the drip that has already put ~40k
+    * of them in /tmp on the development box. */
+   char db_path[256];
+   snprintf(db_path, sizeof db_path, "%s/aimee-management-jwks-cache-XXXXXX", platform_tmpdir());
    int fd = mkstemp(db_path);
    assert(fd >= 0);
    close(fd);
@@ -90,7 +130,9 @@ int main(void)
    fixture(90, 200, seed, bundle, &bundle_n, envelope, &envelope_n);
    if (geteuid() == 0)
    {
-      char trust_path[] = "/tmp/aimee-management-jwks-trust-XXXXXX";
+      char trust_path[256];
+      snprintf(trust_path, sizeof trust_path, "%s/aimee-management-jwks-trust-XXXXXX",
+               platform_tmpdir());
       int trust_fd = mkstemp(trust_path);
       assert(trust_fd >= 0);
       assert(write(trust_fd, bundle, bundle_n) == (ssize_t)bundle_n);
@@ -146,11 +188,36 @@ int main(void)
    assert(server_mgmt_jwks_envelope_validate(bundle, bundle_n, corrupt, envelope_n, 100, &record) ==
           SERVER_MGMT_JWKS_CACHE_INVALID);
 
-   refresh_ctx_t refresh = {
-       .bundle = bundle, .bundle_n = bundle_n, .envelope = envelope, .envelope_n = envelope_n};
+   refresh_ctx_t refresh = {.bundle = bundle,
+                            .bundle_n = bundle_n,
+                            .envelope = envelope,
+                            .envelope_n = envelope_n,
+                            .gate = PTHREAD_MUTEX_INITIALIZER,
+                            .signal = PTHREAD_COND_INITIALIZER};
    pthread_t threads[32];
    for (size_t i = 0; i < 32; ++i)
       assert(pthread_create(&threads[i], NULL, refresh_thread, &refresh) == 0);
+
+   /* Wait for every thread to arrive AND for the winner to be inside the fetch.
+    * Unbounded on purpose: the fetch is held open, so there is no deadline to
+    * race and nothing to tune. */
+   pthread_mutex_lock(&refresh.gate);
+   while (refresh.entered < 32 || !refresh.fetch_started)
+      pthread_cond_wait(&refresh.signal, &refresh.gate);
+   pthread_mutex_unlock(&refresh.gate);
+
+   /* Every thread has announced itself; give the 31 losers the few instructions
+    * they need to get from that announcement into the refresh's own wait. This
+    * is the one remaining timing assumption, and unlike the sleep it replaces it
+    * is not competing with a fetch that is about to end — the fetch cannot
+    * finish until released below. */
+   usleep(50000);
+
+   pthread_mutex_lock(&refresh.gate);
+   refresh.release = 1;
+   pthread_cond_broadcast(&refresh.signal);
+   pthread_mutex_unlock(&refresh.gate);
+
    for (size_t i = 0; i < 32; ++i)
       assert(pthread_join(threads[i], NULL) == 0);
    assert(atomic_load(&refresh.calls) == 1);

@@ -89,6 +89,28 @@ int main(void)
       assert(prompt_tier_from_string(NULL) == PROMPT_STANDARD);
    }
 
+   /* --- prompt_turn_registers_text: gate and wording ---
+    * The register grammar is parsed by the Go economizer, and
+    * session_compact's record path reads it for Key Decisions) while nothing ever ASKED
+    * an agent to emit one — so real transcripts carry no tags and that extraction is
+    * empty in practice. This is the request half, and it must stay off by default. */
+   {
+      assert(prompt_turn_registers_text(0) == NULL); /* default-off changes nobody */
+
+      const char *t = prompt_turn_registers_text(1);
+      assert(t != NULL);
+      /* Names every tag the parser recognises as load-bearing; asking for a tag the
+       * record path ignores would train agents to emit noise. */
+      assert(strstr(t, "[verdict]") != NULL);
+      assert(strstr(t, "[hazard]") != NULL);
+      assert(strstr(t, "[blocked]") != NULL);
+      /* Biases AGAINST tagging. A mis-tagged [verdict] survives compaction as a settled
+       * fact while its reasoning is discarded, so it is worse than no tag at all — the
+       * text has to say that, not merely list the tags. */
+      assert(strstr(t, "Do NOT tag speculation") != NULL);
+      assert(strstr(t, "safe default") != NULL);
+   }
+
    /* --- prompt_tier_to_string --- */
    {
       assert(strcmp(prompt_tier_to_string(PROMPT_MINIMAL), "MINIMAL") == 0);
@@ -114,6 +136,29 @@ int main(void)
       /* EXTENDED is longer than STANDARD which is longer than MINIMAL */
       assert(strlen(extended) > strlen(standard));
       assert(strlen(standard) > strlen(minimal));
+
+      /* THE PROMPT MUST NOT INSTRUCT A COMMAND THAT DOES NOT EXIST.
+       *
+       * Every tier carried a "## Work Queue" section telling the agent to
+       * coordinate with other sessions via `aimee work claim` / `complete` /
+       * `fail` / `list`. None of those exist: there is no `work` row in the
+       * command table, no /v1 route, and no work.* dispatch handler. The only
+       * surviving references are a capability-registry line and an entry in the
+       * write-tier op list, neither of which can make a command run.
+       *
+       * Live on a deployment: `aimee work list` answers "command 'work' has no
+       * /v1 route". This costs every session the turns it takes to discover
+       * that, and it is worse than a wasted turn -- an agent told to coordinate
+       * through a shared queue can believe coordination happened when nothing
+       * was ever queued or claimed.
+       *
+       * If the work queue is implemented, this assertion is the reminder to
+       * restore the instructions WITH it, not before it. */
+      assert(strstr(minimal, "aimee work ") == NULL);
+      assert(strstr(standard, "aimee work ") == NULL);
+      assert(strstr(extended, "aimee work ") == NULL);
+      assert(strstr(standard, "Work Queue") == NULL);
+      assert(strstr(extended, "Work Queue") == NULL);
 
       free(minimal);
       free(standard);
@@ -530,6 +575,64 @@ int main(void)
          free(std);
          free(ext);
       }
+   }
+
+   /* --- Manager block: every lever actually withholds text ---
+    *
+    * Asserted through the pure composer so no config file is needed. Each lever
+    * is checked to REMOVE text rather than merely to be settable: a flag that
+    * parses but changes no output is the failure mode worth testing, and it is
+    * invisible to a test that only inspects the default prompt. */
+   {
+      const char *HEADER = "## Your role: manage the work";
+      const char *DELEGATION = "ALWAYS delegate multi-file changes";
+      const char *REVIEW = "roundtable review";
+
+      char *b = prompt_manager_block(1, 1, 1);
+      assert(b);
+      assert(strstr(b, HEADER) && strstr(b, DELEGATION) && strstr(b, REVIEW));
+      free(b);
+
+      /* Review off: manager framing and delegation stay, the round trip goes. */
+      b = prompt_manager_block(1, 1, 0);
+      assert(b);
+      assert(strstr(b, HEADER) && strstr(b, DELEGATION));
+      assert(strstr(b, REVIEW) == NULL);
+      free(b);
+
+      /* Block off, and delegates off, each withhold the whole thing. */
+      assert(prompt_manager_block(0, 1, 1) == NULL);
+      assert(prompt_manager_block(0, 0, 0) == NULL);
+      assert(prompt_manager_block(1, 0, 1) == NULL);
+   }
+
+   /* --- The block appears exactly ONCE, on both tiers ---
+    *
+    * It used to be pasted verbatim into both the STANDARD and EXTENDED literals.
+    * Asserting a single occurrence is what stops a future edit from reintroducing
+    * the second copy, which is how the two drifted apart before. Runs at whatever
+    * the ambient config says, so it asserts only the count -- not presence, which
+    * the levers legitimately control. */
+   {
+      const char *HEADER = "## Your role: manage the work";
+      prompt_tier_t tiers[] = {PROMPT_STANDARD, PROMPT_EXTENDED};
+      for (int i = 0; i < 2; i++)
+      {
+         char *p = prompt_build_mode(AIMEE_MODE_ENGINEER, tiers[i], "/tmp/x", NULL);
+         assert(p);
+         const char *first = strstr(p, HEADER);
+         if (first)
+            assert(strstr(first + 1, HEADER) == NULL);
+         assert(strstr(p, "autonomous software engineer") != NULL);
+         free(p);
+      }
+
+      /* MINIMAL never carries it: a tier chosen for brevity must not gain the
+       * longest block in the prompt. */
+      char *p = prompt_build_mode(AIMEE_MODE_ENGINEER, PROMPT_MINIMAL, "/tmp/x", NULL);
+      assert(p);
+      assert(strstr(p, HEADER) == NULL);
+      free(p);
    }
 
    printf("OK\n");

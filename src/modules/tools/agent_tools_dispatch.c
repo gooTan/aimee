@@ -106,14 +106,10 @@ static void td_outcome_set(const char *verdict, const char *reason)
  * stored; the parsed tree is freed. */
 static int is_exec_tool(const char *name)
 {
-   if (g_tool_classifier)
-   {
-      int classification = 0;
-      return g_tool_classifier(name, &classification) == 0 &&
-             classification == AIMEE_TOOL_CLASS_EXEC;
-   }
-   return strcmp(name, "bash") == 0 || strcmp(name, "execute_script") == 0 ||
-          strcmp(name, "test") == 0 || strcmp(name, "run_tests") == 0;
+   if (!g_tool_classifier)
+      return 0;
+   int classification = 0;
+   return g_tool_classifier(name, &classification) == 0 && classification == AIMEE_TOOL_CLASS_EXEC;
 }
 
 static void td_classify_exec_result(const char *result)
@@ -635,6 +631,11 @@ static char *td_execute_script(cJSON *args, const char *name, const char *dispat
       free(env_json);
       return result;
    }
+   int secs = (tout && cJSON_IsNumber(tout)) ? tout->valueint : 120;
+   if (secs <= 0)
+      secs = 120;
+   if (secs > 600)
+      secs = 600;
 
    /* Sandboxed (CONTAINER) delegate: run the script INSIDE the container via the
     * provider's exec_shell, NOT as tool_execute_script's local fork on the
@@ -670,7 +671,10 @@ static char *td_execute_script(cJSON *args, const char *name, const char *dispat
       dstr_append_str(&c, body->valuestring);
       dstr_append_str(&c, "\nAIMEE_SCRIPT_EOF\n");
       int exit_code = -1;
-      char *out = c.data ? ws->exec_shell(ws, c.data, &exit_code) : NULL;
+      char *out = NULL;
+      if (c.data)
+         out = ws->exec_shell_timeout ? ws->exec_shell_timeout(ws, c.data, secs * 1000, &exit_code)
+                                      : ws->exec_shell(ws, c.data, &exit_code);
       dstr_free(&c);
       /* Learned toolchain: record apt-install intent only after a successful run. */
       if (exit_code == 0)
@@ -690,7 +694,6 @@ static char *td_execute_script(cJSON *args, const char *name, const char *dispat
    }
 
    {
-      int secs = (tout && cJSON_IsNumber(tout)) ? tout->valueint : 120;
       const char *dir = (wd && cJSON_IsString(wd)) ? wd->valuestring : NULL;
       result = tool_execute_script(lang->valuestring, body->valuestring, secs, dir, env_json);
    }
@@ -717,15 +720,15 @@ static char *td_tool_output_get(cJSON *args, const char *name, const char *dispa
        snprintf(spill_dir, sizeof spill_dir, "%s/tool-spills", home) >= (int)sizeof spill_dir)
       return safe_strdup("error: spill store unavailable");
    char err[64];
-   char *full = tool_condense_recall(spill_dir, r->valuestring, err, sizeof err);
-   if (!full)
+   char *full = NULL;
+   if (econ_module_tool_recall(spill_dir, r->valuestring, &full, err, sizeof err) != 0 || !full)
    {
       char msg[128];
       snprintf(msg, sizeof msg, "error: %s", err[0] ? err : "not found");
       return safe_strdup(msg);
    }
-   /* recovery-cost telemetry (P4): each recall is a page-back — the counter is bumped inside
-    * tool_condense_recall; log the bytes so the net-of-recovery is greppable next to the
+   /* Recovery-cost telemetry is bumped by the Go economizer; log the bytes so
+    * the net-of-recovery is greppable next to the
     * "condensed X->Y" lines. */
    aimee_log(LOG_INFO, "tool_condense", "tool_output_get recovered %zu bytes (%s)", strlen(full),
              r->valuestring);
@@ -2088,6 +2091,22 @@ static char *dispatch_tool_call_ctx_inner(const char *name, const char *argument
       }
    }
 
+   /* The `shell` permission, enforced where the command would run.
+    *
+    * Deliberately ahead of the toolset check and independent of it: a delegate
+    * gets its toolset from a map keyed on the role NAME, so a role an operator
+    * defined without `shell` still resolves to one carrying bash. This is the
+    * check that binds it. */
+   if ((strcmp(name, "bash") == 0 || strcmp(name, "execute_script") == 0) &&
+       !agent_tools_shell_allowed())
+   {
+      cJSON_Delete(args);
+      td_outcome_set("refused", "permission");
+      return safe_strdup("error: this delegate does not hold the `shell` permission, so it "
+                         "cannot run commands. Use the file and index tools, or give the role "
+                         "`shell` in its template's permissions block.");
+   }
+
    const char *active_role = agent_tools_dispatch_role();
    if (!agent_tools_tool_allowed_for_role(active_role, name))
    {
@@ -2097,7 +2116,7 @@ static char *dispatch_tool_call_ctx_inner(const char *name, const char *argument
           active_role, "indexed, memory, docs, notes, and remote MCP tools are "
                        "disabled for this role");
    }
-   if (agent_tools_role_current_code_only(active_role))
+   if (!agent_tools_knowledge_write_allowed())
    {
       const char *command = NULL;
       if (strcmp(name, "bash") == 0)
@@ -2210,6 +2229,39 @@ static char *dispatch_tool_call_ctx_inner(const char *name, const char *argument
             fp_arg = cJSON_GetObjectItem(args, "path");
          if (fp_arg)
             cJSON_SetValuestring(fp_arg, msg);
+      }
+      else if (rc == 3 && msg[0])
+      {
+         /* Shell COMMAND rewrite: the guardrail redirected this command into the
+          * session worktree and returned the rewritten line ("cd <worktree> && …"),
+          * exactly as it does for a path with rc==1. cmd_hooks.c applies both
+          * ("rc==1: edit tool file_path rewrite, rc==3: bash command rewrite").
+          *
+          * This path applied only rc==1, so a rewrite arrived here as "not 0" and
+          * was reported as a refusal — with the rewritten command as the reason.
+          * Every shell command a delegate ran came back "guardrail blocked: cd
+          * <worktree> && <cmd>", including `pwd` and `echo hello`, because the
+          * rewrite fires on every shell call whose cwd sits outside the worktree.
+          * A delegate could therefore edit files and never run one command.
+          *
+          * Rewrite the same field the guardrail read (command / cmd / body — see
+          * guardrails_command_item) so the tool runs the redirected line. */
+         cJSON *cmd_arg = cJSON_GetObjectItem(args, "command");
+         if (!cmd_arg || !cJSON_IsString(cmd_arg))
+            cmd_arg = cJSON_GetObjectItem(args, "cmd");
+         if (!cmd_arg || !cJSON_IsString(cmd_arg))
+            cmd_arg = cJSON_GetObjectItem(args, "body");
+         if (cmd_arg && cJSON_IsString(cmd_arg))
+            cJSON_SetValuestring(cmd_arg, msg);
+         else
+         {
+            /* Nothing to rewrite: refusing beats running the original command in
+             * a directory the guardrail just said it must not run in. */
+            cJSON_Delete(args);
+            td_outcome_set("refused", "guardrail");
+            return safe_strdup("error: guardrail requires a worktree rewrite but the tool carries "
+                               "no rewritable command field");
+         }
       }
       else if (rc != 0)
       {

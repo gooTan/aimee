@@ -5,7 +5,7 @@
 
 `aimee` is a thin client: each command either runs a small local operation or forwards a typed request to `aimee-server`. Server-backed commands accept `--json` for machine-readable output. Run `aimee help <command>` for per-command help, or `aimee help --all` for every tier.
 
-Total commands: 66
+Total commands: 67
 
 ## Core commands
 
@@ -19,6 +19,7 @@ Subcommands:
   show             Show all config values
   get <key>        Get one config value
   set <key> <val>  Set one config value
+  deploy-env       Emit the compose env for this backend record
 ```
 
 ### `aimee delegate`
@@ -68,7 +69,10 @@ Subcommands:
   watch <name> <root>  Install git hooks that re-index after branch changes
   blast-radius     Show files affected by changes to a file
   structure        Show file structure
+  span <file> [start] [end]  Read an exact line range (chainable with &&)
   callers          Find callers of a symbol
+  investigate "<question>" [...]  Ask the index; several questions, one call
+  hybrid "<phrase>" [...]  Search for a phrase, not a symbol (--scope all)
 ```
 
 ### `aimee init`
@@ -123,7 +127,7 @@ Subcommands:
   search           Search stored memory
   store            Store a memory
   list             List memories
-  get              Read a memory by id
+  get              Read a memory by id (--as-of <ts>: was it in force then?)
   read             Assemble current memory context
 ```
 
@@ -231,20 +235,14 @@ Subcommands:
 
 ### `aimee agent`
 
-Sub-agent management.
+Deprecated alias for `model`.
 
 Subcommands:
 
 ```
-  list             List configured delegates
-  add              Add or update a delegate provider
-  setup            Run an agent provider's attended OAuth setup
-  local            Register/update a local OpenAI-compatible delegate
-                   (--provider openai|llama-eval for request shaping)
-  remove           Remove a configured delegate
-  enable           Enable a configured delegate
-  disable          Disable a configured delegate
-  probe            Probe delegate endpoint, slots, and execution
+  Every subcommand of `aimee model`, kept working under the old name.
+  A roster entry is one (endpoint, model) target, so it is now a MODEL;
+  `aimee catalog` is the separate per-model capability metadata.
 ```
 
 ### `aimee api`
@@ -285,6 +283,18 @@ Subcommands:
   config           Show resolved aux task->provider/model mapping
   test <task> "<prompt>"
                    Execute a single auxiliary task call
+```
+
+### `aimee catalog`
+
+Model capability metadata.
+
+Subcommands:
+
+```
+  list             List catalogued models (--capability <name>, --open-weights)
+  show <model>     Show context, cost, flags, cutoff, deprecation
+  refresh          Refresh model metadata cache
 ```
 
 ### `aimee claude-proxy`
@@ -493,14 +503,20 @@ Subcommands:
 
 ### `aimee model`
 
-Model capability metadata.
+Model roster management.
 
 Subcommands:
 
 ```
-  list             List known models (--capability <name>, --open-weights)
-  show <model>     Show context, cost, flags, cutoff, deprecation
-  refresh          Refresh model metadata cache
+  list             List configured models
+  add              Add or update a model
+  setup            Run a provider's attended OAuth setup
+  local            Register/update a local OpenAI-compatible model
+                   (--provider openai|llama-eval for request shaping)
+  remove           Remove a configured model
+  enable           Enable a configured model
+  disable          Disable a configured model
+  probe            Probe a model's endpoint, slots, and execution
 ```
 
 ### `aimee notes`
@@ -746,11 +762,38 @@ Subcommands:
 
 ### `aimee git`
 
-Git helpers.
+Git and GitHub operations (run on aimee-server).
 
 Subcommands:
 
 ```
+  Every command takes an optional primary word then key=value pairs:
+    aimee git merge origin/testing      aimee git pr create title="..."
+    aimee git sync                      aimee git log count=5
+
+  status           Working tree status
+  add <paths|-A>   Stage changes (-A includes new files)
+  commit <msg>     Stage tracked changes and commit
+  push [-f]        Push the session's branch
+  pull / fetch     Bring refs down from a remote
+  sync [base]      Make this branch current with its base (fetch + rebase)
+  merge <ref>      Merge a ref in; conflicts are named and undone by default
+  rebase <base>    Rebase onto a branch, same conflict handling
+  cherry-pick <r>  Apply a commit here
+  revert <ref>     Back a commit out
+    ... any of the five above also take: continue | abort | skip
+  switch <branch>  Move to a branch
+  checkout <paths> Restore paths from a ref
+  restore <paths>  Restore or unstage paths
+  reset <ref>      soft/mixed/hard reset
+  branch <action>  create/switch/list/delete/claim/orphan
+  stash <action>   push/pop/apply/list/drop
+  tag <action>     create/list/delete
+  log / diff       History and diff summaries
+  pr <action>      create/view/list/edit/checks/merge_status/merge/ready
+                   (create writes its own title and body from your commits)
+  issue list       Open issues
+  clone <url>      Clone a repository
   verify           Verify the current changes before merge
 ```
 

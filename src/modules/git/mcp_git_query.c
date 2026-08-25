@@ -5,12 +5,16 @@
 #include "config.h"
 #include "guardrails.h"
 #include "git_verify.h"
+#include "log.h"
 #include "mcp_git.h"
 #include "platform_process.h"
 #include "util.h"
 #include "modules/workspace/workspace_provider.h"
+#include "headers/module_json_call.h"
 #include "forge_credentials.h"
 #include "git_cred_inject.h"
+#include "aimee_home.h"
+#include <aimee/git/module_api.h>
 #include <time.h>
 
 extern char **environ;
@@ -39,30 +43,94 @@ int mcp_git_get_worktree(void)
    return s_in_worktree;
 }
 
-/* Route a git/gh shell command-line to where aimee's git rails live. SHARED and
- * CONTAINER both run server-side (run_cmd) — a container-sandboxed delegate has no
- * git and no creds, so its git must run on the server against the path-identity
- * bind-mounted worktree; only a `detached` workspace marshals to its client-held
- * filesystem authority. See mcp_git_run for the rationale. */
-/* The registered workspace root containing `cwd`, copied into out[outsz].
- * Returns 0 on a match, -1 otherwise. */
-static int forge_workspace_for_cwd(const char *cwd, char *out, size_t outsz)
+#define GIT_CRED_RESOLVE_MAX_BODY   (256u * 1024u)
+#define GIT_CRED_RESOLVE_TIMEOUT_MS 5000
+
+/* Ask the git module where this command runs, and which workspace owns its cwd.
+ *
+ * Both are DECISIONS, so neither is taken here. This carries the facts the
+ * module cannot see — the active workspace's provider kind, the registered
+ * roots, and the mirror base, whose resolution reads the environment and the
+ * instance home — and applies the ruling. The module is server-go/modules/git
+ * (cred_resolve.go), reached as bus stage AIMEE_GIT_STAGE_CRED_RESOLVE.
+ *
+ * Deciding it here is what broke. The server-run test was a LIST of provider
+ * kinds that omitted `mirror`, and the cwd was prefix-matched against the
+ * registered root — which for a mirror workspace is the CLIENT's path, a
+ * directory that does not exist on this server, while git runs in a
+ * reconstruction elsewhere. Both said "not ours" about a live checkout, so the
+ * credential below was never injected and git ran bare: "could not read
+ * Username", indistinguishable from a dead token, while reads kept working
+ * because git_pr_api.c never execs git.
+ *
+ * On a module failure `*runs_on_server` stays 1 and no workspace is reported, so
+ * the command still runs here with no injected credential — the same ambient
+ * fall-through already documented for "no token", rather than a new failure
+ * mode. Returns 0 with `out` set when a workspace owns the cwd, -1 otherwise. */
+/* The remote URL the registry records for the workspace rooted at `root`, or
+ * NULL when unknown. Read from the same accessor the mirror lifecycle uses
+ * (workspace_turn.c), so the two cannot disagree about a workspace's remote.
+ * Returns a pointer into config storage: use it before any further config read.
+ */
+static const char *workspace_remote_for_root(const char *root)
 {
-   if (!cwd || !cwd[0])
-      return -1;
+   if (!root || !root[0])
+      return NULL;
    for (int i = 0; i < config_workspace_count(); i++)
    {
-      const char *ws = config_workspaces(i);
-      size_t len = ws ? strlen(ws) : 0;
-      if (len == 0)
-         continue;
-      if (strncmp(cwd, ws, len) == 0 && (cwd[len] == '/' || cwd[len] == '\0'))
+      const char *candidate = config_workspaces(i);
+      if (candidate && strcmp(candidate, root) == 0)
       {
-         snprintf(out, outsz, "%s", ws);
-         return 0;
+         const char *remote = config_workspace_vcs_remote(i);
+         return (remote && remote[0]) ? remote : NULL;
       }
    }
-   return -1;
+   return NULL;
+}
+
+static int forge_workspace_for_cwd(const char *cwd, int provider_kind, int *runs_on_server,
+                                   char *out, size_t outsz)
+{
+   if (out && outsz)
+      out[0] = '\0';
+   if (runs_on_server)
+      *runs_on_server = 1;
+
+   cJSON *request = cJSON_CreateObject();
+   if (!request)
+      return -1;
+   cJSON_AddStringToObject(request, "cwd", cwd ? cwd : "");
+   cJSON_AddNumberToObject(request, "provider_kind", provider_kind);
+   /* The instance home, not a mirror path: resolving where a provider puts its
+    * trees is the module's job, and reaching into the workspace module's headers
+    * to ask would be the cross-module coupling the bus exists to replace. */
+   const char *home = aimee_home();
+   cJSON_AddStringToObject(request, "aimee_home", home ? home : "");
+   cJSON *roots = cJSON_AddArrayToObject(request, "workspaces");
+   for (int i = 0; roots && i < config_workspace_count(); i++)
+   {
+      const char *root = config_workspaces(i);
+      if (root && root[0])
+         cJSON_AddItemToArray(roots, cJSON_CreateString(root));
+   }
+
+   cJSON *reply =
+       aimee_module_json_call(AIMEE_GIT_EVENT_CRED_RESOLVE, AIMEE_GIT_STAGE_CRED_RESOLVE, request,
+                              GIT_CRED_RESOLVE_MAX_BODY, GIT_CRED_RESOLVE_TIMEOUT_MS, NULL);
+   if (!reply)
+      return -1;
+   const cJSON *on_server = cJSON_GetObjectItemCaseSensitive(reply, "runs_on_server");
+   if (runs_on_server && cJSON_IsBool(on_server))
+      *runs_on_server = cJSON_IsTrue(on_server) ? 1 : 0;
+   const cJSON *owner = cJSON_GetObjectItemCaseSensitive(reply, "workspace");
+   int found = 0;
+   if (cJSON_IsString(owner) && owner->valuestring[0] && out && outsz)
+   {
+      snprintf(out, outsz, "%s", owner->valuestring);
+      found = 1;
+   }
+   cJSON_Delete(reply);
+   return found ? 0 : -1;
 }
 
 char *mcp_git_run(const char *cmd, int *exit_code)
@@ -77,41 +145,100 @@ char *mcp_git_run(const char *cmd, int *exit_code)
     * need the network the sandbox deliberately removes, and running git there would
     * push the forge credential into the sandbox this design exists to keep it out of.
     * The delegate's worktree is bind-mounted path-identically, so the server sees the
-    * delegate's edits at the same path. Run git on the server for SHARED and
-    * CONTAINER alike; only a DETACHED workspace (the client holds both the filesystem
-    * and its own creds) marshals git to the client and stays on the provider path. */
-   int run_on_server = (ws->kind == WS_PROVIDER_SHARED || ws->kind == WS_PROVIDER_CONTAINER);
+    * delegate's edits at the same path. Which kinds that covers is the module's
+    * ruling, not a list kept here — see forge_workspace_for_cwd. */
+   const char *cwd = run_cmd_get_cwd();
+   char wsid[MAX_PATH_LEN];
+   int run_on_server = 1;
+   int have_ws = forge_workspace_for_cwd(cwd, (int)ws->kind, &run_on_server, wsid, sizeof(wsid));
    const workspace_provider_t *exec_ws = run_on_server ? workspace_provider_shared() : ws;
 
    /* Credential injection: for a server-run command whose cwd is inside a registered
-    * workspace, run under an execve environment carrying GH_TOKEN + the GIT_ASKPASS
-    * shim so clone/fetch/push/PR authenticate — never on the command line or disk.
-    * The token is resolved through the one shared vault-first policy: a client-handed
-    * per-workspace broker token (§4) wins, else the per-host vault token for the
-    * checkout's `origin`, else the server's own forge identity (§6); no token → fall
-    * through to ambient creds (co-located dev's own gh/SSH). */
+    * workspace, run under an execve environment that authenticates git — never on the
+    * command line or disk. The token is resolved through the one shared vault-first
+    * policy: the per-host vault token for the workspace's remote (or the checkout's
+    * `origin`), else the principal's vaulted forge token, else the server's own forge
+    * identity (§6); no token → fall through to ambient creds (co-located dev's own
+    * gh/SSH). No workspace broker token: aimee git proxies through aimee's own
+    * vaulted credential, and a brokered one would outrank it.
+    *
+    * This carries AIMEE_GIT_TOKEN_FD and the GIT_ASKPASS shim, NOT GH_TOKEN. The
+    * builder is called in FD mode (out_token_fd non-NULL), which puts the secret on a
+    * memfd so it never lands in the child's /proc/<pid>/environ — see
+    * git_cred_inject.h. That authenticates `git`, whose askpass reads the fd, and it
+    * does NOT authenticate `gh`, which can only take a token from the environment or
+    * its own config. So a `gh` subcommand routed through here runs with NO credential
+    * and reports "gh auth login", however well the vault is populated. That is why
+    * the PR ops read the GitHub API in-process (git_pr_api.c) instead: the raw token
+    * goes straight into an Authorization header and no child is involved.
+    *
+    * Said plainly because the previous wording claimed GH_TOKEN was injected, which
+    * sent at least one reader hunting for a broken OAuth that was never broken. */
    if (run_on_server)
    {
-      const char *cwd = run_cmd_get_cwd();
-      char wsid[MAX_PATH_LEN];
-      if (cwd && forge_workspace_for_cwd(cwd, wsid, sizeof(wsid)) == 0)
+      /* The other half of the same silence: with no workspace owning the cwd the
+       * block below never runs, so git execs bare and no credential is even
+       * attempted. That is the condition this file's header describes as having
+       * caused exactly this bug once, and it is indistinguishable from a bad
+       * token unless it says so. It is also what a broken credential-resolve
+       * stage looks like from here — that stage going unadvertised silently
+       * disabled injection for every git child. */
+      /* Only when a cwd IS set. run_cmd_get_cwd() returns NULL outside a bound
+       * turn, and those are aimee's own housekeeping git calls — a branch name,
+       * a rev-parse — which need no credential and have no workspace to own
+       * them. Warning on them fired several times per push with an empty path
+       * and said nothing; that was noise this instrumentation introduced. The
+       * real anomaly, and all this now reports, is a cwd that exists and that
+       * no registered workspace claims. */
+      if (have_ws != 0 && cwd && cwd[0])
+         LOG_WARN("git",
+                  "no registered workspace owns cwd \"%s\": git will run with no forge credential",
+                  cwd);
+      if (have_ws == 0)
       {
          /* Resolve the git credential through the ONE policy
           * (git_cred_inject_build_env_for_repo) so the precedence never drifts
-          * from the other call sites: a client-handed per-workspace broker token
-          * (§4) is passed as preferred_token and wins, else per-host server vault
-          * → server identity → ambient. The policy injects GH_TOKEN + the
-          * GIT_ASKPASS shim and wipes its own token copy. */
-         char tok[4096] = {0};
-         const char *pref = NULL;
-         if (forge_cred_get(wsid, (long)time(NULL), tok, sizeof(tok)) == 0 && tok[0])
-            pref = tok;
+          * from the other call sites: per-host server vault → the principal's
+          * vaulted forge token → server identity → ambient.
+          *
+          * NO WORKSPACE BROKER TOKEN HERE, deliberately. It used to be fetched
+          * and passed as preferred_token, which outranks the vault — so this
+          * exec path authenticated as a different, weaker credential than the
+          * in-process forge calls next door, which pass none and get the vault.
+          * The result was a split personality against the same repository:
+          * `pr create` succeeded on the vaulted credential while `push` was
+          * refused with "Permission to <repo> denied to <user>", which reads as
+          * a permissions problem on an account that in fact has admin. Operator
+          * ruling: aimee git proxies through aimee's OWN vaulted credential, so
+          * that is the only thing this path may use. */
          int token_fd = -1;
+         /* Hand the policy the workspace's RECORDED REMOTE, not just the cwd.
+          * The per-host vault step keys on the remote's host, which it derives
+          * from an explicit remote URL or, failing that, by running
+          * `git -C <repo_dir> config --get remote.origin.url`. For a mirror the
+          * cwd we were handed is the CLIENT's path: it does not exist on this
+          * server, so that lookup finds nothing, resolution falls through to no
+          * token, and git prompts — "could not read Username", the very failure
+          * this file's header describes. workspace_turn.c already passes the
+          * remote for exactly this reason ("remote URL (per-host vault lookup),
+          * so ctx carries both"); this call site is the one that did not.
+          * cwd is still passed as the fallback for a shared workspace, where it
+          * IS the real checkout and no remote may be recorded. */
+         const char *ws_remote = workspace_remote_for_root(wsid);
          char **envp =
-             git_cred_inject_build_env_for_repo(NULL, NULL, cwd, pref, environ, &token_fd);
-         volatile char *p = (volatile char *)tok;
-         for (size_t i = 0; i < sizeof(tok); i++)
-            p[i] = 0;
+             git_cred_inject_build_env_for_repo(NULL, ws_remote, cwd, NULL, environ, &token_fd);
+         /* SAY SO WHEN NOTHING WAS STAGED. Falling through to ambient credentials
+          * is deliberate for a co-located dev with their own gh/SSH, but a server
+          * has none, so the only symptom is git prompting: "could not read
+          * Username", which reads as a dead token and sends the reader to the
+          * vault. Naming the workspace and the remote resolution keyed on
+          * separates "no remote recorded for this workspace" from "the remote is
+          * right and the vault has no entry for its host". */
+         if (token_fd < 0)
+            LOG_WARN("git",
+                     "no forge credential staged for workspace \"%s\" (remote=%s): git will run "
+                     "unauthenticated and a push will fail asking for a username",
+                     wsid, (ws_remote && ws_remote[0]) ? ws_remote : "<none recorded>");
          if (envp)
          {
             /* FD mode: the token rides an inherited memfd, never the environ. */
@@ -780,16 +907,19 @@ int mcp_chdir_git_root(char *old_cwd, size_t old_cwd_len, cJSON *args, char **mi
 
    char candidates[8][MAX_PATH_LEN];
    int candidate_count = 0;
+   cJSON *jpath = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+   int explicit_path = cJSON_IsString(jpath) && jpath->valuestring[0];
    int no_session_redirect =
-       args && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "no_session_redirect"));
+       explicit_path ||
+       (args && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "no_session_redirect")));
 
-   /* Priority 1: explicit 'path' argument from tool call */
-   if (args)
-   {
-      cJSON *jpath = cJSON_GetObjectItemCaseSensitive(args, "path");
-      if (cJSON_IsString(jpath) && jpath->valuestring[0])
-         mcp_git_add_candidate(candidates, &candidate_count, 8, jpath->valuestring);
-   }
+   /* An explicit path is an authoritative repository identity, not merely the
+    * first guess before stale session state. If it cannot be read through the
+    * active workspace provider, fail closed instead of falling through to a
+    * different checkout. Clone dispatch removes its destination path before
+    * calling this resolver because that path need not exist yet. */
+   if (explicit_path)
+      mcp_git_add_candidate(candidates, &candidate_count, 8, jpath->valuestring);
 
    /* Priority 2: session CWD tracking file (thread-safe: keyed by session_id) */
    if (!no_session_redirect)
@@ -820,7 +950,7 @@ int mcp_chdir_git_root(char *old_cwd, size_t old_cwd_len, cJSON *args, char **mi
 
    /* Priority 3: caller cwd. MCP stdio proxies may be long-lived and launched
     * from a stale directory, so this must not outrank the session cwd file. */
-   if (args)
+   if (!explicit_path && args)
    {
       cJSON *jcwd = cJSON_GetObjectItemCaseSensitive(args, "cwd");
       if (cJSON_IsString(jcwd) && jcwd->valuestring[0])
@@ -829,12 +959,14 @@ int mcp_chdir_git_root(char *old_cwd, size_t old_cwd_len, cJSON *args, char **mi
 
    /* Priority 4: environment fallbacks. Some MCP hosts launch the stdio
     * wrapper from / but preserve a meaningful PWD or explicit override. */
+   if (!explicit_path)
    {
       mcp_git_add_candidate(candidates, &candidate_count, 8, getenv("AIMEE_MCP_CWD"));
       mcp_git_add_candidate(candidates, &candidate_count, 8, getenv("PWD"));
    }
 
    /* Priority 5: process CWD (racy in multi-session but useful as a fallback) */
+   if (!explicit_path)
    {
       char cwd_buf[MAX_PATH_LEN];
       if (getcwd(cwd_buf, sizeof(cwd_buf)))
@@ -843,6 +975,7 @@ int mcp_chdir_git_root(char *old_cwd, size_t old_cwd_len, cJSON *args, char **mi
 
    /* Priority 6: executable directory. This catches repo-local plugin/server
     * launches where the process cwd is not the checkout root. */
+   if (!explicit_path)
    {
       char exe[MAX_PATH_LEN];
       if (platform_get_exe_path(exe, sizeof(exe)) == 0)
@@ -868,7 +1001,7 @@ int mcp_chdir_git_root(char *old_cwd, size_t old_cwd_len, cJSON *args, char **mi
    }
 
    if (!git_root[0])
-      return 0; /* No git repo found; run_cmd uses process CWD */
+      return explicit_path ? -2 : 0; /* Explicit identity never falls through. */
 
    /* Worktree redirect: if session has a sibling worktree for this git root,
     * point run_cmd there instead. This is the single place where worktree

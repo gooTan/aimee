@@ -97,6 +97,13 @@ include_directories(
     "${AIMEE_SRC_DIR}/modules/response-composition/include"
     "${AIMEE_SRC_DIR}/modules/skills/include"
     "${AIMEE_SRC_DIR}/modules/routing/include"
+    "${AIMEE_SRC_DIR}/modules/roundtable/include"
+    "${AIMEE_SRC_DIR}/modules/benchmarks/include"
+    "${AIMEE_SRC_DIR}/modules/governance/include"
+    "${AIMEE_SRC_DIR}/modules/workflows/include"
+    "${AIMEE_SRC_DIR}/modules/kb-synthesis/include"
+    "${AIMEE_SRC_DIR}/modules/runtime-web/include"
+    "${AIMEE_SRC_DIR}/modules/control-web/include"
     # MODULES THAT KEEP THEIR HEADERS FLAT, beside their sources, rather than
     # under an include/ subdir. src/Makefile has carried -I for every one of
     # these all along; CMake had only the include/-style modules, so the
@@ -687,7 +694,9 @@ set(DATA_SRCS
     ${AIMEE_SRC_DIR}/session_worktree_key.c
     ${AIMEE_SRC_DIR}/worktree_gc.c
     ${AIMEE_SRC_DIR}/modules/workspace/workspace_manifest.c
-    ${AIMEE_SRC_DIR}/server/agent_config.c
+    ${AIMEE_SRC_DIR}/modules/config/agent_config.c
+    ${AIMEE_SRC_DIR}/modules/config/agent_registry.c
+    ${AIMEE_SRC_DIR}/modules/vault/agent_credentials.c
     ${AIMEE_SRC_DIR}/modules/routing/routing.c
     ${AIMEE_SRC_DIR}/agent_tier_lint.c
     ${AIMEE_SRC_DIR}/cmd_describe.c
@@ -695,8 +704,6 @@ set(DATA_SRCS
     ${AIMEE_SRC_DIR}/role_templates.c
     ${AIMEE_SRC_DIR}/modules/skills/skill.c
     ${AIMEE_SRC_DIR}/modules/skills/skill_rollback.c
-    ${AIMEE_SRC_DIR}/modules/skills/skill_curator.c
-    ${AIMEE_SRC_DIR}/modules/skills/skill_review.c
     ${AIMEE_SRC_DIR}/conversation.c
     ${AIMEE_SRC_DIR}/trajectory_export.c
     ${AIMEE_SRC_DIR}/trajectory_batch.c
@@ -767,12 +774,12 @@ set(AGENT_SRCS
 
     ${AIMEE_SRC_DIR}/server/cli_mistral.c
     ${AIMEE_SRC_DIR}/server/cli_acp.c
+    ${AIMEE_SRC_DIR}/server/cli_agy.c
+    ${AIMEE_SRC_DIR}/server/cli_oracle.c
     ${AIMEE_SRC_DIR}/server/session_compact.c
     ${AIMEE_SRC_DIR}/server/compact_prune.c
     ${AIMEE_SRC_DIR}/server/context_engine.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_backend.c
-    ${AIMEE_SRC_DIR}/modules/delegates/delegate_backend_local.c
-    ${AIMEE_SRC_DIR}/modules/delegates/delegate_backend_ssh.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_backend_docker.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_driver.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_openai.c
@@ -801,6 +808,7 @@ set(AGENT_SRCS
 set(GIT_SRCS
     ${AIMEE_SRC_DIR}/modules/git/mcp_git_query.c
     ${AIMEE_SRC_DIR}/modules/git/mcp_git_write.c
+    ${AIMEE_SRC_DIR}/modules/git/mcp_git_integrate.c
     ${AIMEE_SRC_DIR}/modules/git/mcp_git_branch.c
     ${AIMEE_SRC_DIR}/modules/git/mcp_git_pr.c
     ${AIMEE_SRC_DIR}/modules/git/git_verify.c
@@ -843,7 +851,6 @@ set(CMD_SRCS
     ${AIMEE_SRC_DIR}/cmd_agent_trace.c
     ${AIMEE_SRC_DIR}/cmd_agent_delegate.c
     ${AIMEE_SRC_DIR}/cmd_agent_delegate_toolset.c
-    ${AIMEE_SRC_DIR}/modules/delegates/delegate_prompt_stdin.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_depth.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_plan.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_prompt.c
@@ -919,10 +926,17 @@ set(CLI_SRCS
     ${AIMEE_SRC_DIR}/cli_kb_smoke.c
     ${AIMEE_SRC_DIR}/cli_v1_routes.c
     ${AIMEE_SRC_DIR}/cli_v1_routes_d.c
+    ${AIMEE_SRC_DIR}/cli_v1_routes_e.c
     ${AIMEE_SRC_DIR}/cli_v1_routes_c.c
     ${AIMEE_SRC_DIR}/cli_v1_routes_b.c
+    ${AIMEE_SRC_DIR}/cli_index_bootstrap.c
     ${AIMEE_SRC_DIR}/cli_launch.c
     ${AIMEE_SRC_DIR}/cli_mcp_serve.c
+    # handle_tools_list calls mcp_tool_prose_lean/mcp_compact_tool_prose to build
+    # the lean catalog. Same rule as memory_redirect.c above: the client does not
+    # link aimee-core, so the definer must build in directly (make links it via
+    # CLIENT_SUPPORT_OBJS). Without it the CLI link fails undefined on Windows.
+    ${AIMEE_SRC_DIR}/modules/protocols/mcp/mcp_tool_profile.c
     ${AIMEE_SRC_DIR}/cli_profile.c
     ${AIMEE_SRC_DIR}/client_integrations.c
     ${AIMEE_SRC_DIR}/cmd_profile.c
@@ -932,6 +946,7 @@ set(CLI_SRCS
     ${AIMEE_SRC_DIR}/cli_persona.c
     ${AIMEE_SRC_DIR}/cli_roles.c
     ${AIMEE_SRC_DIR}/modules/workspace/cli_workspace_serve.c
+    ${AIMEE_SRC_DIR}/modules/workspace/workspace_client_diff.c
     ${AIMEE_SRC_DIR}/cli_agent_keys.c
     ${AIMEE_SRC_DIR}/cli_remote.c
     ${AIMEE_SRC_DIR}/modules/delegates/delegate_plan.c
@@ -962,7 +977,7 @@ set(SERVER_SRCS
     ${AIMEE_SRC_DIR}/server/presence.c
     ${AIMEE_SRC_DIR}/server/turn_registry.c
     ${AIMEE_SRC_DIR}/server/wfe_live_delegate.c
-    ${AIMEE_SRC_DIR}/server/wfe_http_proxy.c
+    ${AIMEE_SRC_DIR}/server/workflow_control_bus.c
     ${AIMEE_SRC_DIR}/modules/workflows/wfe_scheduler.c
     ${AIMEE_SRC_DIR}/modules/vault/vault_principal.c
     ${AIMEE_SRC_DIR}/modules/vault/vault_crypto.c
@@ -977,6 +992,7 @@ set(SERVER_SRCS
     ${AIMEE_SRC_DIR}/server/sandbox_audit_bridge.c
     ${AIMEE_SRC_DIR}/server/memory_audit_bridge.c
     ${AIMEE_SRC_DIR}/server/server_runner_endpoints.c
+    ${AIMEE_SRC_DIR}/server/workspace_register_args.c
     ${AIMEE_SRC_DIR}/server/server_state_audit.c
     ${AIMEE_SRC_DIR}/server/server_css_query.c
     ${AIMEE_SRC_DIR}/server/server_runner_endpoints.c
@@ -1024,6 +1040,7 @@ set(SERVER_SRCS
     ${AIMEE_SRC_DIR}/cli_client.c
     ${AIMEE_SRC_DIR}/cli_v1_routes.c
     ${AIMEE_SRC_DIR}/cli_v1_routes_d.c
+    ${AIMEE_SRC_DIR}/cli_v1_routes_e.c
     ${AIMEE_SRC_DIR}/cli_v1_routes_c.c
     ${AIMEE_SRC_DIR}/cli_v1_routes_b.c
     ${AIMEE_SRC_DIR}/server/agent_admission.c
@@ -1507,7 +1524,6 @@ add_executable(aimee
     ${AIMEE_SRC_DIR}/modules/workflows/wfe_advance.c
     ${AIMEE_SRC_DIR}/modules/workflows/wfe_router.c
     ${AIMEE_SRC_DIR}/modules/workflows/wfe_router_catalog.c
-    ${AIMEE_SRC_DIR}/modules/workflows/wfe_autonomous_route.c
 )
 target_include_directories(aimee PRIVATE
     ${AIMEE_SRC_DIR}

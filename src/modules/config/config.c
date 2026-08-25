@@ -323,6 +323,23 @@ ino_t g_config_ino;
 char g_config_cache_path[MAX_PATH_LEN];
 int g_config_cached;
 
+void config_file_id_from(const struct stat *st, config_file_id_t *out)
+{
+   if (!st || !out)
+      return;
+   out->mtime = AIMEE_STAT_MTIM(*st);
+   out->size = st->st_size;
+   out->ino = st->st_ino;
+}
+
+int config_file_id_eq(const config_file_id_t *a, const config_file_id_t *b)
+{
+   if (!a || !b)
+      return 0;
+   return a->mtime.tv_sec == b->mtime.tv_sec && a->mtime.tv_nsec == b->mtime.tv_nsec &&
+          a->size == b->size && a->ino == b->ino;
+}
+
 static int timespec_eq(const struct timespec *a, const struct timespec *b)
 {
    return a->tv_sec == b->tv_sec && a->tv_nsec == b->tv_nsec;
@@ -394,6 +411,9 @@ static const config_schema_entry_t config_schema[] = {
     {"synthesis_model", SCHEMA_STRING, 0},
     {"ingress_cache_placement_enabled", SCHEMA_BOOL, 0},
     {"ingress_compress_min_chars", SCHEMA_INT, 0},
+    {"delegates_enabled", SCHEMA_BOOL, 0},
+    {"prompt_manager_block_enabled", SCHEMA_BOOL, 0},
+    {"prompt_manager_review_enabled", SCHEMA_BOOL, 0},
     {"ingress_preinject_assembly_budget", SCHEMA_INT, 0},
     {"ingress_max_raw_scans", SCHEMA_INT, 0},
     {"code_span_max_lines", SCHEMA_INT, 0},
@@ -447,6 +467,7 @@ static const config_schema_entry_t config_schema[] = {
     {"reasoning_cap", SCHEMA_OBJECT, 0},
     {"dedup", SCHEMA_OBJECT, 0},
     {"cache_shaping", SCHEMA_OBJECT, 0},
+    {"extended_thinking", SCHEMA_OBJECT, 0},
     {"ingress", SCHEMA_OBJECT, 0},
     {"dogfood", SCHEMA_OBJECT, 0},
     {"learning", SCHEMA_OBJECT, 0},
@@ -704,14 +725,19 @@ static void config_set_defaults(config_t *cfg)
 
    /* Defaults */
    snprintf(cfg->db1_path, sizeof(cfg->db1_path), "%s", config_default_db1_path());
-   /* Default-ON: a delegate's shell and file ops run inside its own container rather
-    * than in-process with aimee-server's filesystem and environment. Non-flat (the
-    * parse below carries an env override), so the default lives here, not in
-    * config_flat_defaults[]. */
-   cfg->delegate_sandbox = 1;
+   /* Default-ON: co-located shell execution is namespace-isolated to the workspace.
+    * This is the mode the delegate shell guard in tool_bash() reads (it refuses a
+    * delegated shell when the mode is OFF), so leaving it at the SANDBOX_MODE_OFF
+    * zero value made that guard refuse EVERY co-located delegate shell on an
+    * unconfigured install — isolation-by-default and delegate-shells-work-by-default
+    * cannot both hold while delegates are always containerized and this defaults off.
+    * Non-flat (sandbox is a SCHEMA_OBJECT section), so the default lives here.
+    * Opt out with `sandbox: {"mode": "off"}` — config_save persists that opt-out. */
+   cfg->sandbox.mode = SANDBOX_MODE_WORKSPACE_ONLY;
    snprintf(cfg->delegate_sandbox_package_access, sizeof(cfg->delegate_sandbox_package_access),
             "proxy");
-   cfg->compact_enabled = 1; /* default on; set before no-config early returns */
+   cfg->compact_enabled = 1;     /* default on; set before no-config early returns */
+   cfg->compact_from_record = 0; /* default-off until the quality baseline exists */
    cfg->coord_closet_enabled =
        1; /* fold §2: default-ON — conserves identifiers elided by the
            * default-on compress/fold so lossy reduction stays recoverable */
@@ -724,7 +750,11 @@ static void config_set_defaults(config_t *cfg)
    cfg->fold_register_enabled = 0; /* fold §6: default-off */
    cfg->fold_freeze_enabled = 0;   /* fold §3: default-off */
    cfg->fold_freeze_tail_cap_msgs = 0;
-   cfg->fold_recall_enabled = 0; /* fold §4: default-off */
+   /* fold §4: default-ON. The page table is what makes eviction REVERSIBLE — without
+    * it a folded coordinate is simply gone, and the agent re-derives it. It only ever
+    * ADDS a bounded hint when the newest turn re-touches something already evicted, so
+    * the downside is a few lines of text and the upside is not losing the thread. */
+   cfg->fold_recall_enabled = 1;
    cfg->fold_recall_ttl_turns = 0;
    /* SAFE is useful without provider-specific pricing guesses: it only compacts
     * strict JSON returned by a local tool before that result's first dispatch. */
@@ -860,6 +890,11 @@ static void config_set_defaults(config_t *cfg)
     * is on, before the compress flag is read — so compress alone is a safe no-op).
     * Anthropic injection + failure-mining stay opt-in (separate gates). */
    cfg->ingress_cache_placement_enabled = 1;
+   /* All three default ON: this change adds off switches, it does not change what
+    * a default install does. */
+   cfg->delegates_enabled = 1;
+   cfg->prompt_manager_block_enabled = 1;
+   cfg->prompt_manager_review_enabled = 1;
    cfg->ingress_preinject_assembly_budget = 6144;
    cfg->ingress_max_raw_scans = 0;
    cfg->code_span_max_lines = 400;
@@ -909,6 +944,8 @@ static void config_set_defaults(config_t *cfg)
    cfg->reasoning_cap_enabled = 0;
    cfg->dedup_enabled = 1;         /* default-ON: only acts on caller Idempotency-Key requests */
    cfg->cache_shaping_enabled = 1; /* default-ON: cost win, marks aimee's own Anthropic prefix */
+   /* default-OFF: thinking tokens are billed, so enabling this changes spend. */
+   cfg->extended_thinking_enabled = 0;
    cfg->ingress_usage_accounting_enabled = 1; /* default-ON: begin ingress cost accounting */
    cfg->ingress_audit_async = 1; /* default-ON: keep the cost-row write off the response path */
    cfg->ingress_trusted_proxy_secret[0] = '\0';
@@ -964,8 +1001,6 @@ static void config_set_defaults(config_t *cfg)
    cfg->skills_stale_after_days = 30;
    cfg->skills_archive_after_days = 90;
    cfg->skills_dispatch_enabled = 1;
-   cfg->skills_curator_enabled = 0;
-   cfg->skills_curator_interval_hours = 168;
    cfg->skills_dispatch_max_index = 24;
    cfg->skills_dispatch_advisory = 0;
    cfg->skills_capability_autostub = 0;
@@ -1124,6 +1159,11 @@ int config_load(config_t *cfg)
    return rc;
 }
 
+int config_cache_disabled(void)
+{
+   return getenv("AIMEE_NO_CACHE") != NULL;
+}
+
 int config_load_file(config_t *cfg)
 {
    config_set_defaults(cfg);
@@ -1135,7 +1175,7 @@ int config_load_file(config_t *cfg)
     * same-timestamp (or clock-skewed) rewrite — observed on the tiered appliance
     * filesystem, where an in-place `aimee workspace add` rewrite kept serving the
     * stale (empty-workspaces) snapshot, which config_save then re-serialised. */
-   if (!getenv("AIMEE_NO_CACHE") && g_config_cached)
+   if (!config_cache_disabled() && g_config_cached)
    {
       struct stat st;
       if (stat(path, &st) == 0)
@@ -1299,6 +1339,18 @@ int config_load_file(config_t *cfg)
    if (cJSON_IsNumber(item) && item->valuedouble > 0)
       cfg->ingress_compress_min_chars = (int)item->valuedouble;
 
+   item = cJSON_GetObjectItemCaseSensitive(root, "delegates_enabled");
+   if (cJSON_IsBool(item))
+      cfg->delegates_enabled = cJSON_IsTrue(item);
+
+   item = cJSON_GetObjectItemCaseSensitive(root, "prompt_manager_block_enabled");
+   if (cJSON_IsBool(item))
+      cfg->prompt_manager_block_enabled = cJSON_IsTrue(item);
+
+   item = cJSON_GetObjectItemCaseSensitive(root, "prompt_manager_review_enabled");
+   if (cJSON_IsBool(item))
+      cfg->prompt_manager_review_enabled = cJSON_IsTrue(item);
+
    /* CSS migration assistant style-graph write path (WP-C). The field +
     * descriptor + save existed, but the YAML load parse was missing, so the
     * flag never took effect during indexing. */
@@ -1332,17 +1384,20 @@ int config_load_file(config_t *cfg)
 
    /* Default-on; parse the explicit opt-out so `subagent_ban_enabled: false` loads. */
 
-   /* Delegate sandbox: default 1 (on) from config_set_defaults, so an unconfigured
-    * install isolates delegates; only an explicit `delegate_sandbox: false` opts out.
-    * A deploy that cannot easily write aimee.yaml (e.g. a container image whose config
-    * is baked) can flip it with AIMEE_DELEGATE_SANDBOX=0/1 — the env wins. */
+   /* `delegate_sandbox` no longer selects anything: a delegate runs in a container
+    * or not at all. Say so rather than ignore it silently — an operator who set it
+    * to false chose an execution model that no longer exists, and their delegates
+    * will now refuse to run instead of quietly running on the host. The key stays
+    * in config_schema[] so it does not also draw "unknown key". */
    item = cJSON_GetObjectItemCaseSensitive(root, "delegate_sandbox");
-   if (cJSON_IsBool(item))
-      cfg->delegate_sandbox = cJSON_IsTrue(item);
+   if (cJSON_IsBool(item) && !cJSON_IsTrue(item))
+      fprintf(stderr, "aimee: config warning: `delegate_sandbox: false` is no longer honoured — a "
+                      "delegate runs in its own container or not at all. Remove the key.\n");
    {
       const char *e = getenv("AIMEE_DELEGATE_SANDBOX");
-      if (e && (e[0] == '1' || e[0] == '0'))
-         cfg->delegate_sandbox = (e[0] == '1');
+      if (e && e[0] == '0')
+         fprintf(stderr, "aimee: config warning: AIMEE_DELEGATE_SANDBOX=0 is no longer honoured — "
+                         "a delegate runs in its own container or not at all.\n");
    }
    item = cJSON_GetObjectItemCaseSensitive(root, "delegate_sandbox_image");
    if (cJSON_IsString(item) && item->valuestring[0])

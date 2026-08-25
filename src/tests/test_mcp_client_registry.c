@@ -10,6 +10,7 @@
 #include "aimee/protocols/mcp/mcp_client_registry.h"
 #include "aimee/protocols/mcp/mcp_tools.h"
 #include "agent_code_capabilities.h"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
 static const char *g_http_response;
 static int g_http_status = -1;
@@ -132,7 +133,7 @@ static const char *mock_server_path(void)
 
 static void make_package_manager_link(char *dir, size_t dir_len, char *path, size_t path_len)
 {
-   snprintf(dir, dir_len, "/tmp/aimee-mcp-registry-XXXXXX");
+   snprintf(dir, dir_len, "%s/aimee-mcp-registry-XXXXXX", platform_tmpdir());
    assert(mkdtemp(dir) != NULL);
    snprintf(path, path_len, "%s/npx", dir);
    char target[512];
@@ -294,10 +295,13 @@ static void test_namespaced_tools_and_dispatch(void)
    int saw_delegate_background_absent = 0;
    int saw_delegate_cwd = 0;
    int saw_delegate_status = 0;
-   int saw_roundtable_status = 0;
+   int saw_roundtable_review = 0;
+   int saw_roundtable_status_absent = 1;
    int saw_job_family = 0;
    int saw_skill_manage = 0;
    int saw_skill_manage_cwd = 0;
+   int saw_git_path_is_universal = 0;
+   int saw_git_fetch_is_remote_tracking_only = 0;
    cJSON *tool = NULL;
    cJSON_ArrayForEach(tool, public_tools)
    {
@@ -306,12 +310,42 @@ static void test_namespaced_tools_and_dispatch(void)
          saw_namespaced = 1;
       if (cJSON_IsString(tool_name) && strcmp(tool_name->valuestring, "delegate_status") == 0)
          saw_delegate_status = 1;
+      if (cJSON_IsString(tool_name) && strcmp(tool_name->valuestring, "roundtable_review") == 0)
+         saw_roundtable_review = 1;
+      /* roundtable_review blocks and returns the verdict, so there is no poller
+       * to advertise -- and advertising one is what taught agents to spend a
+       * model turn per poll on a job that runs for minutes. */
       if (cJSON_IsString(tool_name) && strcmp(tool_name->valuestring, "roundtable_status") == 0)
-         saw_roundtable_status = 1;
+         saw_roundtable_status_absent = 0;
       /* job_start/job_status were collapsed into the `job` family (P4b); the
        * member description no longer appears standalone. Verify the family tool. */
       if (cJSON_IsString(tool_name) && strcmp(tool_name->valuestring, "job") == 0)
          saw_job_family = 1;
+      /* The git tool resolves WHICH repository it acts on from args["path"]
+       * (mcp_chdir_git_root's priority-1 candidate). That param was described as
+       * "clone: local path; verify: repo path", so a schema-driven caller never
+       * passed it for status/commit/push and silently got whatever session state
+       * resolved to — in a worktree-isolated session, the SHARED checkout on another
+       * branch, where a commit stages someone else's work. The description has to
+       * say the param selects the repository for EVERY command. */
+      if (cJSON_IsString(tool_name) && strcmp(tool_name->valuestring, "git") == 0)
+      {
+         cJSON *tool_desc = cJSON_GetObjectItemCaseSensitive(tool, "description");
+         cJSON *schema = cJSON_GetObjectItemCaseSensitive(tool, "inputSchema");
+         cJSON *props = cJSON_GetObjectItemCaseSensitive(schema, "properties");
+         cJSON *path = cJSON_GetObjectItemCaseSensitive(props, "path");
+         cJSON *desc = cJSON_GetObjectItemCaseSensitive(path, "description");
+         if (cJSON_IsString(desc) && strstr(desc->valuestring, "every command") &&
+             strstr(desc->valuestring, "SHARED checkout"))
+            saw_git_path_is_universal = 1;
+         cJSON *prune = cJSON_GetObjectItemCaseSensitive(props, "prune");
+         cJSON *prune_desc = cJSON_GetObjectItemCaseSensitive(prune, "description");
+         if (cJSON_IsString(tool_desc) &&
+             strstr(tool_desc->valuestring, "writes/prunes only refs/remotes/<remote>/*") &&
+             cJSON_IsString(prune_desc) &&
+             strstr(prune_desc->valuestring, "local branches are never"))
+            saw_git_fetch_is_remote_tracking_only = 1;
+      }
       if (cJSON_IsString(tool_name) && strcmp(tool_name->valuestring, "skill_manage") == 0)
       {
          saw_skill_manage = 1;
@@ -340,10 +374,13 @@ static void test_namespaced_tools_and_dispatch(void)
    assert(saw_delegate_background_absent);
    assert(saw_delegate_cwd);
    assert(saw_delegate_status);
-   assert(saw_roundtable_status);
+   assert(saw_roundtable_review);
+   assert(saw_roundtable_status_absent);
    assert(saw_job_family);
    assert(saw_skill_manage);
    assert(saw_skill_manage_cwd);
+   assert(saw_git_path_is_universal);
+   assert(saw_git_fetch_is_remote_tracking_only);
    cJSON_Delete(public_tools);
 
    mcp_client_registry_shutdown();
@@ -473,7 +510,7 @@ static void test_osv_offline_cache_miss_allows(void)
  * built-in tool surface (name + sorted schema property keys + required), captured
  * via the DUMP_TOOLS path in test_mcp_client_registry.c. Regenerate after an
  * intentional tool change: DUMP_TOOLS=1 ./unit-test-mcp-client-registry 2>&1. */
-#define MCP_TOOLS_GOLDEN_COUNT 54
+#define MCP_TOOLS_GOLDEN_COUNT 53
 #define MCP_TOOLS_GOLDEN                                                                           \
    "ask_user {choices,question} req:question\n"                                                    \
    "ast_grep_search {lang,path,pattern} req:lang,pattern\n"                                        \
@@ -483,7 +520,7 @@ static void test_osv_offline_cache_miss_allows(void)
    "call_tool {arguments,name} req:arguments,name\n"                                               \
    "clarify {answer,command,description,session_id} req:command\n"                                 \
    "dashboard_metrics {} req:\n"                                                                   \
-   "delegate {branch,cwd,persona,prompt,role} req:persona,prompt,role\n"                           \
+   "delegate {branch,cwd,persona,prompt,role,tools} req:persona,prompt,role\n"                     \
    "delegate_reply {content,delegation_id} req:content,delegation_id\n"                            \
    "delegate_status {job_id} req:job_id\n"                                                         \
    "describe_tool {name} req:name\n"                                                               \
@@ -494,19 +531,19 @@ static void test_osv_offline_cache_miss_allows(void)
    "epistemic_directive "                                                                          \
    "{anchor_entity,anchor_file,cause,command,id,limit,note,priority,question,resolution_memory_"   \
    "id,state,suppress,topic,valid_until} req:command\n"                                            \
-   "find_symbol {identifier,project,scope} req:identifier\n"                                       \
+   "find_symbol {identifier,identifiers,project,scope} req:\n"                                     \
    "find_tools {limit,query} req:\n"                                                               \
    "get_help {topic} req:\n"                                                                       \
    "get_identity {} req:\n"                                                                        \
    "git "                                                                                          \
-   "{action,async,auto,base,body,branch,command,count,depth,diff_stat,expected_head_sha,files,"    \
-   "force,index,job_id,merge_method,message,mirror,mode,name,number,path,prune,rebase,ref,remote," \
-   "source,staged,stat_only,state,title,url,wait} req:command\n"                                   \
+   "{abort_on_conflict,action,all,async,auto,base,body,branch,command,count,depth,diff_stat,"      \
+   "expected_head_sha,files,force,index,job_id,merge_method,message,mirror,mode,name,number,path," \
+   "prune,rebase,ref,remote,source,staged,stat_only,state,title,url,wait} req:command\n"           \
    "graph {command,cwd,entity,episode_key,limit,project,query,scope,workspace} req:command\n"      \
    "host {command,name} req:command\n"                                                             \
    "index "                                                                                        \
-   "{command,file_path,judge,line_end,line_start,max_results,node,paths,project,query,scope,"      \
-   "symbol} "                                                                                      \
+   "{command,file_path,file_paths,judge,line_end,line_start,max_results,node,paths,project,"       \
+   "queries,query,scope,spans,symbol,symbols} "                                                    \
    "req:command\n"                                                                                 \
    "job {command,job_id,max_concurrent,plan_id} req:command\n"                                     \
    "learning "                                                                                     \
@@ -515,7 +552,8 @@ static void test_osv_offline_cache_miss_allows(void)
    "list_curiosity_items {limit,state} req:\n"                                                     \
    "lsp {col,command,file,line,workspace} req:command\n"                                           \
    "memory "                                                                                       \
-   "{command,confidence,content,cwd,dry_run,force,handle,id,key,kind,memory_id,modes,project,"     \
+   "{as_of,command,confidence,content,cwd,dry_run,force,handle,id,key,kind,memory_id,modes,"       \
+   "project,"                                                                                      \
    "query,reason,scope,tier,verb,workspace} req:command\n"                                         \
    "memory_recall {cwd,limit_tokens,project,scope,session_start,task_hint,workspace} req:\n"       \
    "note {command,content,limit,query,tag,tags,title} req:command\n"                               \
@@ -537,8 +575,8 @@ static void test_osv_offline_cache_miss_allows(void)
    "recall {block_type,command,cwd,limit,limit_tokens,project,query,scope,since,workspace} "       \
    "req:command\n"                                                                                 \
    "roadmap {command,roadmap_id} req:command\n"                                                    \
-   "roundtable_review {artifact_stage,brief,diff,original_request,roundtable,workdir} req:diff\n"  \
-   "roundtable_status {run_id} req:run_id\n"                                                       \
+   "roundtable_review {artifact_stage,brief,diff,original_request,roundtable,workdir} "            \
+   "req:diff,original_request\n"                                                                   \
    "rules {command,reason,text} req:command\n"                                                     \
    "search_docs {cwd,max_results,project,query,scope} req:query\n"                                 \
    "search_memory {cwd,filter,project,query,scope,workspace} req:query\n"                          \
@@ -583,18 +621,32 @@ static void tool_signature(cJSON *tool, char *out, size_t outsz)
    if (cJSON_IsArray(req))
       cJSON_ArrayForEach(c, req) if (cJSON_IsString(c) && nr < 48) rq[nr++] = c->valuestring;
    qsort(rq, (size_t)nr, sizeof(rq[0]), tools_cmp_ptr);
+   /* Clamped appends: snprintf returns what it WOULD have written, so a signature
+    * wider than the buffer would otherwise walk past it (and, before the clamp,
+    * silently truncate away the `req:` half — a tool could lose a required
+    * parameter and this golden would not notice). */
    int o = snprintf(out, outsz, "%s {", cJSON_IsString(name) ? name->valuestring : "?");
+   if (o > (int)outsz - 1)
+      o = (int)outsz - 1;
+#define SIG_APPEND(...)                                                                            \
+   do                                                                                              \
+   {                                                                                               \
+      int n_ = snprintf(out + o, outsz - (size_t)o, __VA_ARGS__);                                  \
+      o = (n_ < 0 || o + n_ > (int)outsz - 1) ? (int)outsz - 1 : o + n_;                           \
+   } while (0)
    for (int i = 0; i < nk; i++)
-      o += snprintf(out + o, outsz - (size_t)o, "%s%s", i ? "," : "", keys[i]);
-   o += snprintf(out + o, outsz - (size_t)o, "} req:");
+      SIG_APPEND("%s%s", i ? "," : "", keys[i]);
+   SIG_APPEND("} req:");
    for (int i = 0; i < nr; i++)
-      o += snprintf(out + o, outsz - (size_t)o, "%s%s", i ? "," : "", rq[i]);
+      SIG_APPEND("%s%s", i ? "," : "", rq[i]);
+#undef SIG_APPEND
+   assert(o < (int)outsz - 1); /* a truncated signature is not a check */
 }
 static void test_tools_list_surface(void)
 {
    cJSON *tools = mcp_build_tools_list();
    assert(cJSON_IsArray(tools));
-   static char sigs[256][256];
+   static char sigs[256][512];
    int ns = 0;
    cJSON *tool = NULL;
    cJSON_ArrayForEach(tool, tools)
@@ -610,7 +662,7 @@ static void test_tools_list_surface(void)
       ns++;
    }
    qsort(sigs, (size_t)ns, sizeof(sigs[0]), tools_cmp_row);
-   static char joined[256 * 256];
+   static char joined[256 * 512];
    int o = 0;
    for (int i = 0; i < ns; i++)
       o += snprintf(joined + o, sizeof(joined) - (size_t)o, "%s\n", sigs[i]);
@@ -648,11 +700,11 @@ static void test_tool_profile_filter(void)
                                       "find_symbol",
                                       "ast_grep_search",
                                       "preview_blast_radius",
+                                      "index",
                                       "git",
                                       "delegate",
                                       "delegate_status",
                                       "roundtable_review",
-                                      "roundtable_status",
                                       "ask_user",
                                       "send_message",
                                       "note",
@@ -663,13 +715,67 @@ static void test_tool_profile_filter(void)
    assert(profile_core_has("find_tools", core) && profile_core_has("describe_tool", core));
    assert(profile_core_has("call_tool", core));
 
+   /* THE MIRROR ABOVE LISTED THESE BEFORE THE REAL FLOOR DID.
+    *
+    * roundtable_review was in this array but NOT in
+    * MCP_CORE_TOOLS, and nothing compared the two, so the drift went unnoticed.
+    * Measured consequence on am_b84c9294aa: 74 tool calls, the skill telling the
+    * agent to get a review before reporting done, and roundtable never invoked --
+    * reaching it cost find_tools -> describe_tool -> call_tool. The agent shipped
+    * a one-file caller-side fix against a reference that changes four files
+    * elsewhere. Assert both are actually served, not merely mirrored. */
+   {
+      cJSON *served = mcp_build_tools_list();
+      int have_review = 0, have_status = 0;
+      cJSON *t = NULL;
+      cJSON_ArrayForEach(t, served)
+      {
+         cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
+         if (!cJSON_IsString(nm))
+            continue;
+         if (strcmp(nm->valuestring, "roundtable_review") == 0)
+            have_review = 1;
+         if (strcmp(nm->valuestring, "roundtable_status") == 0)
+            have_status = 1;
+      }
+      cJSON_Delete(served);
+      assert(have_review);
+      /* roundtable_review blocks and returns the verdict; a status tool on the
+       * surface is an invitation to poll a call that has already finished. */
+      assert(!have_status);
+   }
+
    /* An asynchronous tool whose poller is NOT core costs the agent a
     * find_tools -> describe_tool -> call_tool detour before it can read the
     * result of a call it was told to make. Measured on a real cell: five of
-    * fourteen tool calls went on reaching delegate_status. roundtable_review
-    * already ships roundtable_status for exactly this reason; delegate must
-    * ship delegate_status on the same grounds. */
-   assert(profile_core_has("roundtable_status", core));
+    * fourteen tool calls went on reaching delegate_status. delegate must ship
+    * delegate_status on those grounds for as long as delegate stays
+    * asynchronous. roundtable took the other road: the review itself now
+    * blocks, so it needs no poller in the floor at all. */
+   assert(profile_core_has("delegate_status", core));
+
+   /* The retrieval an agent reaches for when the question is NOT a symbol name.
+    * Withholding `index` did not reduce retrieval; it moved it to a recursive
+    * shell search, because that was one visible call while index_hybrid cost a
+    * find_tools -> describe_tool -> call_tool detour. Measured across the
+    * benchmark's aimee cells: 87 shell searches emitting 2.4 MB, one large
+    * enough to hit the client's 1 MB output truncation.
+    *
+    * THIS ASSERTION WAS INVERTED ONCE, ON 2026-08-12, and inverted back the same
+    * night. The argument was that the fallback had changed -- `aimee index ...`
+    * now exists as a chainable command named in the standing guidance -- so the
+    * detour was no longer the alternative. Re-tested with the commands live and
+    * the guidance naming them, n=3 each side on a healthy box: CLI invocations
+    * went DOWN 2.3 -> 1.3 per cell, MCP calls 4.3 -> 6.3, searches 3 -> 4.3,
+    * search output 4.2 KB -> 6.1 KB, credits 15.52 -> 19.15 mean (+23%). The
+    * calls it did make were find_tools x4, describe_tool x2, call_tool x1: the
+    * detour, paid in full.
+    *
+    * So the original finding survives a change that looked like it should have
+    * retired it. A schema present in every request outcompetes a sentence
+    * recommending a command, and removing the schema sends the agent to
+    * discovery and to grep rather than to the command. */
+   assert(profile_core_has("index", core));
    assert(profile_core_has("delegate_status", core));
    {
       cJSON *listed = mcp_build_tools_list();
@@ -697,21 +803,21 @@ static void test_tool_profile_filter(void)
    cJSON *t = mcp_build_tools_list();
    int full = cJSON_GetArraySize(t);
    assert(full > expect);
-   assert(mcp_filter_tools_for_profile(t, "full") == 0 && cJSON_GetArraySize(t) == full);
-   assert(mcp_filter_tools_for_profile(t, "nonsense") == 0 && cJSON_GetArraySize(t) == full);
+   assert(mcp_filter_tools_for_profile(t, "full", 1) == 0 && cJSON_GetArraySize(t) == full);
+   assert(mcp_filter_tools_for_profile(t, "nonsense", 1) == 0 && cJSON_GetArraySize(t) == full);
    cJSON_Delete(t);
 
    /* P2 default: env unset + NULL profile resolves to "core" and filters. */
    assert(strcmp(mcp_tool_profile_effective(NULL), "core") == 0);
    t = mcp_build_tools_list();
-   assert(mcp_filter_tools_for_profile(t, NULL) == full - expect);
+   assert(mcp_filter_tools_for_profile(t, NULL, 1) == full - expect);
    assert(cJSON_GetArraySize(t) == expect);
    cJSON_Delete(t);
 
    /* "core" keeps exactly the Tier-0 set — and every named core tool exists in
     * the built list (kept count == expected count proves none was dropped). */
    t = mcp_build_tools_list();
-   int removed = mcp_filter_tools_for_profile(t, "core");
+   int removed = mcp_filter_tools_for_profile(t, "core", 1);
    assert(removed == full - expect);
    assert(cJSON_GetArraySize(t) == expect);
    cJSON *tool = NULL;
@@ -724,7 +830,7 @@ static void test_tool_profile_filter(void)
 
    /* "lean" is an alias for "core". */
    t = mcp_build_tools_list();
-   assert(mcp_filter_tools_for_profile(t, "lean") == full - expect);
+   assert(mcp_filter_tools_for_profile(t, "lean", 1) == full - expect);
    cJSON_Delete(t);
 }
 
@@ -799,6 +905,17 @@ static int schema_requires(cJSON *tool, const char *name)
    return 0;
 }
 
+static void test_memory_recall_is_read_only(void)
+{
+   cJSON *tools = mcp_build_tools_list();
+   cJSON *recall = tools_get(tools, "memory_recall");
+   assert(recall != NULL);
+   cJSON *annotations = cJSON_GetObjectItemCaseSensitive(recall, "annotations");
+   assert(cJSON_IsObject(annotations));
+   assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(annotations, "readOnlyHint")));
+   cJSON_Delete(tools);
+}
+
 /* E1 contract: the words installed guidance gives an agent must map to a direct
  * lean tool, and every code-navigation schema must admit active-project defaults
  * plus an explicit cross-project escape hatch. */
@@ -845,36 +962,62 @@ static void test_get_help_topics_exist(void)
    cJSON_Delete(tools);
 }
 
-/* Some callers must not be able to hand work to a second agent: an evaluation
- * harness measuring one agent, or any run where a delegated sub-agent's tokens
- * and edits would be attributed to the caller. The multi-agent tools are the
- * only way to do that, so a profile has to be able to withhold them. Note the
- * filter fails OPEN on an unknown profile, so "solo" must be handled explicitly
- * or a typo would silently grant delegation instead of removing it. */
-static void test_solo_profile_withholds_multi_agent_tools(void)
+/* THE "solo" PROFILE IS GONE, AND MUST NOT COME BACK.
+ *
+ * It withheld delegate/delegate_status/roundtable_review/roundtable_status so a
+ * run could be measured without a second agent's tokens landing outside the
+ * caller's transcript. That makes the measured thing a configuration nobody
+ * deploys -- the benchmark stops describing aimee and starts describing a
+ * variant built for the benchmark. If delegates should not run, do not configure
+ * them; that is a real deployment state. Hiding shipped tools to flatter a
+ * measurement is not.
+ *
+ * An unknown profile fails OPEN to the full set, so "solo" now presents
+ * everything rather than silently withholding. */
+static void test_solo_profile_is_gone(void)
 {
-   static const char *const multi[] = {"delegate", "delegate_status", "roundtable_review",
-                                       "roundtable_status", NULL};
-   static const char *const kept[] = {
-       "get_help", "find_symbol", "search_memory", "preview_blast_radius", "call_tool", NULL};
-
    cJSON *tools = mcp_build_tools_list_flat();
-   for (int i = 0; multi[i]; i++)
-      assert(tools_get(tools, multi[i]) != NULL); /* present before filtering */
-
-   assert(mcp_filter_tools_for_profile(tools, "solo") > 0);
-   for (int i = 0; multi[i]; i++)
-      assert(tools_get(tools, multi[i]) == NULL);
-   for (int i = 0; kept[i]; i++)
-      assert(tools_get(tools, kept[i]) != NULL);
+   assert(tools_get(tools, "delegate") != NULL);
+   assert(tools_get(tools, "roundtable_review") != NULL);
+   /* Unknown profile -> fail open: nothing is removed. */
+   assert(mcp_filter_tools_for_profile(tools, "solo", 1) == 0);
+   assert(tools_get(tools, "delegate") != NULL);
+   assert(tools_get(tools, "roundtable_review") != NULL);
    cJSON_Delete(tools);
 
-   /* "core" still ships delegation: solo is opt-in, not a quiet default. */
+   /* "core" ships delegation, as it always did. */
    cJSON *core_tools = mcp_build_tools_list_flat();
-   mcp_filter_tools_for_profile(core_tools, "core");
+   mcp_filter_tools_for_profile(core_tools, "core", 1);
    assert(tools_get(core_tools, "delegate") != NULL);
    assert(tools_get(core_tools, "delegate_status") != NULL);
    cJSON_Delete(core_tools);
+}
+
+/* Delegation off removes the delegate tools from EVERY profile, including the
+ * ones that otherwise remove nothing.
+ *
+ * "full" and unknown profiles are the cases worth asserting: they fail open and
+ * return early, so a delegation filter written after that early-return would
+ * silently do nothing on exactly the surface that presents the most tools.
+ *
+ * roundtable_review must SURVIVE. Withholding it would be hiding a working tool
+ * to flatter a measurement, which is what the "no solo profile" decision above
+ * exists to prevent; the review levers change what the prompt demands, not what
+ * the server can do. */
+static void test_delegates_disabled_withholds_delegate_tools(void)
+{
+   const char *profiles[] = {"full", "nonsense", "core", "lean", NULL};
+   for (int i = 0; profiles[i]; i++)
+   {
+      cJSON *tools = mcp_build_tools_list_flat();
+      assert(tools_get(tools, "delegate") != NULL); /* present before */
+      int removed = mcp_filter_tools_for_profile(tools, profiles[i], 0);
+      assert(removed >= 2);
+      assert(tools_get(tools, "delegate") == NULL);
+      assert(tools_get(tools, "delegate_status") == NULL);
+      assert(tools_get(tools, "roundtable_review") != NULL);
+      cJSON_Delete(tools);
+   }
 }
 
 static void test_agent_code_intelligence_contracts(void)
@@ -988,14 +1131,86 @@ static void test_flat_list_keeps_family_members(void)
    printf("  PASS: flat_list_keeps_family_members\n");
 }
 
+/* Trimming prose must cost tokens and nothing else.
+ *
+ * tools/list is re-sent as context on every turn, and 59% of its 20 KB is guidance
+ * prose rather than the shape a client needs to build a call. Shortening it is only
+ * safe if every tool survives and every schema stays exactly as callable, so that is
+ * what this asserts -- not the byte count, which will drift, but the invariants. */
+static void test_prose_trim_keeps_tools_callable(void)
+{
+   cJSON *full = mcp_build_tools_list();
+   cJSON *lean = mcp_build_tools_list();
+   int n = cJSON_GetArraySize(full);
+   assert(n > 0);
+
+   char *before = cJSON_PrintUnformatted(lean);
+   assert(mcp_compact_tool_prose(lean) == n);
+   char *after = cJSON_PrintUnformatted(lean);
+
+   /* It actually saves something, and no tool was dropped. */
+   assert(strlen(after) < strlen(before));
+   assert(cJSON_GetArraySize(lean) == n);
+
+   for (int i = 0; i < n; i++)
+   {
+      cJSON *f = cJSON_GetArrayItem(full, i);
+      cJSON *l = cJSON_GetArrayItem(lean, i);
+      const char *fname = cJSON_GetObjectItemCaseSensitive(f, "name")->valuestring;
+      const char *lname = cJSON_GetObjectItemCaseSensitive(l, "name")->valuestring;
+      assert(strcmp(fname, lname) == 0); /* same tools, same order */
+
+      /* A description may shrink but must never vanish: a nameless tool is worse
+       * than a terse one. */
+      cJSON *ld = cJSON_GetObjectItemCaseSensitive(l, "description");
+      if (cJSON_GetObjectItemCaseSensitive(f, "description"))
+         assert(cJSON_IsString(ld) && ld->valuestring[0]);
+
+      /* The callable shape is untouched: same properties, same types, same required. */
+      cJSON *fs = cJSON_GetObjectItemCaseSensitive(f, "inputSchema");
+      cJSON *ls = cJSON_GetObjectItemCaseSensitive(l, "inputSchema");
+      if (!fs)
+         continue;
+      cJSON *fp = cJSON_GetObjectItemCaseSensitive(fs, "properties");
+      cJSON *lp = cJSON_GetObjectItemCaseSensitive(ls, "properties");
+      assert(cJSON_GetArraySize(fp) == cJSON_GetArraySize(lp));
+      cJSON *prop = NULL;
+      cJSON_ArrayForEach(prop, fp)
+      {
+         cJSON *mirror = cJSON_GetObjectItemCaseSensitive(lp, prop->string);
+         assert(mirror != NULL);
+         cJSON *ft = cJSON_GetObjectItemCaseSensitive(prop, "type");
+         cJSON *lt = cJSON_GetObjectItemCaseSensitive(mirror, "type");
+         if (cJSON_IsString(ft))
+            assert(cJSON_IsString(lt) && strcmp(ft->valuestring, lt->valuestring) == 0);
+         cJSON *fe = cJSON_GetObjectItemCaseSensitive(prop, "enum");
+         cJSON *le = cJSON_GetObjectItemCaseSensitive(mirror, "enum");
+         if (fe)
+            assert(le && cJSON_GetArraySize(fe) == cJSON_GetArraySize(le));
+      }
+      cJSON *fr = cJSON_GetObjectItemCaseSensitive(fs, "required");
+      cJSON *lr = cJSON_GetObjectItemCaseSensitive(ls, "required");
+      if (fr)
+         assert(lr && cJSON_GetArraySize(fr) == cJSON_GetArraySize(lr));
+   }
+
+   free(before);
+   free(after);
+   cJSON_Delete(full);
+   cJSON_Delete(lean);
+}
+
 int main(void)
 {
+   test_prose_trim_keeps_tools_callable();
    printf("test_mcp_client_registry\n");
    test_tools_list_surface();
    test_tool_profile_filter();
    test_call_tool_demux();
    test_get_help_topics_exist();
-   test_solo_profile_withholds_multi_agent_tools();
+   test_memory_recall_is_read_only();
+   test_solo_profile_is_gone();
+   test_delegates_disabled_withholds_delegate_tools();
    test_agent_code_intelligence_contracts();
    test_flat_list_keeps_family_members();
    test_boot_and_lazy_tools();

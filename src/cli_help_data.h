@@ -32,7 +32,10 @@
      "  watch <name> <root>  Install git hooks that re-index after branch changes\n"
      "  blast-radius     Show files affected by changes to a file\n"
      "  structure        Show file structure\n"
-     "  callers          Find callers of a symbol\n"},
+     "  span <file> [start] [end]  Read an exact line range (chainable with &&)\n"
+     "  callers          Find callers of a symbol\n"
+     "  investigate \"<question>\" [...]  Ask the index; several questions, one call\n"
+     "  hybrid \"<phrase>\" [...]  Search for a phrase, not a symbol (--scope all)\n"},
     {"workspace", "Workspace management (add, list, remove)", CLIENT_TIER_ADVANCED, 0,
      "  add <path>       Register a directory as a workspace and index its projects\n"
      "  list             List configured workspaces and their indexed projects\n"
@@ -42,7 +45,7 @@
      "  search           Search stored memory\n"
      "  store            Store a memory\n"
      "  list             List memories\n"
-     "  get              Read a memory by id\n"
+     "  get              Read a memory by id (--as-of <ts>: was it in force then?)\n"
      "  read             Assemble current memory context\n"},
     {"economizer", "Economizer telemetry", CLIENT_TIER_ADVANCED, 0,
      "  stats            Gateway-mutation counters, tool-condense savings, avoided-$\n"},
@@ -108,8 +111,8 @@
      "  show <job_id>    Alias for status\n"
      "  logs <job_id>    Print the recorded delegate result/log body\n"
      "  cancel <job_id>  Cooperatively cancel a queued or running delegate job\n"},
-    {"model", "Model capability metadata", CLIENT_TIER_ADVANCED, 0,
-     "  list             List known models (--capability <name>, --open-weights)\n"
+    {"catalog", "Model capability metadata", CLIENT_TIER_ADVANCED, 0,
+     "  list             List catalogued models (--capability <name>, --open-weights)\n"
      "  show <model>     Show context, cost, flags, cutoff, deprecation\n"
      "  refresh          Refresh model metadata cache\n"},
     {"job", "Coordinated parallel job management", CLIENT_TIER_ADVANCED, 0,
@@ -123,16 +126,20 @@
      "  exec             Run a command through a backend\n"
      "                   --backend X --task-id Y [--image I] [--host H]\n"
      "                   [--no-hibernate] \"<cmd>\"\n"},
-    {"agent", "Sub-agent management", CLIENT_TIER_ADVANCED, 0,
-     "  list             List configured delegates\n"
-     "  add              Add or update a delegate provider\n"
-     "  setup            Run an agent provider's attended OAuth setup\n"
-     "  local            Register/update a local OpenAI-compatible delegate\n"
+    {"model", "Model roster management", CLIENT_TIER_ADVANCED, 0,
+     "  list             List configured models\n"
+     "  add              Add or update a model\n"
+     "  setup            Run a provider's attended OAuth setup\n"
+     "  local            Register/update a local OpenAI-compatible model\n"
      "                   (--provider openai|llama-eval for request shaping)\n"
-     "  remove           Remove a configured delegate\n"
-     "  enable           Enable a configured delegate\n"
-     "  disable          Disable a configured delegate\n"
-     "  probe            Probe delegate endpoint, slots, and execution\n"},
+     "  remove           Remove a configured model\n"
+     "  enable           Enable a configured model\n"
+     "  disable          Disable a configured model\n"
+     "  probe            Probe a model's endpoint, slots, and execution\n"},
+    {"agent", "Deprecated alias for `model`", CLIENT_TIER_ADVANCED, 0,
+     "  Every subcommand of `aimee model`, kept working under the old name.\n"
+     "  A roster entry is one (endpoint, model) target, so it is now a MODEL;\n"
+     "  `aimee catalog` is the separate per-model capability metadata.\n"},
     {"codex", "Codex OAuth recovery", CLIENT_TIER_ADVANCED, 0,
      "  reauth           Re-authenticate Codex after refresh is rejected\n"},
     {"persona", "Persona management", CLIENT_TIER_CORE, 0,
@@ -221,7 +228,34 @@
      "  disable <id>     Disable a cron job (--all for rollback)\n"
      "  remove <id>      Remove a cron job\n"},
 
-    {"git", "Git helpers", CLIENT_TIER_ADMIN, 0,
+    {"git", "Git and GitHub operations (run on aimee-server)", CLIENT_TIER_ADMIN, 0,
+     "  Every command takes an optional primary word then key=value pairs:\n"
+     "    aimee git merge origin/testing      aimee git pr create title=\"...\"\n"
+     "    aimee git sync                      aimee git log count=5\n"
+     "\n"
+     "  status           Working tree status\n"
+     "  add <paths|-A>   Stage changes (-A includes new files)\n"
+     "  commit <msg>     Stage tracked changes and commit\n"
+     "  push [-f]        Push the session's branch\n"
+     "  pull / fetch     Bring refs down from a remote\n"
+     "  sync [base]      Make this branch current with its base (fetch + rebase)\n"
+     "  merge <ref>      Merge a ref in; conflicts are named and undone by default\n"
+     "  rebase <base>    Rebase onto a branch, same conflict handling\n"
+     "  cherry-pick <r>  Apply a commit here\n"
+     "  revert <ref>     Back a commit out\n"
+     "    ... any of the five above also take: continue | abort | skip\n"
+     "  switch <branch>  Move to a branch\n"
+     "  checkout <paths> Restore paths from a ref\n"
+     "  restore <paths>  Restore or unstage paths\n"
+     "  reset <ref>      soft/mixed/hard reset\n"
+     "  branch <action>  create/switch/list/delete/claim/orphan\n"
+     "  stash <action>   push/pop/apply/list/drop\n"
+     "  tag <action>     create/list/delete\n"
+     "  log / diff       History and diff summaries\n"
+     "  pr <action>      create/view/list/edit/checks/merge_status/merge/ready\n"
+     "                   (create writes its own title and body from your commits)\n"
+     "  issue list       Open issues\n"
+     "  clone <url>      Clone a repository\n"
      "  verify           Verify the current changes before merge\n"},
     {"clean", "Remove local aimee configuration and integrations", CLIENT_TIER_ADMIN, 0, NULL},
     {"mcp-serve", "MCP stdio bridge to aimee-server", CLIENT_TIER_ADMIN, 1, NULL},
@@ -236,7 +270,8 @@
     {"config", "View and update configuration", CLIENT_TIER_CORE, 1,
      "  show             Show all config values\n"
      "  get <key>        Get one config value\n"
-     "  set <key> <val>  Set one config value\n"},
+     "  set <key> <val>  Set one config value\n"
+     "  deploy-env       Emit the compose env for this backend record\n"},
     {"vault", "Per-user encrypted agent credentials", CLIENT_TIER_CORE, 0,
      "  unlock                       Unlock the vault (creates a local root key)\n"
      "  set <agent> <name> <secret>  Store an encrypted credential\n"

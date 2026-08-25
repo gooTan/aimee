@@ -29,9 +29,12 @@
 #include <aimee/delegates/delegate_economics.h>
 #include <aimee/delegates/delegate_run_phases.h>
 #include "db1/delegate_learning.h"
+#include "db1/delegate_reservation.h"
+#include "request_context.h" /* execution key carried as the idempotency key */
 #include "kb_client.h"
 #include "kb_bandit.h"
 #include "db1/interaction_events.h"
+#include <aimee/delegates/delegate_launch_args.h>
 #include <aimee/delegates/delegate_role.h>
 #include "delegate_ensemble.h"
 #include "evidence_replay.h"
@@ -698,6 +701,11 @@ void delegate_worker(void *arg)
    char delegate_worktree_path[MAX_PATH_LEN] = "";
    char delegate_git_root[MAX_PATH_LEN] = "";
    char delegate_work_name[32] = "";
+   /* The turn's root when it is NOT the directory the caller named -- a
+    * server-side reconstruction of a client workspace. Declared here, ahead of
+    * every `goto delegate_fail`, so no jump can skip its initialiser. Empty means
+    * the turn runs in the caller's own cwd. See "ONE ROOT PER DELEGATE TURN". */
+   char turn_root[MAX_PATH_LEN] = "";
    cJSON *req = cctx->req;
    bind_request_session_creds(req);
    cJSON *jrole = cJSON_GetObjectItemCaseSensitive(req, "role");
@@ -710,6 +718,7 @@ void delegate_worker(void *arg)
    cJSON *jcwd = cJSON_GetObjectItemCaseSensitive(req, "cwd");
    cJSON *jbranch = cJSON_GetObjectItemCaseSensitive(req, "branch");
    cJSON *jtimeout = cJSON_GetObjectItemCaseSensitive(req, "timeout_ms");
+   cJSON *jloop_timeout_cap = cJSON_GetObjectItemCaseSensitive(req, "tool_loop_timeout_ms_cap");
    cJSON *jmaxturns = cJSON_GetObjectItemCaseSensitive(req, "max_turns");
    cJSON *jmaxturnscap = cJSON_GetObjectItemCaseSensitive(req, "max_turns_cap");
    cJSON *jhandoff = cJSON_GetObjectItemCaseSensitive(req, "handoff_json");
@@ -735,6 +744,11 @@ void delegate_worker(void *arg)
    const char *branch =
        (cJSON_IsString(jbranch) && jbranch->valuestring[0]) ? jbranch->valuestring : NULL;
    int timeout_ms = cJSON_IsNumber(jtimeout) ? (int)jtimeout->valuedouble : 0;
+   int tool_loop_timeout_ms_cap =
+       cJSON_IsNumber(jloop_timeout_cap) && jloop_timeout_cap->valuedouble > 0
+           ? (jloop_timeout_cap->valuedouble > INT_MAX ? INT_MAX
+                                                       : (int)jloop_timeout_cap->valuedouble)
+           : 0;
    int max_turns = cJSON_IsNumber(jmaxturns) ? (int)jmaxturns->valuedouble : -1;
    int max_turns_cap = cJSON_IsNumber(jmaxturnscap) && jmaxturnscap->valuedouble > 0
                            ? (int)jmaxturnscap->valuedouble
@@ -808,8 +822,40 @@ void delegate_worker(void *arg)
       compute_ctx_free(cctx);
       return;
    }
+   /* What this delegate may do, resolved ONCE, here, because this is the first
+    * point at which the role is known to be real. Everything downstream reads
+    * this: the tool default below, the mount, the drift check, the no-op check.
+    *
+    * It is resolved before the tool default rather than after because that
+    * default used to answer from the built-in table while the mount answered
+    * from the resolved set -- so a role an operator defined without `tools` was
+    * handed them here and refused at dispatch. Same fact, two sources, and the
+    * one that ran first was the one that could not see the definition.
+    *
+    * Failure holds nothing: a delegate whose permissions cannot be established
+    * reads and changes nothing. */
+   delegate_permissions_t delegate_perms;
+   {
+      char *role_definition = role_template_frontmatter(cwd[0] ? cwd : NULL, role);
+      int perms_rc = delegate_permissions_for_role(role, role_definition, &delegate_perms);
+      free(role_definition);
+      if (perms_rc != 0)
+      {
+         char permsmsg[256];
+         snprintf(permsmsg, sizeof(permsmsg),
+                  "refusing to run delegate: the permissions for role '%s' could not be "
+                  "resolved, so it holds none. Check the role template's `permissions:` block.",
+                  role);
+         delegation_compute_error(cctx, permsmsg);
+         compute_ctx_free(cctx);
+         return;
+      }
+   }
+
    int explicit_tools = cJSON_IsTrue(jtools),
-       force_tools = delegate_role_auto_tools_for_invocation(role, max_turns, explicit_tools);
+       force_tools = delegate_auto_tools_for_invocation(
+           delegate_permissions_has(&delegate_perms, AIMEE_DELEGATES_PERM_TOOLS), max_turns,
+           explicit_tools);
    force_tools = force_tools || (toolset_override && toolset_override[0]);
    /* An explicit `tools:false` (CLI --no-tools) overrides the role's tools-on
     * default: an artifact-provided panel review of an inline diff must run
@@ -843,6 +889,16 @@ void delegate_worker(void *arg)
       delegation_compute_error(cctx, "failed to load agent config");
       compute_ctx_free(cctx);
       return;
+   }
+   if (tool_loop_timeout_ms_cap > 0)
+   {
+      struct timespec now;
+      if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+      {
+         acfg.tool_loop_timeout_ms_cap = tool_loop_timeout_ms_cap;
+         acfg.tool_loop_deadline_ms =
+             (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 + tool_loop_timeout_ms_cap;
+      }
    }
    /* A participant is a delegate-service continuation token. Resolve it here,
     * behind the generic delegation boundary, so coordinators never learn or
@@ -1066,8 +1122,11 @@ void delegate_worker(void *arg)
     * forever, leaking its pool thread + concurrency slot (see
     * delegate_effective_timeout_ms). Resolve request > agent-config > default. */
    if (target_agent)
+   {
       target_agent->timeout_ms =
           delegate_effective_timeout_ms(timeout_ms, target_agent->timeout_ms);
+      target_agent->tool_loop_timeout_ms_cap = tool_loop_timeout_ms_cap;
+   }
    delegate_apply_max_turns_policy(&acfg, role, max_turns);
    delegate_apply_max_turns_cap(&acfg, role, max_turns_cap);
    if (cctx->background_job_id > 0 && target_agent)
@@ -1160,6 +1219,43 @@ void delegate_worker(void *arg)
       }
    }
 
+   /* ONE ROOT PER DELEGATE TURN.
+    *
+    * Everything below derives from `cwd`: the worktree the file tools write to
+    * (delegate_resolve_worktree), the working directory the shell runs in
+    * (run_cmd_set_cwd), the absolute paths rewritten in the prompt, the tree the
+    * no-op detector diffs, the parent-write guard. Resolving the turn's root
+    * HERE -- once, before any of them -- is what stops them disagreeing.
+    *
+    * They used to. A background delegate on a DETACHED (client-served) workspace
+    * had its shell redirected into a server-side tree hundreds of lines below
+    * this point, after the worktree had already been resolved against the
+    * client's path. One delegate, two roots: it wrote through a path that existed
+    * only on the client and ran `pwd` somewhere else entirely. So it could edit
+    * code and could not build, test, or diff the edit -- and nothing told it so.
+    * Measured: asked to add one comment line to a 2157-line file, such a delegate
+    * truncated it to 5 lines and reported success.
+    *
+    * A no-op for every other turn. The resolver returns 0 unless this is a
+    * background job on a detached workspace that has recorded a remote and head
+    * via `aimee workspace mirror-sync`; a detached workspace with nothing
+    * recorded is handled further down, where having no usable tree at all is a
+    * refusal rather than a redirect. */
+   if (cwd[0] && cctx->background_job_id > 0 &&
+       workspace_turn_resolve_detached_mirror_cwd(cwd, turn_root, sizeof(turn_root)) &&
+       turn_root[0])
+   {
+      aimee_log(LOG_WARN, "delegate",
+                "delegate %s: detached workspace '%s' has no client to serve this background job; "
+                "binding the whole turn -- shell and file tools alike -- to the server-side "
+                "reconstruction at %s. That tree is the last state synced by `aimee workspace "
+                "mirror-sync` and may be behind the client",
+                deleg_id, cwd, turn_root);
+      cwd = turn_root;
+   }
+   else
+      turn_root[0] = '\0'; /* a partial write from a failed resolve is not a root */
+
    /* Resolve @path/to/file references in the delegate prompt */
    if (strchr(prompt, '@'))
    {
@@ -1167,8 +1263,33 @@ void delegate_worker(void *arg)
       if (resolved_prompt)
          prompt = resolved_prompt;
    }
-   int role_allows_writes = delegate_role_is_write(role);
-   int delegate_allows_writes = role_allows_writes && delegate_prompt_allows_writes(prompt);
+   /* Read, not resolved: delegate_perms was established when the role was
+    * validated, above. The worktree plan and the container spec both consume
+    * this, and it is the one fact they must agree on -- working it out in two
+    * places is how a delegate ends up planned read-only and mounted writable.
+    *
+    * The brief is not consulted. A phrase like "do not edit files" used to
+    * narrow a write role to read-only, which meant the same delegate had
+    * different powers depending on how its prompt was worded. The role decides;
+    * a read-only run is a read-only role. */
+   /* Scoped against the repository the CALLER named. That is the object an
+    * operator means by `scopes: [/srv/repo-a]`, and it is the only one known
+    * this early -- the delegate's own worktree does not exist yet, and its path
+    * would not match a scope anyone wrote.
+    *
+    * Matching is exact, so a delegate pointed at a subdirectory of a scoped
+    * repository is read-only. That is the documented rule and the safe one: the
+    * alternative is a prefix match, where /srv/repo grants /srv/repo-secrets.
+    *
+    * No cwd and a scoped grant means read-only too. Nothing shows the target is
+    * in scope, and "probably fine" is not a permission. */
+   int delegate_allows_writes =
+       delegate_permissions_allow(&delegate_perms, AIMEE_DELEGATES_PERM_REPO_WRITE, cwd);
+   if (!delegate_allows_writes &&
+       delegate_permissions_has(&delegate_perms, AIMEE_DELEGATES_PERM_REPO_WRITE))
+      aimee_log(LOG_INFO, "delegate",
+                "delegate %s: role '%s' holds repo_write but not for '%s', so it runs read-only",
+                deleg_id, role, cwd[0] ? cwd : "(no workspace named)");
    if (branch && !delegate_allows_writes)
    {
       delegation_compute_error(cctx, "read-only delegates must use the parent worktree; branch "
@@ -1280,11 +1401,6 @@ void delegate_worker(void *arg)
    delegate_append_owned_block(&system_prompt, &template_sys_prompt,
                                delegate_inject_graph_context(prompt, cwd));
 
-   /* Tier orchestration context: for tools-enabled mid-tier delegates, append
-    * instructions describing how to fan out sub-tasks to lower-tier agents. */
-   delegate_append_owned_block(&system_prompt, &template_sys_prompt,
-                               delegate_build_tier_context(via_name, tier_override, role));
-
    /* Named-file drift guard: extract any repo-relative paths named in the prompt
     * and check pre-flight conditions before running the agent. */
    char named_paths[DELEGATE_DRIFT_MAX_PATHS][DELEGATE_DRIFT_PATH_MAX];
@@ -1317,8 +1433,7 @@ void delegate_worker(void *arg)
    /* Snapshot mtimes and HEAD to detect no-op write delegates. */
    delegate_file_snapshot_t pre_run_files[DELEGATE_DRIFT_MAX_PATHS];
    char pre_run_head_sha[64] = "";
-   int is_write_role = delegate_role_is_write(role);
-   if (is_write_role)
+   if (delegate_allows_writes)
    {
       const char *check_root =
           delegate_worktree_path[0] ? delegate_worktree_path : (cwd[0] ? cwd : ".");
@@ -1347,7 +1462,7 @@ void delegate_worker(void *arg)
           delegate_worktree_path[0] ? delegate_worktree_path : (cwd[0] ? cwd : NULL);
       int drift_rc =
           delegate_check_named_file_drift(path_ptrs, named_path_count, prompt, NULL, drift_root,
-                                          is_write_role, drift_err, sizeof(drift_err));
+                                          delegate_allows_writes, drift_err, sizeof(drift_err));
       if (drift_rc < 0)
       {
          aimee_log(LOG_WARN, "delegate", "named-file drift guard (pre-flight): %s", drift_err);
@@ -1437,8 +1552,12 @@ void delegate_worker(void *arg)
     * call, so a reviewer could resolve a coder's toolset. That is the boundary
     * agent_tools_filter_for_role exists to enforce. */
    agent_tools_set_active_toolset(toolset_override);
-   /* Bind detached workspace: delegate reads the client's live files (no-op if shared). */
-   int detached_bound = cwd[0] ? workspace_turn_bind_active(cwd) : 0;
+   /* Bind detached workspace: delegate reads the client's live files (no-op if shared).
+    *
+    * Skipped when the turn was already moved to a server-side reconstruction
+    * above: there is no client workspace left to bind, and the whole turn --
+    * cwd, worktree, shell -- is server-side by then. */
+   int detached_bound = (cwd[0] && !turn_root[0]) ? workspace_turn_bind_active(cwd) : 0;
    /* A background/durable delegate has no live client connection to serve a
     * DETACHED (client-served) workspace: by the time the worker runs, the
     * dispatching client has disconnected, so the reverse channel is dead and every
@@ -1449,12 +1568,49 @@ void delegate_worker(void *arg)
     * an undefined cwd). The ephemeral workspace does NOT contain the client's repo
     * (it drops an AIMEE_WORKSPACE_NOTE.txt saying so); a background *code* delegate
     * that must edit the client tree needs it provisioned server-side (follow-up). */
+   /* The mirror reconstruction is resolved far above, where rebinding the root
+    * still moves the whole turn. Reaching here means there was none: a detached
+    * workspace with no recorded remote/head, i.e. one that has never been synced.
+    * The only tree left to offer is a repo-less scratch dir. */
    char ephemeral_ws[MAX_PATH_LEN] = "";
    if (detached_bound && cctx->background_job_id > 0)
    {
       if (delegate_ephemeral_ws_create(deleg_id, ephemeral_ws, sizeof(ephemeral_ws)) == 0 &&
           ephemeral_ws[0])
       {
+         /* The ephemeral workspace holds no repository, so a WRITE delegate
+          * redirected here can still edit the tree through its file tools (they
+          * resolve the registered workspace, not this cwd) while every shell
+          * command runs somewhere that has no checkout. It can change code and
+          * cannot build, test, or diff what it changed -- and nothing tells it so.
+          * Observed: a delegate asked to add one comment line to a 2157-line file
+          * truncated it to 5 lines and reported no error.
+          *
+          * Writing without any means of verification is not a degraded mode, it is
+          * an unsafe one, so refuse the dispatch and say why. Read-only delegates
+          * are unaffected: inspection in a repo-less cwd is merely useless, not
+          * destructive, and their file tools still reach the real workspace. */
+         if (delegate_allows_writes)
+         {
+            char errmsg[1024];
+            snprintf(errmsg, sizeof(errmsg),
+                     "refusing to run write-capable delegate %s: its detached (client) workspace "
+                     "cannot be served by a background job, so its shell would run in ephemeral "
+                     "workspace '%s', which contains no checkout. The delegate could edit the "
+                     "repository through its file tools but could not build or test the result. "
+                     "A detached workspace is served by its client, so a background job cannot "
+                     "reach it at all. Either keep the client serving it -- run this delegate in "
+                     "the foreground with `aimee workspace serve` -- or register the repository "
+                     "as a mirror workspace (`aimee workspace add <path> --provider mirror "
+                     "--remote <url>`), which the server reconstructs from its own bare mirror at "
+                     "the recorded head and can therefore serve with no client present.",
+                     deleg_id, ephemeral_ws);
+            aimee_log(LOG_ERROR, "delegate", "%s", errmsg);
+            delegate_ephemeral_ws_remove(ephemeral_ws);
+            ephemeral_ws[0] = '\0';
+            delegation_compute_error(cctx, errmsg);
+            goto delegate_fail;
+         }
          workspace_turn_unbind_active();
          detached_bound = 0;
          run_cmd_set_cwd(ephemeral_ws);
@@ -1474,6 +1630,34 @@ void delegate_worker(void *arg)
                    deleg_id);
       }
    }
+
+   /* Every root decision for this turn is now final, so tell the delegate where
+    * it is standing and what kind of place that is. Placed HERE and not with the
+    * other prompt blocks above: up there the ephemeral fallback had not run yet,
+    * and a notice that names the wrong root is worse than none. The delegate is
+    * the one that has to decide whether its evidence means what it appears to
+    * mean, and it cannot do that while having to infer its own location from
+    * whether commands happen to succeed. */
+   {
+      const char *shell_root = run_cmd_get_cwd();
+      const char *file_root =
+          delegate_worktree_path[0] ? delegate_worktree_path : (cwd[0] ? cwd : NULL);
+      delegate_root_kind_t root_kind = ephemeral_ws[0] ? DELEGATE_ROOT_EPHEMERAL
+                                       : turn_root[0]  ? DELEGATE_ROOT_RECONSTRUCTED
+                                                       : DELEGATE_ROOT_NAMED;
+      aimee_log(LOG_INFO, "delegate", "delegate %s: bound root %s (%s)%s%s", deleg_id,
+                shell_root ? shell_root : (file_root ? file_root : "(none)"),
+                root_kind == DELEGATE_ROOT_EPHEMERAL       ? "ephemeral workspace, no repository"
+                : root_kind == DELEGATE_ROOT_RECONSTRUCTED ? "server-side reconstruction"
+                                                           : "caller's workspace",
+                (shell_root && file_root && strcmp(shell_root, file_root) != 0)
+                    ? "; DIVERGED from file-tool root "
+                    : "",
+                (shell_root && file_root && strcmp(shell_root, file_root) != 0) ? file_root : "");
+      delegate_append_owned_block(&system_prompt, &template_sys_prompt,
+                                  delegate_bound_root_notice(shell_root, file_root, root_kind));
+   }
+
    /* Delegate sandbox (default OFF): run this delegate's shell and file ops INSIDE
     * its own container rather than in-process here.
     *
@@ -1529,18 +1713,17 @@ void delegate_worker(void *arg)
       container_ws = cwd; /* shared: readable, never writable */
       container_ws_ro = 1;
    }
-   /* A WRITE-capable delegate with no tree of its own is deliberately left
-    * unsandboxed rather than handed a read-only mount. Isolation is the constraint,
-    * so its writes must not reach a shared tree — but a writer fighting a :ro mount
-    * fails in a way that reads as a broken repo, not as a policy. Better to run it
-    * where it works, under the write guard, and say so. Its own worktree is what
-    * makes it sandboxable; without one there is nothing safe to give it. */
+   /* A WRITE-capable delegate with no tree of its own has nothing safe to mount: a
+    * shared tree must stay read-only, and a writer cannot use a read-only tree. It
+    * used to be run unsandboxed on the host under the write guard, which was a
+    * second execution model standing beside the container one. There is only the
+    * container now, so this refuses: container_ws stays NULL and the bind below
+    * turns that into a hard failure rather than a host run. */
    else if (cwd[0] == '/' && delegate_allows_writes)
    {
-      aimee_log(LOG_WARN, "delegate-sandbox",
-                "delegate %s: write-capable but has no worktree of its own (shared=%d); NOT "
-                "sandboxing it — a shared tree must stay read-only, and a writer cannot use a "
-                "read-only tree. Running in-process under the write guard",
+      aimee_log(LOG_ERROR, "delegate-sandbox",
+                "delegate %s: write-capable but has no worktree of its own (shared=%d) — refusing "
+                "to run. A write delegate needs its own worktree to be given a container",
                 deleg_id, delegate_shared_worktree);
    }
    /* Resolve the per-project/-workspace/-global sandbox image (pre-baked `image:`
@@ -1552,18 +1735,29 @@ void delegate_worker(void *arg)
         delegate_sandbox_resolve_image(container_ws, sbx_image, sizeof(sbx_image)) == 0)
            ? sbx_image
            : NULL;
-   /* container_ws == NULL is the write-capable-but-no-own-worktree case resolved
-    * above: the intent there is to run IN-PROCESS under the write guard, NOT to hand
-    * the delegate a scratch sandbox. Binding with a NULL workspace mints an EMPTY
-    * scratch tree and mounts THAT, so the delegate edits files the engine never sees
-    * ("write role reported success but produced no diff"). A WFE implement slice is
-    * NOT this case: its cwd already IS a dedicated per-slice worktree it owns, so
-    * delegate_resolve_worktree marks it dedicated and container_ws points at that
-    * tree read-write (above). Only bind a container when there is a real tree to
-    * mount; otherwise run in-process in cwd so writes land where the engine diffs. */
+   /* container_ws == NULL has two causes, and they end differently.
+    *
+    * For a WRITE delegate it is the no-worktree-of-its-own case resolved above, and
+    * it REFUSES. It must never become a bind with a NULL workspace: that mints an
+    * EMPTY scratch tree and mounts THAT, so the delegate edits files the engine
+    * never sees ("write role reported success but produced no diff"). A WFE
+    * implement slice is NOT this case: its cwd already IS a dedicated per-slice
+    * worktree it owns, so delegate_resolve_worktree marks it dedicated and
+    * container_ws points at that tree read-write (above).
+    *
+    * For a READ-ONLY delegate it means there is no repository in play at all. That
+    * still gets a container — the backend's scratch dir — because the mount is a
+    * parameter of the single container path, not a second path. An empty tree is
+    * harmless to a delegate that was never going to write one.
+    *
+    * A DETACHED workspace is still exempt. It is served by the connected client
+    * over the reverse channel, not by this host, so there is no local tree to put
+    * in a container. That is a separate execution model from the in-process host
+    * path this change removed, and collapsing it is not this change's business. */
    int container_bound =
-       (detached_bound || !container_ws || !container_ws[0])
-           ? 0
+       detached_bound ? 0
+       : (!container_ws || !container_ws[0]) && delegate_allows_writes
+           ? -1
            : workspace_turn_bind_container(deleg_id, sbx_image_arg, container_ws, container_ws_ro);
 
    if (cost_limit_failed)
@@ -1572,13 +1766,14 @@ void delegate_worker(void *arg)
    }
    else if (container_bound < 0)
    {
-      /* HARD isolation refusal (delegate_sandbox_require_isolation): the runtime would
-       * not provide a network-isolated sandbox. Refuse the delegation rather than fall
-       * back to the in-process host path, which has NO isolation at all. */
+      /* The delegate could not be given a container: no worktree of its own to
+       * mount, no docker backend, or a runtime that would not isolate it. There is
+       * no un-sandboxed path to fall back to, so the delegation fails. The specific
+       * cause was logged where it was detected. */
       memset(&result, 0, sizeof(result));
       snprintf(result.error, sizeof(result.error),
-               "delegate sandbox isolation required but unavailable: the container runtime did "
-               "not honour --network none; refusing to run the delegate un-isolated");
+               "delegate could not be given a sandboxed container; refusing to run it "
+               "un-sandboxed (see the delegate-sandbox log for the cause)");
       rc = -1;
    }
    else
@@ -1628,7 +1823,7 @@ void delegate_worker(void *arg)
       int drift_rc =
           delegate_check_named_file_drift(path_ptrs, named_path_count, prompt, result.response,
                                           delegate_worktree_path[0] ? delegate_worktree_path : NULL,
-                                          is_write_role, drift_err, sizeof(drift_err));
+                                          delegate_allows_writes, drift_err, sizeof(drift_err));
       if (drift_rc < 0)
       {
          aimee_log(LOG_WARN, "delegate", "named-file drift (post-run): %s", drift_err);
@@ -1644,8 +1839,8 @@ void delegate_worker(void *arg)
    /* Flag a write delegate that reported success but changed nothing. */
    {
       char noop_err[256] = "";
-      if (delegate_detect_noop_write(is_write_role, delegate_allows_writes, handoff_json, rc,
-                                     named_paths, named_path_count, pre_run_files, pre_run_head_sha,
+      if (delegate_detect_noop_write(delegate_allows_writes, handoff_json, rc, named_paths,
+                                     named_path_count, pre_run_files, pre_run_head_sha,
                                      delegate_worktree_path, cwd, deleg_id, sid, role, noop_err,
                                      sizeof(noop_err)))
       {
@@ -1715,8 +1910,8 @@ void delegate_worker(void *arg)
    int delegate_applied_changes = -1;
    char delegate_apply_error[512] = "";
    char delegate_parent_root[MAX_PATH_LEN] = "";
-   if (rc == 0 && is_write_role && delegate_allows_writes && delegate_worktree_path[0] &&
-       delegate_git_root[0] && !delegate_shared_worktree)
+   if (rc == 0 && delegate_allows_writes && delegate_worktree_path[0] && delegate_git_root[0] &&
+       !delegate_shared_worktree)
    {
       /* The drift check guards against the PARENT worktree's HEAD moving during
        * the delegation, so its baseline must be the parent's HEAD at launch
@@ -2086,8 +2281,47 @@ int handle_delegate(server_ctx_t *ctx, server_conn_t *conn, cJSON *req)
     * synchronous delegate path — the connection is closed at dispatch and the
     * caller polls delegate.status. The legacy `background` request field is
     * accepted-and-ignored for one release (older clients may still send it). */
+   /* A caller that supplies an execution key is asking to replay its own step,
+    * not to launch a second delegate for it. Resolve the reservation, launch,
+    * and record it here, on the side that owns agent_jobs: when the ledger lived
+    * across the network from the launch, a crash between the two left a
+    * paid-for job that nothing could replay. */
+   const char *execution_key = request_context_idempotency_key();
+   char participant[DB1_AJ_PARTICIPANT_LEN] = "";
+   int job_id = 0;
+   int reservation_found =
+       execution_key[0] &&
+       db1_delegate_reservation_get(execution_key, &job_id, participant, sizeof(participant)) == 0;
+   cJSON *replay_only = cJSON_GetObjectItemCaseSensitive(req, "replay_only");
+   cJSON *work_item = cJSON_GetObjectItemCaseSensitive(req, "work_item_id");
+   if (!reservation_found && cJSON_IsTrue(replay_only) && cJSON_IsString(work_item))
+      reservation_found =
+          db1_delegate_reservation_adopt_sole_legacy(execution_key, work_item->valuestring, &job_id,
+                                                     participant, sizeof(participant)) == 0;
+   if (reservation_found)
+   {
+      cJSON *replayed = jo_ok();
+      cJSON_AddNumberToObject(replayed, "job_id", job_id);
+      if (participant[0])
+         cJSON_AddStringToObject(replayed, "participant", participant);
+      cJSON_AddStringToObject(replayed, "job_status", "pending");
+      cJSON_AddBoolToObject(replayed, "replayed", 1);
+      return server_send_ok(conn, replayed);
+   }
+
+   /* A replay-only caller has already reconciled this step's spend. With no
+    * reservation to replay there is nothing to serve, and launching would be
+    * unreconciled duplicate spend, so report the absence instead. */
+   if (cJSON_IsTrue(replay_only))
+   {
+      cJSON *absent = jo_ok();
+      cJSON_AddNumberToObject(absent, "job_id", 0);
+      cJSON_AddStringToObject(absent, "error", "no delegate reservation to replay");
+      return server_send_ok(conn, absent);
+   }
+
    char err[80] = "";
-   int job_id = server_delegate_launch_async(ctx, conn, req, err, sizeof(err));
+   job_id = server_delegate_launch_async(ctx, conn, req, err, sizeof(err));
    if (job_id <= 0)
       return server_send_error(conn, err[0] ? err : "failed to launch delegate", NULL);
 
@@ -2097,8 +2331,19 @@ int handle_delegate(server_ctx_t *ctx, server_conn_t *conn, cJSON *req)
    if (db1_agent_job_get(job_id, &job) == 0)
    {
       if (job.participant_token[0])
+      {
+         snprintf(participant, sizeof(participant), "%s", job.participant_token);
          cJSON_AddStringToObject(resp, "participant", job.participant_token);
+      }
       db1_agent_job_free(&job);
+   }
+   /* Reserve only after the launch produced a usable job id. A reservation
+    * written first would make every retry replay a launch that never happened. */
+   if (execution_key[0])
+   {
+      db1_delegate_reservation_save(execution_key,
+                                    cJSON_IsString(work_item) ? work_item->valuestring : "", job_id,
+                                    participant);
    }
    cJSON_AddStringToObject(resp, "job_status", "pending");
    return server_send_ok(conn, resp);

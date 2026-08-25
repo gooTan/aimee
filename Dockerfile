@@ -8,6 +8,13 @@
 ARG PG_MAJOR=18
 ARG PGVECTORSCALE_VERSION=0.9.0
 
+FROM golang:1.25-bookworm AS module-go-build
+WORKDIR /src/server-go
+COPY server-go/go.mod server-go/go.sum ./
+RUN go mod download
+COPY server-go/ ./
+RUN CGO_ENABLED=0 go build -trimpath -o /out/aimee-module ./cmd/aimee-module
+
 FROM debian:trixie-slim AS build
 
 RUN apt-get update \
@@ -27,17 +34,22 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY . .
+COPY --from=module-go-build /out/aimee-module /tmp/aimee-module-go
 ARG AIMEE_VERSION=""
 # Ship the tree-sitter extraction front-end: fetch + sha256-verify the pinned
 # grammars (scripts/fetch-treesitter.sh; git + network needed only in this trusted
 # build stage), then build the kb with AIMEE_TREESITTER=1 (real-AST C/C++ class/
 # method extraction). See docs/proposals/pending/cpp-class-method-extraction.md.
 RUN sh scripts/fetch-treesitter.sh \
-    && make -C src ../aimee-kb -j"$(nproc)" AIMEE_TREESITTER=1 ${AIMEE_VERSION:+GIT_VERSION=v$AIMEE_VERSION}
+    && build_version="$AIMEE_VERSION" \
+    && if [ -z "$build_version" ]; then build_version=$(cat src/core/VERSION); fi \
+    && make -C src ../aimee-kb -j"$(nproc)" AIMEE_TREESITTER=1 \
+         GIT_VERSION="v$build_version"
 
 RUN python3 scripts/export_c_repositories.py --runtime-bundle /module-runtime \
     && mkdir -p /module-runtime/bin \
     && for source in /module-runtime/src/*.c; do \
+         [ -e "$source" ] || continue; \
          binary="${source##*/}"; binary="${binary%.c}"; \
          cc -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/event_bus/include \
            -Isrc/modules/memory/include -Isrc/modules/learning/include \
@@ -52,7 +64,12 @@ RUN python3 scripts/export_c_repositories.py --runtime-bundle /module-runtime \
            src/core/event_bus/module_protocol.c src/core/event_bus/module_runtime.c \
            -pthread \
            -o "/module-runtime/bin/$binary"; \
-       done
+       done \
+    && while IFS= read -r module_id; do \
+         [ -n "$module_id" ] || continue; \
+         install -m 0755 /tmp/aimee-module-go \
+           "/module-runtime/bin/aimee-module-$module_id"; \
+       done < /module-runtime/go.modules
 
 # pgvectorscale (StreamingDiskANN). Always installed: it adds ~1 MB to the image,
 # and the kb already decides at RUNTIME whether to use it -- pgvec_vectorscale_available()
@@ -171,6 +188,13 @@ RUN set -eux; \
           --index-url https://download.pytorch.org/whl/cpu torch; \
       "$EMBEDDER_VENV/bin/pip" install --no-cache-dir --quiet \
           "sentence-transformers>=3.3" "transformers>=5.2" einops; \
+      # onnxruntime is the CPU serving path this embedder was characterised on.
+      # Without it sentence-transformers falls back to fp32 torch, which costs
+      # ~2000 ms for one ~512-token text on 4 cores (25M-parameter model) and
+      # made corpus ingest run at ~20 s/file. optimum provides the ORT backend
+      # sentence-transformers loads via backend="onnx".
+      "$EMBEDDER_VENV/bin/pip" install --no-cache-dir --quiet \
+          "optimum[onnxruntime]>=1.23"; \
       find "$EMBEDDER_VENV" -name '__pycache__' -type d -prune -exec rm -rf {} +; \
       rm -rf /root/.cache/pip; \
     fi
@@ -365,8 +389,14 @@ if selected not in table:
     sys.exit(f"AIMEE_EMBEDDER={selected!r} is not in the registry. "
              f"Known: {', '.join(sorted(table))}")
 table = {selected: table[selected]}
+# KEEP onnx/model.onnx: it is the runtime this embedder is served with. Excluding
+# it left sentence-transformers on fp32 torch, at ~2000 ms for one ~512-token text
+# on 4 cores (25M-param model) -- ~20 s per source file of corpus ingest.
+# Only the BASE graph. bekko publishes nine variants (fp16, int8, quantized,
+# O1-O4); quantized drifts the vectors and optimized is redundant with ORT's own
+# graph optimisation, so model_*.onnx stay out, as does the onnx_data sidecar.
 SKIP = [
-    "onnx/*", "openvino/*", "*.onnx", "*.onnx_data",   # alternate runtimes
+    "onnx/model_*.onnx", "openvino/*", "*.onnx_data",  # variants we do not serve
     "*.bin", "*.h5", "*.msgpack", "*.tflite", "*.ckpt",  # duplicate/legacy formats
     "*.gguf",                                          # not this runtime either
 ]
@@ -466,6 +496,7 @@ COPY scripts/embed-remote.py scripts/llm-chat.py \
 # the entrypoint seeds it into $AIMEE_HOME/.config/aimee on first start.
 COPY deploy/container/aimee.yaml /opt/aimee/defaults/aimee.yaml
 COPY deploy/container/aimee-kb-entrypoint.sh /usr/local/bin/aimee-kb-entrypoint.sh
+COPY deploy/container/optional-modules-lib.sh /usr/local/bin/optional-modules-lib.sh
 COPY deploy/container/module-supervisor.sh /usr/local/bin/module-supervisor.sh
 COPY deploy/container/aimee-kb-db-export.sh /usr/local/bin/aimee-kb-db-export
 RUN chmod +x /usr/local/bin/aimee-kb-entrypoint.sh /usr/local/bin/aimee-kb-db-export \

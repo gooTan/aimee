@@ -8,9 +8,11 @@
 #include "session_degraded_notice.h"
 #include "cJSON.h"
 #include "cli_attention_guard.h"     /* attn_require_session_worktree */
-#include "client_session_worktree.h" /* client_session_worktree_ensure */
+#include "client_session_worktree.h" /* client_session_worktree_ensure, _id_publish */
+#include "aimee_home.h"              /* aimee_home */
 #include "cmd_self_update.h"         /* aimee_self_update_notice */
 #include "agent_code_capabilities.h"
+#include "aimee_session_guidance.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,7 +257,10 @@ static int handle_session_start_remote(const char *sid)
     * if the server has moved ahead, surface a one-line notice steering the agent
     * (or user) to `aimee self-update`. Best-effort; never blocks the session. */
    {
-      char notice[256];
+      /* Both version strings are interpolated, and a git-describe version
+       * ("pre-merge-safety-903-g6fee67ae87") is far longer than a release tag --
+       * 256 truncated the dev-build notice mid-word on a real pair. */
+      char notice[512];
       if (aimee_self_update_notice(notice, sizeof notice))
       {
          ss_add(&ctx, "\n# aimee update available\n");
@@ -476,9 +481,7 @@ int handle_user_prompt_submit(void)
       struct ss_sbuf ctx = {0};
       ss_add(&ctx, "<aimee-context>\n");
       ss_add(&ctx, b.p);
-      ss_add(&ctx, "explore-with: " AIMEE_CODE_TOOL_FIND_SYMBOL
-                   ", lsp_references, " AIMEE_CODE_TOOL_AST_GREP_SEARCH ", " AIMEE_CODE_TOOL_INDEX
-                   " command=" AIMEE_CODE_INDEX_COMMAND_HYBRID ", get_context_block\n");
+      ss_add(&ctx, AIMEE_GUIDANCE_BLOCK);
       ss_add(&ctx, "</aimee-context>");
 
       cJSON *out = cJSON_CreateObject();
@@ -581,6 +584,20 @@ int handle_session_start(int json_output)
    cJSON *hook_json = stdin_data ? cJSON_Parse(stdin_data) : NULL;
    if (client_hook_payload_session_id(hook_json, hook_sid, sizeof(hook_sid)))
       sid = hook_sid;
+
+   /* Share it with the rest of the session BEFORE any transport choice, because
+    * both branches below return.
+    *
+    * This hook holds the only authoritative copy of the host's session id, and
+    * used to keep it: it built its worktree from the id and then exited. `aimee
+    * mcp serve`, which has no way to learn it, fell through to minting a random
+    * one -- so the same Claude Code session ran on TWO session ids and therefore
+    * two worktrees, with the proxy (and every delegate and `aimee git` call
+    * behind it) bound to the empty one and refusing the worktree that actually
+    * held the work. Publishing here is the half of that rendezvous that was
+    * never written; the reader has always been there. */
+   if (sid && sid[0])
+      (void)client_session_id_publish(sid, aimee_home());
 
    /* Detect server-invoked context: AIMEE_SESSION_ID is set by chat_stream_worker
     * in the environment of the claude subprocess it forks. */

@@ -3,8 +3,9 @@
 # testing branch can be deployed/validated (e.g. on .254) WITHOUT promoting to
 # main.
 #
-# Builds the split images, ALL THREE kb embedder variants, and the isolated one-shot
-# authority bootstrap, so a managed stack can pull a single coherent `:testing`
+# Builds the split images, the control console, ALL THREE kb embedder variants, and
+# the isolated one-shot authority bootstrap, so every committed Compose topology can
+# pull a single coherent `:testing`
 # channel whichever embedder the wizard selected. Synthesis is NOT here: it is its own
 # image on its own trigger (publish-llm.yml), rebuilt when the model changes rather
 # than when kb code does.
@@ -25,6 +26,7 @@ on:
       # Go-only fixes must publish a deployable testing image just like C changes.
       - "server-go/**"
       - "runtime-web/**"
+      - "control-web/**"
       - "config/**"
       - "deploy/container/**"
       - "scripts/**"
@@ -33,6 +35,7 @@ on:
       - "frontend/**"
       - "Dockerfile"
       - "Dockerfile.server"
+      - "Dockerfile.control-web"
       - "Dockerfile.authority-bootstrap"
       - ".github/workflows/publish-testing.yml"
   workflow_dispatch:
@@ -77,6 +80,7 @@ jobs:
         # (AIMEE_KB_VARIANT), so every choice it can emit has to be publishable here.
         image:
           - { name: aimee-server,    dockerfile: Dockerfile.server }
+          - { name: aimee-control-web, dockerfile: Dockerfile.control-web }
           - { name: aimee-kb,        dockerfile: Dockerfile, args: "AIMEE_EMBEDDER=none" }
           - { name: aimee-kb-a25m,   dockerfile: Dockerfile, args: "AIMEE_EMBEDDER=bekko-a25m" }
           - { name: aimee-kb-nomic,  dockerfile: Dockerfile,
@@ -128,7 +132,62 @@ jobs:
             AIMEE_VERSION=testing-${{ env.SHA7 }}
             WITH_RUNTIME_WEB=1
             ${{ matrix.image.args }}
-            ${{ matrix.image.args }}
           tags: |
             ghcr.io/${{ env.OWNER }}/${{ matrix.image.name }}:testing
             ghcr.io/${{ env.OWNER }}/${{ matrix.image.name }}:testing-${{ env.SHA7 }}
+
+  # The thin client, published on the SAME cadence as the images it talks to.
+  #
+  # Without this the only obtainable client is the last GitHub Release, so a
+  # :testing deployment moves on every merge while its operators stay pinned to
+  # a release that can be weeks behind. That gap is not hypothetical: it is how a
+  # client seven days behind its server ended up rendering nothing for commands
+  # whose printers existed only server-side, and it cost a day of misdiagnosis
+  # before anyone compared build dates.
+  #
+  # ARTIFACTS, NOT A RELEASE. release-thin-client.yml is reusable-only precisely
+  # so every published Release passes the protected `release` environment; adding
+  # a Release here would route around that approval. Fetch with:
+  #   gh run download --repo <owner>/aimee -n aimee-linux-x86_64 --dir .
+  #
+  # LINUX ONLY, deliberately. macOS and Windows runners cost minutes per merge and
+  # this job runs on every push to testing; the release pipeline still owns those
+  # two platforms. Adding a leg here is a matrix entry if that trade stops holding.
+  thin-client:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: aimee-linux-x86_64
+          - os: ubuntu-24.04-arm
+            asset: aimee-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc make libsqlite3-dev
+
+      # Stamp the version the SERVER images in this same run are stamped with, so
+      # a client and the server it was published beside report the same build.
+      # The Makefile derives AIMEE_GIT_COMMIT_TIME from HEAD itself; that stamp is
+      # what orders a non-semver `testing-<sha>` pair, so it must not be bypassed.
+      - name: Build thin client
+        run: |
+          cd src
+          make -j"$(nproc)" GIT_VERSION="testing-${GITHUB_SHA::7}" ../aimee
+
+      - name: Stage + smoke test
+        run: |
+          cp aimee "${{ matrix.asset }}"
+          ./${{ matrix.asset }} version
+
+      - name: Upload ${{ matrix.asset }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          retention-days: 30

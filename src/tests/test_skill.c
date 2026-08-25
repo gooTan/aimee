@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include <aimee/skills/skill.h>
+#include "modules/skills/skill_trigger_policy.h"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
 /* --- Helpers --- */
 
@@ -18,7 +20,7 @@ static char *make_tmpdir(void)
 {
    char *tmp = malloc(64);
    assert(tmp);
-   snprintf(tmp, 64, "/tmp/test_skill_XXXXXX");
+   snprintf(tmp, 64, "%s/test_skill_XXXXXX", platform_tmpdir());
    assert(mkdtemp(tmp) != NULL);
    return tmp;
 }
@@ -784,9 +786,9 @@ static void test_skill_trigger_frontmatter_matches(void)
                          "  arg_pattern: [\"sleep \", \"curl \"]\n"
                          "---\n"
                          "Prefer condition checks.\n";
-   assert(skill_trigger_matches_content(content, "Bash", "sleep 5") == 1);
-   assert(skill_trigger_matches_content(content, "Bash", "echo ok") == 0);
-   assert(skill_trigger_matches_content(content, "Write", "sleep 5") == 0);
+   assert(skill_trigger_policy_matches_content(content, "Bash", "sleep 5") == 1);
+   assert(skill_trigger_policy_matches_content(content, "Bash", "echo ok") == 0);
+   assert(skill_trigger_policy_matches_content(content, "Write", "sleep 5") == 0);
 
    const char *path_content = "---\nname: path-skill\n"
                               "description: Use when matching path trigger frontmatter.\n"
@@ -795,9 +797,51 @@ static void test_skill_trigger_frontmatter_matches(void)
                               "  path_pattern: [\"_test.\", \"test_\"]\n"
                               "---\n"
                               "Prefer tests first.\n";
-   assert(skill_trigger_matches_content(path_content, "Write", "src/foo_test.c") == 1);
-   assert(skill_trigger_matches_content(path_content, "Edit", "src/test_foo.c") == 1);
-   assert(skill_trigger_matches_content(path_content, "Write", "src/foo.c") == 0);
+   assert(skill_trigger_policy_matches_content(path_content, "Write", "src/foo_test.c") == 1);
+   assert(skill_trigger_policy_matches_content(path_content, "Edit", "src/test_foo.c") == 1);
+   assert(skill_trigger_policy_matches_content(path_content, "Write", "src/foo.c") == 0);
+}
+
+static int trigger_policy_provider(const char *content, const char *tool_name, const char *subject,
+                                   int *match)
+{
+   if (!match)
+      return -1;
+   *match = skill_trigger_policy_matches_content(content, tool_name, subject);
+   return 0;
+}
+
+static int trigger_error_provider(const char *content, const char *tool_name, const char *subject,
+                                  int *match)
+{
+   (void)content;
+   (void)tool_name;
+   (void)subject;
+   (void)match;
+   return -1;
+}
+
+static void test_skill_trigger_requires_process_provider(void)
+{
+   char *root = make_tmpdir();
+   char skills_dir[512], path[512];
+   snprintf(skills_dir, sizeof(skills_dir), "%s/.aimee/skills", root);
+   mkdir_p(skills_dir);
+   snprintf(path, sizeof(path), "%s/wait.md", skills_dir);
+   write_file(path, "---\nname: wait\ntriggers:\n  tool: [Bash]\n"
+                    "  arg_pattern: [\"sleep \"]\n---\nWait safely.\n");
+
+   skill_trigger_register_match_provider(NULL);
+   assert(skill_trigger_matches(root, "wait", "Bash", "sleep 5") == -1);
+   skill_trigger_register_match_provider(trigger_policy_provider);
+   assert(skill_trigger_matches(root, "wait", "Bash", "sleep 5") == 1);
+   assert(skill_trigger_matches(root, "wait", "Bash", "echo ok") == 0);
+   skill_trigger_register_match_provider(trigger_error_provider);
+   assert(skill_trigger_matches(root, "wait", "Bash", "sleep 5") == -1);
+   skill_trigger_register_match_provider(NULL);
+
+   rm_rf(root);
+   free(root);
 }
 
 static void test_skill_capability_autostub_proposes_missing_tool(void)
@@ -1030,6 +1074,7 @@ int main(void)
    test_skill_list_null_inputs();
    test_skill_lint_rules();
    test_skill_trigger_frontmatter_matches();
+   test_skill_trigger_requires_process_provider();
    test_skill_capability_autostub_proposes_missing_tool();
    test_skill_change_eval_gate();
    test_skill_eval_passes_with_delta();

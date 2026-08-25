@@ -45,12 +45,12 @@ static cJSON *orphaned_messages(void)
 
 /* Populate a REDUCED, mutated, net-shrink result over `messages` (ownership stays
  * with the caller-provided array; should_apply never frees it). */
-static void reduced_result(reduce_result_t *r, cJSON *messages)
+static void reduced_result(gw_reduce_report_t *r, cJSON *messages)
 {
    memset(r, 0, sizeof(*r));
    r->messages = messages;
    r->mutated = 1;
-   r->reason = REDUCE_REASON_REDUCED;
+   r->reason = GW_REDUCE_REASON_REDUCED;
    r->baseline_tokens = 100;
    r->reduced_tokens = 50;
    r->removed_tokens = 50;
@@ -61,35 +61,35 @@ static void test_should_apply(void)
    /* apply: clean net-shrink reduction */
    {
       cJSON *m = clean_messages();
-      reduce_result_t r;
+      gw_reduce_report_t r;
       reduced_result(&r, m);
       assert(gw_should_apply(0, &r) == GW_BYPASS_NONE);
       cJSON_Delete(m);
    }
 
-   /* reducer internal-error class maps 1:1 */
+   /* Every reducer failure is now one reason. The error taxonomy (alloc/parse/
+    * format) went to Go with the reducer itself; across the bus the gateway learns
+    * only that the call failed, so it must bypass on ANY non-zero rc — including
+    * rc!=0 with a zeroed report, and the NULL-report case. */
    {
-      reduce_result_t r;
+      gw_reduce_report_t r;
       memset(&r, 0, sizeof(r));
-      r.error = REDUCE_ERR_ALLOC_FAILED;
-      assert(gw_should_apply(1, &r) == GW_BYPASS_REDUCE_ALLOC_FAILED);
-      r.error = REDUCE_ERR_PARSE_FAILED;
-      assert(gw_should_apply(1, &r) == GW_BYPASS_REDUCE_PARSE_FAILED);
-      r.error = REDUCE_ERR_INTERNAL_ASSERTION;
-      assert(gw_should_apply(1, &r) == GW_BYPASS_REDUCE_INTERNAL_ASSERTION);
-      r.error = REDUCE_ERR_FORMAT_UNSUPPORTED;
-      assert(gw_should_apply(1, &r) == GW_BYPASS_REDUCE_FORMAT_UNSUPPORTED);
-      /* rc!=0 with no classification, and the NULL-res case, both fall to internal */
-      r.error = REDUCE_ERR_NONE;
       assert(gw_should_apply(1, &r) == GW_BYPASS_REDUCE_INTERNAL_ASSERTION);
       assert(gw_should_apply(1, NULL) == GW_BYPASS_REDUCE_INTERNAL_ASSERTION);
+      /* rc==0 with a NULL report is still a failure to report anything at all. */
+      assert(gw_should_apply(0, NULL) == GW_BYPASS_REDUCE_INTERNAL_ASSERTION);
+      /* A well-formed report must not be misread as an error just because rc!=0. */
+      cJSON *m = clean_messages();
+      reduced_result(&r, m);
+      assert(gw_should_apply(1, &r) == GW_BYPASS_REDUCE_INTERNAL_ASSERTION);
+      cJSON_Delete(m);
    }
 
    /* no-op cases: null array / not mutated / not REDUCED / not a net shrink */
    {
-      reduce_result_t r;
+      gw_reduce_report_t r;
       memset(&r, 0, sizeof(r));
-      r.reason = REDUCE_REASON_REDUCED;
+      r.reason = GW_REDUCE_REASON_REDUCED;
       r.mutated = 1; /* messages NULL */
       assert(gw_should_apply(0, &r) == GW_BYPASS_NO_OP);
 
@@ -98,7 +98,7 @@ static void test_should_apply(void)
       r.mutated = 0;
       assert(gw_should_apply(0, &r) == GW_BYPASS_NO_OP);
       reduced_result(&r, m);
-      r.reason = REDUCE_REASON_MEASURED;
+      r.reason = GW_REDUCE_REASON_MEASURED;
       assert(gw_should_apply(0, &r) == GW_BYPASS_NO_OP);
       reduced_result(&r, m);
       r.reduced_tokens = r.baseline_tokens; /* no shrink */
@@ -109,7 +109,7 @@ static void test_should_apply(void)
    /* structural violation: an orphaned tool pair -> repair reports > 0 */
    {
       cJSON *m = orphaned_messages();
-      reduce_result_t r;
+      gw_reduce_report_t r;
       reduced_result(&r, m);
       assert(gw_should_apply(0, &r) == GW_BYPASS_STRUCTURAL_VIOLATION);
       cJSON_Delete(m);
@@ -120,6 +120,27 @@ static void test_should_apply(void)
    assert(strcmp(gw_bypass_reason_str(GW_BYPASS_SNAPSHOT_OOM), "snapshot_oom") == 0);
    assert(strcmp(gw_bypass_reason_str(GW_BYPASS_CONSTRUCT_FAILED), "construct_failed") == 0);
    assert(strcmp(gw_bypass_reason_str(GW_BYPASS_REPLACE_FAILED), "replace_failed") == 0);
+}
+
+/* The verdict now comes from the module, so what C still owns is refusing to
+ * read silence as consent. Every path that is not a module saying "none" must
+ * bypass, because the alternative is dispatching a payload nothing verified. */
+static void test_module_bypass(void)
+{
+   /* A reached module that cleared the payload is the ONLY way to apply. */
+   assert(strcmp(gw_module_bypass(0, "none"), "none") == 0);
+
+   /* Its verdicts pass through verbatim, so telemetry keeps naming the reason. */
+   assert(strcmp(gw_module_bypass(0, "structural_violation"), "structural_violation") == 0);
+   assert(strcmp(gw_module_bypass(0, "no_op"), "no_op") == 0);
+
+   /* Unreachable: rc says the call failed, so there is no verdict to trust. */
+   assert(strcmp(gw_module_bypass(1, "none"), "reduce_internal_assertion") == 0);
+
+   /* Reached but silent — an empty or absent verdict is not approval. This is
+    * the delegate-seam shape too, which never sets the field at all. */
+   assert(strcmp(gw_module_bypass(0, ""), "reduce_internal_assertion") == 0);
+   assert(strcmp(gw_module_bypass(0, NULL), "reduce_internal_assertion") == 0);
 }
 
 static void test_snapshot_independence(void)
@@ -186,7 +207,7 @@ static void test_replace(void)
 
 static void test_provenance(void)
 {
-   reduce_state_t st;
+   gw_provenance_t st;
    memset(&st, 0, sizeof(st));
    assert(st.reduced == 0);
    gw_provenance_mark_reduced(&st);
@@ -202,6 +223,7 @@ int main(void)
 {
    printf("gateway_mutate: ");
    test_should_apply();
+   test_module_bypass();
    test_snapshot_independence();
    test_replace();
    test_provenance();

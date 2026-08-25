@@ -7,7 +7,8 @@
 #include "platform_path.h"
 #include "cli_client.h"
 #define V1_PROTOCOL_VERSION 1
-#include "util.h"         /* safe_exec_capture (workspace.mirror-sync ships the client diff) */
+#include "util.h"
+#include <aimee/workspace/client_diff.h> /* workspace.mirror-sync ships the client diff */
 #include "aimee_client.h" /* aimee_client_request: transport-agnostic /v1 client (Windows path) */
 #include "code_collect.h" /* code_collect_files + code_collect_discover_repos (thin-client push) */
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -41,7 +42,7 @@ static cJSON *marshal_agent_episodes(int argc, char **argv)
    rpc_opts_t opts;
    rpc_parse(argc, argv, NULL, &opts);
 
-   cJSON *req = marshal_no_args("agent.episodes");
+   cJSON *req = marshal_no_args("model.episodes");
 
    const char *agent = opts.pos_count > 0 ? opts.positional[0] : rpc_get(&opts, "agent");
    if (agent && agent[0])
@@ -464,6 +465,20 @@ static cJSON *marshal_workspace_add(int argc, char **argv)
    const char *prov = rpc_get(&opts, "provider");
    if (prov)
       cJSON_AddStringToObject(req, "provider", prov);
+   /* The mirror coordinates need surfacing for the same reason root and provider
+    * do. This body reaches the server through POST /v1/workspaces -- including
+    * locally, over the HTTP UDS -- and that route reads top-level fields, not
+    * `args`. Left in args only, they were silently dropped, so
+    * `aimee workspace add <path> --provider mirror --remote <url>` came back with
+    * "--provider mirror requires --remote <url>" while staring at the flag the
+    * user had just typed. The socket dispatch still parses argv, so both paths
+    * now carry them. */
+   const char *rem = rpc_get(&opts, "remote");
+   if (rem)
+      cJSON_AddStringToObject(req, "remote", rem);
+   const char *hd = rpc_get(&opts, "head");
+   if (hd)
+      cJSON_AddStringToObject(req, "head", hd);
    /* --no-scan registers the workspace and returns instead of walking every
     * discovered project first. On a large tree the eager scan makes this RPC
     * take minutes, so a caller with a timeout abandons a registration that
@@ -474,67 +489,6 @@ static cJSON *marshal_workspace_add(int argc, char **argv)
       cJSON_AddBoolToObject(req, "scan", 0);
    return req;
 }
-
-/* Compute the client's FULL working-tree patch vs HEAD — tracked modifications,
- * deletions, AND untracked (non-ignored) files as additions — without touching
- * the client's real index: stage everything into a throwaway index
- * (GIT_INDEX_FILE) seeded from HEAD, then `diff --cached --binary HEAD`. git's
- * --binary patch format is ASCII (base85 hunks), so the result is JSON-safe even
- * for binary files. Returns a malloc'd patch (caller frees), or NULL when the
- * root is not a repo / has no HEAD. POSIX-only (the thin Windows client cannot
- * fork git); Windows ships no diff. */
-#if !defined(_WIN32) && !defined(_WIN64)
-extern char **environ;
-static char *mirror_compute_diff(const char *root)
-{
-   char idx[] = "/tmp/aimee-msync-idx-XXXXXX";
-   int fd = mkstemp(idx);
-   if (fd < 0)
-      return NULL;
-   close(fd); /* git read-tree overwrites it */
-
-   int n = 0;
-   while (environ[n])
-      n++;
-   char **envp = calloc((size_t)n + 2, sizeof(char *));
-   if (!envp)
-   {
-      unlink(idx);
-      return NULL;
-   }
-   char giv[300];
-   snprintf(giv, sizeof(giv), "GIT_INDEX_FILE=%s", idx);
-   for (int i = 0; i < n; i++)
-      envp[i] = environ[i];
-   envp[n] = giv;
-   envp[n + 1] = NULL;
-
-   char *out = NULL;
-   const char *rt[] = {"git", "-C", root, "read-tree", "HEAD", NULL};
-   int rc = safe_exec_capture_env(rt, envp, &out, 4096);
-   free(out);
-   out = NULL;
-   char *patch = NULL;
-   if (rc == 0)
-   {
-      const char *add[] = {"git", "-C", root, "add", "-A", NULL};
-      safe_exec_capture_env(add, envp, &out, 4096);
-      free(out);
-      out = NULL;
-      const char *df[] = {"git", "-C", root, "diff", "--cached", "--binary", "HEAD", NULL};
-      safe_exec_capture_env(df, envp, &patch, 16 * 1024 * 1024);
-   }
-   free(envp);
-   unlink(idx);
-   return patch; /* may be "" (clean tree) */
-}
-#else
-static char *mirror_compute_diff(const char *root)
-{
-   (void)root;
-   return NULL;
-}
-#endif
 
 /* `aimee workspace mirror-sync <root>`: ship the client's full working-tree patch
  * (see mirror_compute_diff) to the server, which stores it for the mirror
@@ -548,18 +502,47 @@ static cJSON *marshal_workspace_mirror_sync(int argc, char **argv)
       return NULL;
    }
    const char *root = argv[0];
-   char *patch = mirror_compute_diff(root);
+   /* The patch and the commit it applies to are one fact, so both are sent. The
+    * base is the newest ancestor of HEAD that a remote has: unpushed commits
+    * cannot be fetched server-side, so they travel inside the patch instead. */
+   char base[64] = "";
+   if (workspace_client_mirror_base(root, base, sizeof(base)) != 0)
+   {
+      fprintf(stderr,
+              "aimee: %s has no commit that exists on a remote, so the server has nothing to "
+              "reconstruct from. Push a commit (even an old one) and retry.\n",
+              root);
+      return NULL;
+   }
+   char *patch = workspace_client_diff_compute(root, base);
    if (!patch)
       fprintf(stderr,
-              "warning: could not compute a diff for %s (not a git repo / no HEAD?); "
-              "shipping an empty diff\n",
-              root);
+              "warning: could not compute a diff for %s against %.10s; shipping an empty diff\n",
+              root, base);
 
    cJSON *req = marshal_no_args("workspace.mirror-sync");
    cJSON *args = cJSON_CreateArray();
    cJSON_AddItemToArray(args, cJSON_CreateString(root));
    cJSON_AddItemToObject(req, "args", args);
+   cJSON_AddStringToObject(req, "head", base);
    cJSON_AddStringToObject(req, "diff", patch ? patch : "");
+   char *line = NULL;
+   const char *br[] = {"git", "-C", root, "symbolic-ref", "--quiet", "--short", "HEAD", NULL};
+   if (safe_exec_capture(br, &line, 512) == 0 && line)
+   {
+      line[strcspn(line, "\r\n")] = '\0';
+      cJSON_AddStringToObject(req, "branch", line);
+   }
+   free(line);
+   line = NULL;
+   const char *up[] = {
+       "git", "-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", NULL};
+   if (safe_exec_capture(up, &line, 512) == 0 && line)
+   {
+      line[strcspn(line, "\r\n")] = '\0';
+      cJSON_AddStringToObject(req, "upstream", line);
+   }
+   free(line);
    free(patch);
    return req;
 }
@@ -583,6 +566,212 @@ static void add_verify_arg(cJSON *args, const char *name, const char *val)
    }
 }
 
+/* Every git subcommand except verify, from the CLI.
+ *
+ * The shape is uniform on purpose — `aimee git <command> [primary] [key=value]`,
+ * the same form `aimee git verify action=... key=value` already taught — so there
+ * is ONE parser here rather than a hand-written flag grammar per subcommand. The
+ * only per-command knowledge is what a bare first (and sometimes second) word
+ * means, which is the table below; everything else is key=value and is typed the
+ * same way verify's arguments are.
+ *
+ * `aimee git merge origin/testing`, `aimee git sync`, `aimee git rebase continue`,
+ * `aimee git add -A`, `aimee git pr create title="..."`. */
+static const struct
+{
+   const char *sub;    /* CLI subcommand (dashes allowed) */
+   const char *tool;   /* MCP tool it dispatches to */
+   const char *first;  /* what a bare first word means, NULL if none */
+   const char *second; /* what a bare second word means, NULL if none */
+   int rest_files;     /* remaining bare words accumulate into `files` */
+} GIT_CLI[] = {
+    {"status", "git_status", NULL, NULL, 0},
+    {"commit", "git_commit", "message", NULL, 1},
+    {"push", "git_push", NULL, NULL, 0},
+    {"pull", "git_pull", NULL, NULL, 0},
+    {"fetch", "git_fetch", "remote", NULL, 0},
+    {"branch", "git_branch", "action", "name", 0},
+    {"log", "git_log", NULL, NULL, 0},
+    {"diff", "git_diff_summary", "ref", NULL, 1},
+    {"diff_summary", "git_diff_summary", "ref", NULL, 1},
+    {"pr", "git_pr", "action", NULL, 0},
+    {"issue", "git_issue", "action", NULL, 0},
+    {"clone", "git_clone", "url", "path", 0},
+    {"stash", "git_stash", "action", NULL, 0},
+    {"tag", "git_tag", "action", "name", 0},
+    {"reset", "git_reset", "ref", "mode", 0},
+    {"restore", "git_restore", NULL, NULL, 1},
+    {"add", "git_add", NULL, NULL, 1},
+    {"merge", "git_merge", "ref", NULL, 0},
+    {"rebase", "git_rebase", "base", NULL, 0},
+    {"sync", "git_sync", "base", NULL, 0},
+    {"cherry-pick", "git_cherry_pick", "ref", NULL, 0},
+    {"cherry_pick", "git_cherry_pick", "ref", NULL, 0},
+    {"revert", "git_revert", "ref", NULL, 0},
+    {"switch", "git_switch", "ref", NULL, 0},
+    {"checkout", "git_checkout", NULL, NULL, 1},
+    {"fork", "git_fork", "repo", NULL, 0},
+    {NULL, NULL, NULL, NULL, 0},
+};
+
+/* Bare words that mean an action rather than a ref, for the operations that can
+ * stop mid-flight. Spelled with or without dashes. */
+static int git_cli_is_resume_word(const char *w)
+{
+   while (*w == '-')
+      w++;
+   return strcmp(w, "continue") == 0 || strcmp(w, "abort") == 0 || strcmp(w, "skip") == 0;
+}
+
+/* Short flags worth keeping, because typing them is reflex. Everything else is
+ * key=value, which needs no aliasing. */
+static int git_cli_flag_alias(const char *arg, cJSON *args)
+{
+   static const struct
+   {
+      const char *flag;
+      const char *key;
+      int value;
+   } aliases[] = {
+       {"-A", "all", 1},
+       {"--all", "all", 1},
+       {"-f", "force", 1},
+       {"--force", "force", 1},
+       {"--rebase", "rebase", 1},
+       {"--prune", "prune", 1},
+       {"--auto", "auto", 1},
+       {"--staged", "staged", 1},
+       {"--keep-conflicts", "abort_on_conflict", 0},
+       {NULL, NULL, 0},
+   };
+   for (int i = 0; aliases[i].flag; i++)
+      if (strcmp(arg, aliases[i].flag) == 0)
+      {
+         cJSON_AddBoolToObject(args, aliases[i].key, aliases[i].value);
+         return 1;
+      }
+   if (strcmp(arg, "--merge") == 0)
+   {
+      cJSON_AddStringToObject(args, "mode", "merge");
+      return 1;
+   }
+   return 0;
+}
+
+static cJSON *marshal_git_cli(int argc, char **argv)
+{
+   if (argc < 1 || !argv[0] || !argv[0][0])
+   {
+      fprintf(stderr, "usage: aimee git <command> [primary] [key=value ...]\n"
+                      "  status commit push pull fetch branch log diff pr issue clone stash\n"
+                      "  tag reset restore verify add merge rebase sync cherry-pick revert\n"
+                      "  switch checkout fork\n");
+      return NULL;
+   }
+
+   const char *sub = argv[0];
+   int row = -1;
+   for (int i = 0; GIT_CLI[i].sub; i++)
+      if (strcmp(sub, GIT_CLI[i].sub) == 0)
+      {
+         row = i;
+         break;
+      }
+   if (row < 0)
+   {
+      fprintf(stderr,
+              "aimee: '%s' is not a git command. Try: status commit push pull fetch "
+              "branch log diff pr issue clone stash tag reset restore verify add merge "
+              "rebase sync cherry-pick revert switch checkout fork\n",
+              sub);
+      return NULL;
+   }
+
+   cJSON *req = cJSON_CreateObject();
+   cJSON_AddStringToObject(req, "method", "mcp.call");
+   cJSON_AddStringToObject(req, "tool", GIT_CLI[row].tool);
+   const char *sid = getenv("AIMEE_SESSION_ID");
+   if (!sid || !sid[0])
+      sid = getenv("CLAUDE_SESSION_ID");
+   if (sid && sid[0])
+      cJSON_AddStringToObject(req, "session_id", sid);
+
+   cJSON *args = cJSON_CreateObject();
+   cJSON *files = NULL;
+   int bare = 0;
+
+   for (int i = 1; i < argc; i++)
+   {
+      char *arg = argv[i];
+
+      if (git_cli_flag_alias(arg, args))
+         continue;
+
+      /* key=value / --key=value, typed exactly as verify types its arguments. */
+      const char *raw = arg;
+      if (strncmp(raw, "--", 2) == 0)
+         raw += 2;
+      char *eq = strchr(raw, '=');
+      if (eq)
+      {
+         *eq = '\0';
+         add_verify_arg(args, raw, eq + 1);
+         *eq = '=';
+         continue;
+      }
+
+      if (arg[0] == '-')
+      {
+         /* A bare --flag is a boolean, which is how every boolean in the git
+          * schema reads anyway. */
+         cJSON_AddBoolToObject(args, raw, 1);
+         continue;
+      }
+
+      /* continue/abort/skip is an action wherever an operation can stop. */
+      if (git_cli_is_resume_word(arg) && !cJSON_GetObjectItemCaseSensitive(args, "action"))
+      {
+         cJSON_AddStringToObject(args, "action", arg);
+         continue;
+      }
+
+      bare++;
+      const char *key = (bare == 1) ? GIT_CLI[row].first : (bare == 2 ? GIT_CLI[row].second : NULL);
+      if (key && !cJSON_GetObjectItemCaseSensitive(args, key))
+      {
+         cJSON_AddStringToObject(args, key, arg);
+         continue;
+      }
+      if (GIT_CLI[row].rest_files)
+      {
+         if (!files)
+            files = cJSON_AddArrayToObject(args, "files");
+         cJSON_AddItemToArray(files, cJSON_CreateString(arg));
+         continue;
+      }
+      fprintf(stderr,
+              "aimee: `aimee git %s` does not take '%s' as a bare word; pass it as "
+              "key=value (see `aimee git %s` with no arguments, or the git tool schema)\n",
+              sub, arg, sub);
+      cJSON_Delete(args);
+      cJSON_Delete(req);
+      return NULL;
+   }
+
+   /* Which checkout this is, as everywhere else: the caller's directory unless
+    * they named one. Added last — cJSON keeps duplicates and readers take the
+    * first, so an explicit path= must not be shadowed. */
+   if (!cJSON_GetObjectItemCaseSensitive(args, "path"))
+   {
+      char cwd[4096];
+      if (getcwd(cwd, sizeof(cwd)))
+         cJSON_AddStringToObject(args, "path", cwd);
+   }
+
+   cJSON_AddItemToObject(req, "arguments", args);
+   return req;
+}
+
 static cJSON *marshal_git_verify(int argc, char **argv)
 {
    cJSON *req = cJSON_CreateObject();
@@ -595,10 +784,15 @@ static cJSON *marshal_git_verify(int argc, char **argv)
       cJSON_AddStringToObject(req, "session_id", sid);
 
    cJSON *args = cJSON_CreateObject();
-   char cwd[4096];
-   if (getcwd(cwd, sizeof(cwd)))
-      cJSON_AddStringToObject(args, "path", cwd);
    cJSON_AddBoolToObject(args, "no_session_redirect", 1);
+   /* The cwd default is filled in AFTER the caller's arguments, not before.
+    *
+    * cJSON permits duplicate keys and cJSON_GetObjectItemCaseSensitive returns
+    * the FIRST match, so adding path=<cwd> up here made an explicit
+    * `aimee git verify path=<repo>` a second, unreachable entry. The server read
+    * the cwd every time and the user's path was silently discarded -- which made
+    * the error message's own advice ("pass path=<repo> to target it explicitly")
+    * impossible to act on. */
 
    int has_async = 0;
    for (int i = 0; i < argc; i++)
@@ -640,6 +834,16 @@ static cJSON *marshal_git_verify(int argc, char **argv)
          has_async = 1;
       add_verify_arg(args, raw, val);
       *eq = '=';
+   }
+
+   /* Default the target to the caller's shell directory only when they did not
+    * name one. The server prefers a git root over a bare directory, so sending
+    * the cwd is a useful default and a poor override. */
+   if (!cJSON_GetObjectItemCaseSensitive(args, "path"))
+   {
+      char cwd[4096];
+      if (getcwd(cwd, sizeof(cwd)))
+         cJSON_AddStringToObject(args, "path", cwd);
    }
 
    if (!has_async)
@@ -739,7 +943,7 @@ static cJSON *marshal_model_list(int argc, char **argv)
    static const char *bool_flags[] = {"json", "open-weights", NULL};
    rpc_opts_t opts;
    rpc_parse(argc, argv, bool_flags, &opts);
-   cJSON *req = marshal_no_args("model.list");
+   cJSON *req = marshal_no_args("catalog.list");
    if (!req)
       return NULL;
    const char *capability = rpc_get(&opts, "capability");
@@ -758,10 +962,10 @@ static cJSON *marshal_model_show(int argc, char **argv)
    rpc_parse(argc, argv, NULL, &opts);
    if (opts.pos_count < 1)
    {
-      fprintf(stderr, "aimee: usage: aimee model show [provider:]<model>\n");
+      fprintf(stderr, "aimee: usage: aimee catalog show [provider:]<model>\n");
       return NULL;
    }
-   cJSON *req = marshal_no_args("model.show");
+   cJSON *req = marshal_no_args("catalog.show");
    if (!req)
       return NULL;
    const char *spec = opts.positional[0];
@@ -1212,6 +1416,7 @@ static const char *const MARSHAL_NO_ARGS[] = {
     "aux.config_show",
     "calibration.readiness",
     "cert.list",
+    "config.deploy_env",
     "config.show",
     "cron.list",
     "delegate.backend_list",
@@ -1227,7 +1432,7 @@ static const char *const MARSHAL_NO_ARGS[] = {
     "kb.ingest.status",
     "mcp.audit",
     "memory.stats",
-    "model.refresh",
+    "catalog.refresh",
     "notes.list",
     "provider.get",
     "ranker.export_view",
@@ -1247,7 +1452,7 @@ static const struct
    const char *method;
    marshal_argv_fn fn;
 } MARSHAL_ARGV[] = {
-    {"agent.episodes", marshal_agent_episodes},
+    {"model.episodes", marshal_agent_episodes},
     {"api.enable", marshal_api_enable},
     {"aux.test", marshal_aux_test},
     {"cert.issue", marshal_cert_issue},
@@ -1273,6 +1478,7 @@ static const struct
     {"evidence.provenance_retrieval_event", marshal_audit_provenance},
     {"evidence.trace_retrieval_event", marshal_audit_trace},
     {"get_help", marshal_get_help},
+    {"git.cli", marshal_git_cli},
     {"git.verify", marshal_git_verify},
     {"graph.explain", marshal_graph_explain},
     {"graph.sync_code", marshal_graph_sync_code},
@@ -1285,6 +1491,9 @@ static const struct
     {"index.list", marshal_index_list},
     {"index.scan", marshal_index_scan},
     {"index.structure", marshal_index_structure},
+    {"index.span", marshal_index_span},
+    {"index.investigate", marshal_index_investigate},
+    {"index.hybrid", marshal_index_hybrid},
     {"insights.overview", marshal_insights_overview},
     {"job.list", marshal_coord_jobs_list},
     {"job.start", marshal_coord_job_start},
@@ -1311,8 +1520,8 @@ static const struct
     {"memory.recall", marshal_memory_recall},
     {"memory.search", marshal_memory_search},
     {"memory.store", marshal_memory_store},
-    {"model.list", marshal_model_list},
-    {"model.show", marshal_model_show},
+    {"catalog.list", marshal_model_list},
+    {"catalog.show", marshal_model_show},
     {"notes.search", marshal_notes_search},
     {"primary.set", marshal_primary},
     {"provider.list", marshal_provider_list},
@@ -1507,7 +1716,7 @@ cJSON *marshal_request(const char *method, int argc, char **argv)
    /* Prefix fallbacks (after all exact matches). */
    if (strncmp(method, "skill.", 6) == 0)
       return marshal_skill_request(method, argc, argv);
-   if (strncmp(method, "agent.", 6) == 0)
+   if (strncmp(method, "model.", 6) == 0 || strncmp(method, "agent.", 6) == 0)
       return marshal_agent_args(method, argc, argv);
    if (strncmp(method, "pipeline.", 9) == 0)
       return marshal_pipeline_request(method, argc, argv);
@@ -1600,6 +1809,30 @@ void print_server_health(cJSON *resp)
    {
       const char *kbs = json_str(kb, "status");
       printf("aimee-kb: %s\n", (kbs && kbs[0]) ? kbs : "unknown");
+      /* Why the kb cannot work, straight from the kb, before any detail line.
+       * These are the sentences someone is running this command to find; burying
+       * them under the store/vector/embedder triple means reading "ok" first and
+       * inferring the rest. */
+      cJSON *blockers = cJSON_GetObjectItemCaseSensitive(kb, "blockers");
+      if (cJSON_IsArray(blockers) && cJSON_GetArraySize(blockers) > 0)
+      {
+         cJSON *b;
+         cJSON_ArrayForEach(b, blockers) if (cJSON_IsString(b))
+             printf("  BLOCKED: %s\n", b->valuestring);
+      }
+      /* Advisory findings. They do not move the verdict, which is exactly why they
+       * need printing: a kb that is genuinely "ok" can still be accumulating work
+       * nothing will process, and a status line that only ever renders blockers
+       * reports that as a clean bill of health. Measured: a typed-fact backlog of
+       * 4 jobs, unclaimable for 11.5 hours, with `aimee status` showing "aimee-kb:
+       * ok" and nothing else. */
+      cJSON *kbwarn = cJSON_GetObjectItemCaseSensitive(kb, "warnings");
+      if (cJSON_IsArray(kbwarn) && cJSON_GetArraySize(kbwarn) > 0)
+      {
+         cJSON *w;
+         cJSON_ArrayForEach(w, kbwarn) if (cJSON_IsString(w))
+             printf("  note: %s\n", w->valuestring);
+      }
       /* An open transport breaker refuses every call locally, so the kb can be
        * "ok" here while nothing works. Print it before the detail lines: this is
        * the line that explains an index that answers "unavailable" on a server
@@ -1614,7 +1847,11 @@ void print_server_health(cJSON *resp)
             printf("  next retry in %lldms; see the server log for the cause.\n",
                    (long long)retry->valuedouble);
       }
-      if (kbs && strcmp(kbs, "ok") == 0)
+      /* "degraded" means the kb ANSWERED and told us what is broken, so the detail
+       * lines below are real and worth printing. Only a kb that never answered
+       * gets the "did not answer" text — testing `== "ok"` would have sent every
+       * degraded install down that branch and reported a running kb as absent. */
+      if (kbs && (strcmp(kbs, "ok") == 0 || strcmp(kbs, "degraded") == 0))
       {
          cJSON *vec = cJSON_GetObjectItemCaseSensitive(kb, "vectors");
          printf("  store:       %s\n",
@@ -1634,6 +1871,17 @@ void print_server_health(cJSON *resp)
       {
          printf("  the knowledge base did not answer; memory and kb search will not work.\n");
          printf("  `aimee kb status` has the detail.\n");
+         /* "did not answer" reads as a network problem, and the most common cause
+          * is not. A kb that refuses to start fails CLOSED before it ever binds
+          * the health port, so its diagnosis never reaches this response and
+          * exists only in the container log. Measured: booting a 768-dimension
+          * embedder over a corpus recorded at 384 logs the width, both sides, and
+          * the remedy, then holds DB2 unready until the container crashloops --
+          * and every operator-facing surface said "unreachable", pointing away
+          * from the one place that already knew the answer. Name that place. */
+         printf("  if it never became healthy, the reason is in its own log and not\n");
+         printf("  on the network: `docker logs aimee-kb` (compose) or the kb\n");
+         printf("  service log for your deployment.\n");
       }
    }
 }

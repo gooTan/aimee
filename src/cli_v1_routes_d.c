@@ -5,6 +5,7 @@
 
 #include "cli_v1_routes_internal.h"
 #include "platform_path.h"
+#include "platform_random.h"
 #include "cli_client.h"
 #define V1_PROTOCOL_VERSION 1
 #include "util.h"         /* safe_exec_capture (workspace.mirror-sync ships the client diff) */
@@ -13,11 +14,24 @@
 #if !defined(_WIN32) && !defined(_WIN64)
 #include "aimee_home.h"
 #include <dirent.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif /* !_WIN32 (preamble guard) */
+
+/* config.deploy_env prints the env text and NOTHING else -- no banner, no quotes,
+ * no trailing JSON. Its only caller is a shell wrapper, `eval "$(aimee config
+ * deploy-env)"`, so any decoration becomes a shell command. The generic JSON
+ * fallback would emit the whole envelope, which eval would then try to run. */
+static void pt_print_deploy_env(const char *method, cJSON *resp)
+{
+   (void)method;
+   cJSON *env = cJSON_GetObjectItemCaseSensitive(resp, "env");
+   if (cJSON_IsString(env) && env->valuestring)
+      fputs(env->valuestring, stdout);
+}
 
 typedef void (*pt_print_fn)(const char *method, cJSON *resp);
 static const struct
@@ -25,6 +39,7 @@ static const struct
    const char *method;
    pt_print_fn fn;
 } pt_print_table[] = {
+    {"config.deploy_env", pt_print_deploy_env},
     {"roundtable.review", pt_print_roundtable_review},
     {"audit.verify", pt_print_audit},
     {"audit.checkpoint", pt_print_audit},
@@ -42,6 +57,8 @@ static const struct
     {"skill.list", pt_print_skill_list},
     {"skill.show", pt_print_skill_show},
     {"git.verify", pt_print_git_verify},
+    /* Every git command returns MCP content blocks, the same shape verify does. */
+    {"git.cli", pt_print_git_verify},
     {"get_help", pt_print_get_help},
     {"server.health", pt_print_server_health},
     {"session.list", pt_print_session_list},
@@ -67,6 +84,9 @@ static const struct
     {"index.find", pt_print_index_find},
     {"index.blast_radius", pt_print_index_blast_radius},
     {"index.structure", pt_print_index_structure},
+    {"index.span", pt_print_index_span},
+    {"index.investigate", pt_print_index_investigate},
+    {"index.hybrid", pt_print_index_hybrid},
     {"index.find_callers", pt_print_index_find_callers},
     {"index.deps", pt_print_index_deps},
     {"graph.sync_code", pt_print_graph_sync_code},
@@ -76,15 +96,15 @@ static const struct
     {"workspace.remove", pt_print_workspace_remove},
     {"workspace.mirror-sync", pt_print_workspace_mirror_sync},
     {"hud.status", pt_print_hud_status},
-    {"agent.list", pt_print_agent_list},
-    {"agent.local", pt_print_agent_local},
-    {"agent.add", pt_print_agent_add},
-    {"agent.remove", pt_print_agent_remove},
-    {"agent.enable", pt_print_agent_enable},
-    {"agent.roles", pt_print_agent_roles},
-    {"agent.personas", pt_print_agent_personas},
-    {"agent.disable", pt_print_agent_disable},
-    {"agent.probe", pt_print_agent_probe},
+    {"model.list", pt_print_agent_list},
+    {"model.local", pt_print_agent_local},
+    {"model.add", pt_print_agent_add},
+    {"model.remove", pt_print_agent_remove},
+    {"model.enable", pt_print_agent_enable},
+    {"model.roles", pt_print_agent_roles},
+    {"model.personas", pt_print_agent_personas},
+    {"model.disable", pt_print_agent_disable},
+    {"model.probe", pt_print_agent_probe},
     {"mcp.audit", pt_print_mcp_audit},
     {"mcp.recheck", pt_print_mcp_recheck},
     {"toolset.list", pt_print_toolset_list},
@@ -122,7 +142,7 @@ static const struct
     {"aux.test", pt_print_aux_test},
     {"delegate.log", pt_print_delegate_log},
     {"episode.list", pt_print_delegate_log},
-    {"agent.episodes", pt_print_delegate_log},
+    {"model.episodes", pt_print_delegate_log},
     {"delegate.launch", pt_print_delegate_launch},
     {"kb.search", pt_print_kb_search},
     {"kb.build", pt_print_kb_build},
@@ -138,11 +158,11 @@ static const struct
     {"provider.models", pt_print_provider_models},
     {"provider.test", pt_print_provider_test},
     {"provider.quota", pt_print_provider_quota},
-    {"model.show", pt_print_model_show},
-    {"model.list", pt_print_model_list},
+    {"catalog.show", pt_print_model_show},
+    {"catalog.list", pt_print_model_list},
     {"provider.get", pt_print_provider_get},
     {"provider.set", pt_print_provider_set},
-    {"model.refresh", pt_print_model_refresh},
+    {"catalog.refresh", pt_print_model_refresh},
     {"dogfood.tag", pt_print_dogfood_tag},
     {"dogfood.report", pt_print_dogfood_report},
     {"eval.run", pt_print_eval_run},
@@ -261,12 +281,21 @@ static int write_delegate_output_file(const char *path, const char *text)
  * (http_uds_client.c is not linked into the CLI). Returns the response body
  * (heap; caller frees) and sets *status_out to the HTTP status; NULL on
  * transport failure. Mirrors http_uds_client.c, which serves the same role for
- * the TUI. */
+ * the TUI.
+ *
+ * timeout_ms bounds the WAIT FOR A REPLY. It used not to take one at all: the
+ * caller's budget was honoured on the remote branch of cli_v1_send and silently
+ * dropped here, and the read loop below had no timeout of any kind. A
+ * co-located server that accepted the connection and then went quiet -- or died
+ * between accept and reply -- hung the CLI forever, with no way for the caller
+ * to bound it. That is the default transport for a co-located install. */
 static char *cli_v1_http_request(const char *verb, const char *path, const char *body,
-                                 int *status_out)
+                                 int timeout_ms, int *status_out)
 {
    if (status_out)
       *status_out = 0;
+   if (timeout_ms <= 0)
+      timeout_ms = CLIENT_DEFAULT_TIMEOUT_MS;
    const char *home = aimee_home();
    if (!home || !home[0])
       return NULL;
@@ -322,6 +351,7 @@ static char *cli_v1_http_request(const char *verb, const char *path, const char 
       off += n;
    }
 
+   const long long deadline_ms = util_now_ms() + timeout_ms;
    size_t cap = 8192, len = 0;
    char *resp = malloc(cap);
    if (!resp)
@@ -342,6 +372,24 @@ static char *cli_v1_http_request(const char *verb, const char *path, const char 
             return NULL;
          }
          resp = grown;
+      }
+      /* Wait for readability against the caller's deadline rather than
+       * blocking in read(). A server that accepts and never answers must cost
+       * the budget, not the session. */
+      long long left = deadline_ms - util_now_ms();
+      if (left <= 0)
+      {
+         free(resp);
+         close(fd);
+         return NULL;
+      }
+      struct pollfd readable = {.fd = fd, .events = POLLIN};
+      int pr = poll(&readable, 1, (int)left);
+      if (pr <= 0 || !(readable.revents & POLLIN))
+      {
+         free(resp);
+         close(fd);
+         return NULL;
       }
       int n = (int)read(fd, resp + len, 4096);
       if (n <= 0)
@@ -597,24 +645,6 @@ static const struct
    const char *verb;
    const char *path;
 } CLI_V1_GEN_ROUTES[] = {
-    {"agent.add", "POST", "/v1/agent/add"},
-    {"agent.cli_oauth_code", "POST", "/v1/agent/cli_oauth_code"},
-    {"agent.cli_oauth_poll", "POST", "/v1/agent/cli_oauth_poll"},
-    {"agent.cli_oauth_start", "POST", "/v1/agent/cli_oauth_start"},
-    {"agent.disable", "POST", "/v1/agent/disable"},
-    {"agent.draft", "POST", "/v1/agent/draft"},
-    {"agent.enable", "POST", "/v1/agent/enable"},
-    {"agent.episodes", "POST", "/v1/agent/episodes"},
-    {"agent.list", "GET", "/v1/agent/list"},
-    {"agent.local", "GET", "/v1/agent/local"},
-    {"agent.personas", "POST", "/v1/agent/personas"},
-    {"agent.probe", "POST", "/v1/agent/probe"},
-    {"agent.remove", "POST", "/v1/agent/remove"},
-    {"agent.roles", "POST", "/v1/agent/roles"},
-    {"agent.set", "POST", "/v1/agent/set"},
-    {"agent.setup", "POST", "/v1/agent/setup"},
-    {"agent.setup_poll", "POST", "/v1/agent/setup_poll"},
-    {"agent.stats", "GET", "/v1/agent/stats"},
     {"api.disable", "POST", "/v1/api/disable"},
     {"api.enable", "POST", "/v1/api/enable"},
     {"api.enroll_bearer", "POST", "/v1/api/enroll_bearer"},
@@ -632,6 +662,9 @@ static const struct
     {"aux.test", "POST", "/v1/aux/test"},
     {"blast_radius.preview", "POST", "/v1/blast_radius/preview"},
     {"calibration.readiness", "GET", "/v1/calibration/readiness"},
+    {"catalog.list", "GET", "/v1/catalog/list"},
+    {"catalog.refresh", "POST", "/v1/catalog/refresh"},
+    {"catalog.show", "GET", "/v1/catalog/show"},
     {"cert.issue", "POST", "/v1/cert/issue"},
     {"cert.list", "POST", "/v1/cert/list"},
     {"cert.revoke", "POST", "/v1/cert/revoke"},
@@ -643,6 +676,7 @@ static const struct
     {"collab_rules.list_active", "GET", "/v1/collab_rules/active"},
     {"collab_rules.reject", "POST", "/v1/collab_rules/reject"},
     {"collab_rules.retire", "POST", "/v1/collab_rules/retire"},
+    {"config.deploy_env", "GET", "/v1/config/deploy-env"},
     {"config.get", "POST", "/v1/config/get"},
     {"config.set", "POST", "/v1/config/set"},
     {"config.show", "GET", "/v1/config"},
@@ -671,9 +705,11 @@ static const struct
     {"delegate", "POST", "/v1/delegate/run"},
     {"delegate.backend_exec", "POST", "/v1/delegate/backend_exec"},
     {"delegate.backend_list", "GET", "/v1/delegate/backend_list"},
+    {"delegate.cancel_unassigned", "POST", "/v1/delegate/cancel_unassigned"},
     {"delegate.launch", "POST", "/v1/delegate/launch"},
     {"delegate.log", "GET", "/v1/delegate/log"},
     {"delegate.reply", "POST", "/v1/delegate/reply"},
+    {"delegate.reservation.forget", "POST", "/v1/delegate/reservation/forget"},
     {"delegate.sandbox_gc", "POST", "/v1/delegate/sandbox/gc"},
     {"delegate.sandbox_list", "GET", "/v1/delegate/sandbox/images"},
     {"delegate.status", "POST", "/v1/delegate/status"},
@@ -702,7 +738,10 @@ static const struct
     {"index.deps", "POST", "/v1/index/deps"},
     {"index.find", "POST", "/v1/index/find"},
     {"index.find_callers", "POST", "/v1/index/find_callers"},
+    {"index.hybrid", "POST", "/v1/index/hybrid"},
+    {"index.investigate", "POST", "/v1/index/investigate"},
     {"index.list", "POST", "/v1/index/list"},
+    {"index.span", "POST", "/v1/index/span"},
     {"index.structure", "POST", "/v1/index/structure"},
     {"init.run", "POST", "/v1/init/run"},
     {"insights.overview", "GET", "/v1/insights/overview"},
@@ -729,12 +768,36 @@ static const struct
     {"memory.store", "POST", "/v1/memory/store"},
     {"memory.supersede", "POST", "/v1/memory/supersede"},
     {"memory.user_capture", "POST", "/v1/memory/user_capture"},
+    {"model.add", "POST", "/v1/model/add"},
+    {"model.cli_oauth_code", "POST", "/v1/model/cli_oauth_code"},
+    {"model.cli_oauth_poll", "POST", "/v1/model/cli_oauth_poll"},
+    {"model.cli_oauth_start", "POST", "/v1/model/cli_oauth_start"},
+    {"model.disable", "POST", "/v1/model/disable"},
+    {"model.draft", "POST", "/v1/model/draft"},
+    {"model.enable", "POST", "/v1/model/enable"},
+    {"model.episodes", "POST", "/v1/model/episodes"},
     {"model.list", "GET", "/v1/model/list"},
-    {"model.refresh", "POST", "/v1/model/refresh"},
-    {"model.show", "GET", "/v1/model/show"},
+    {"model.local", "GET", "/v1/model/local"},
+    {"model.personas", "POST", "/v1/model/personas"},
+    {"model.probe", "POST", "/v1/model/probe"},
+    {"model.remove", "POST", "/v1/model/remove"},
+    {"model.roles", "POST", "/v1/model/roles"},
+    {"model.set", "POST", "/v1/model/set"},
+    {"model.setup", "POST", "/v1/model/setup"},
+    {"model.setup_poll", "POST", "/v1/model/setup_poll"},
+    {"model.stats", "GET", "/v1/model/stats"},
     {"optimize.export", "GET", "/v1/optimize/export"},
     {"optimize.promote", "POST", "/v1/optimize/promote"},
     {"optimize.replay_record", "POST", "/v1/optimize/replay-record"},
+#if AIMEE_WITH_ROUNDTABLE
+    {"pipeline.advance", "POST", "/v1/pipeline/advance"},
+    {"pipeline.cancel", "POST", "/v1/pipeline/cancel"},
+    {"pipeline.gate", "POST", "/v1/pipeline/gate"},
+    {"pipeline.list", "GET", "/v1/pipeline/list"},
+    {"pipeline.resume", "POST", "/v1/pipeline/resume"},
+    {"pipeline.start", "POST", "/v1/pipeline/start"},
+    {"pipeline.status", "POST", "/v1/pipeline/status"},
+#endif
     {"provider.get", "POST", "/v1/provider/get"},
     {"provider.list", "GET", "/v1/provider/list"},
     {"provider.models", "GET", "/v1/provider/models"},
@@ -789,8 +852,10 @@ static const struct
     {"wm.get", "POST", "/v1/wm/get"},
     {"wm.list", "POST", "/v1/wm/list"},
     {"wm.set", "POST", "/v1/wm/set"},
+    {"workers", "GET", "/v1/workers"},
     {"workspace.context", "POST", "/v1/workspaces/context"},
     {"workspace.list", "GET", "/v1/workspaces"},
+    {"workspace.mirror-sync", "POST", "/v1/workspace/mirror-sync"},
     {"worktree.gc", "POST", "/v1/worktree/gc"},
 };
 
@@ -845,6 +910,10 @@ const char *cli_v1_route_for_method(const char *method, const char **verb_out)
       const char *path;
    } bespoke[] = {
        {"workspace.add", "POST", "/v1/workspaces"},
+       /* The mirror tier's client-diff upload. Without this mapping the client
+        * resolves no route and ships nothing, so a remote server reconstructs a
+        * clean checkout at head and silently drops every uncommitted change. */
+       {"workspace.mirror-sync", "POST", "/v1/workspace/mirror-sync"},
        /* Detached-workspace runner reverse channel (aimee workspace serve); the
         * REST twins return the same {ok, have_op, op?} / {ok} as the NDJSON ops. */
        {"runner.poll", "POST", "/v1/runner/poll"},
@@ -1008,7 +1077,7 @@ static cJSON *cli_v1_send(const char *remote, const char *bearer, const char *ve
    }
    else
    {
-      char *r = cli_v1_http_request(verb, path, body, &status);
+      char *r = cli_v1_http_request(verb, path, body, timeout_ms, &status);
       if (r)
       {
          resp = cJSON_Parse(r);
@@ -1171,7 +1240,19 @@ static cJSON *cli_v1_run_and_poll(const char *remote, const char *bearer, const 
    snprintf(runpath, sizeof(runpath), "/v1/runs/%s", idj->valuestring);
    cJSON_Delete(queued);
 
-   int waited = 0;
+   /* Bound the WALL CLOCK, not the sum of the sleeps.
+    *
+    * `waited += step_ms` counted only the 500ms pause while each poll below can
+    * itself block for its own timeout. A server that accepts the poll and then
+    * goes quiet cost 15.5s of real time per iteration and credited 0.5s of it,
+    * so a declared 300000ms budget could run for 600 iterations x 15.5s -- over
+    * two and a half HOURS. A timeout that overruns by two orders of magnitude
+    * is indistinguishable from a hang, and was read as one.
+    *
+    * Two parts, and both are needed: measure elapsed against a monotonic
+    * deadline, and give each poll only the time that is actually LEFT, so a
+    * single stalled request cannot overshoot the budget on its own. */
+   const long long deadline_ms = timeout_ms > 0 ? util_now_ms() + timeout_ms : 0;
    const int step_ms = 500;
    /* A long remote run (delegate ensembles, kb.build, index.scan, …) polls for many
     * minutes. A single transient poll failure — a TLS/connection blip while the run
@@ -1183,7 +1264,17 @@ static cJSON *cli_v1_run_and_poll(const char *remote, const char *bearer, const 
    const int max_consec_fail = 20;
    for (;;)
    {
-      cJSON *snap = cli_v1_send(remote, bearer, "GET", runpath, NULL, 15000, &status);
+      /* Never hand a single poll more time than the whole call has left. */
+      int poll_ms = 15000;
+      if (deadline_ms)
+      {
+         long long left = deadline_ms - util_now_ms();
+         if (left <= 0)
+            return NULL;
+         if (left < poll_ms)
+            poll_ms = (int)left;
+      }
+      cJSON *snap = cli_v1_send(remote, bearer, "GET", runpath, NULL, poll_ms, &status);
       if (!snap)
       {
          if (++consec_fail > max_consec_fail)
@@ -1218,10 +1309,9 @@ static cJSON *cli_v1_run_and_poll(const char *remote, const char *bearer, const 
          }
          cJSON_Delete(snap);
       }
-      if (timeout_ms > 0 && waited >= timeout_ms)
+      if (deadline_ms && util_now_ms() >= deadline_ms)
          return NULL;
       cli_v1_sleep_ms(step_ms);
-      waited += step_ms;
    }
 }
 
@@ -1651,6 +1741,193 @@ int cli_index_scan_remote(int argc, char **argv)
 
 #endif /* AIMEE_POSIX */
 
+/* Ship a workspace patch as a sequence of bounded requests.
+ *
+ * A working tree is not bounded by anything the transport can choose, so sending
+ * the patch whole made the route unusable on any real checkout: one generated
+ * file exceeds the request cap, and raising the cap only moves the number that
+ * will be wrong next. The server reassembles by appending each chunk to the same
+ * file, so the size that matters is the tree's, not a request's.
+ *
+ * `seq` 0 truncates server-side; only the final chunk carries the head, so a head
+ * is never stored against a patch that is still arriving.
+ *
+ * An older server ignores both fields and writes every chunk whole, which would
+ * leave the mirror holding the LAST chunk while looking complete. Two things
+ * prevent that. The first response must acknowledge `chunked` before any later
+ * chunk is sent; and chunk 0 deliberately carries NO patch data, so the worst an
+ * old server can be left holding is an empty diff — a defined state (a clean
+ * checkout at the recorded head), never a fragment of one. Patch data starts at
+ * seq 1. */
+static int cli_v1_mirror_sync_chunked(cJSON *req, int timeout, int json_output)
+{
+   cJSON *jdiff = cJSON_GetObjectItemCaseSensitive(req, "diff");
+   const char *diff = cJSON_IsString(jdiff) ? jdiff->valuestring : "";
+   size_t total = strlen(diff);
+
+   /* Sized against the PER-METHOD limit, not the transport one. Requests are
+    * capped twice: SHTTP_MAX_BODY (4MB) at the listener, and a per-method limit
+    * that defaults to LIMIT_DEFAULT — 256KB — for any method without its own
+    * entry, which mirror-sync does not have. The method limit is the binding one
+    * and rejects with PAYLOAD_TOO_LARGE.
+    *
+    * 128KB of patch leaves room for JSON escaping (worst case ~2x on a binary
+    * patch's escapes) and the envelope inside that 256KB. Chunking means no limit
+    * anywhere has to move: the size of one request stops being a function of the
+    * size of the tree. */
+   const size_t chunk_max = 128u * 1024u;
+
+   char *remote = cli_v1_client_endpoint();
+   char *bearer = remote ? cli_v1_client_bearer() : NULL;
+
+   cJSON *jhead = cJSON_GetObjectItemCaseSensitive(req, "head");
+   /* Borrowed, not copied: `req` outlives this loop, and copying pulled
+    * safe_strdup (util.o) into a TU whose test link line does not carry it. */
+   const char *head = cJSON_IsString(jhead) ? jhead->valuestring : "";
+   cJSON *jbranch = cJSON_GetObjectItemCaseSensitive(req, "branch");
+   cJSON *jupstream = cJSON_GetObjectItemCaseSensitive(req, "upstream");
+   const char *branch = cJSON_IsString(jbranch) ? jbranch->valuestring : "";
+   const char *upstream = cJSON_IsString(jupstream) ? jupstream->valuestring : "";
+
+   /* A transfer id keeps the server's cross-request assembly ownership explicit.
+    * The server serializes transfers from their empty begin chunk through final
+    * metadata publication; without an id it could not distinguish a delayed
+    * continuation from a second client using the same workspace. */
+   unsigned char transfer_random[16];
+   char transfer[33];
+   if (platform_random_bytes(transfer_random, sizeof(transfer_random)) != 0)
+   {
+      fprintf(stderr, "aimee: workspace mirror-sync: cannot create transfer id\n");
+      free(remote);
+      free(bearer);
+      return 1;
+   }
+   static const char hex[] = "0123456789abcdef";
+   for (size_t i = 0; i < sizeof(transfer_random); i++)
+   {
+      transfer[i * 2] = hex[transfer_random[i] >> 4];
+      transfer[i * 2 + 1] = hex[transfer_random[i] & 0x0f];
+   }
+   transfer[32] = '\0';
+
+   size_t sent = 0;
+   int seq = 0, rc = 0;
+   int data_chunks = (int)((total + chunk_max - 1) / chunk_max);
+   /* One empty begin chunk, then the data. A patch that fits in a single request
+    * still uses the begin chunk: one extra tiny round trip buys the same
+    * old-server safety on every sync rather than only on large ones. */
+   int chunks = data_chunks + 1;
+
+   for (;;)
+   {
+      int begin = (seq == 0);
+      size_t n = begin ? 0 : (total - sent > chunk_max ? chunk_max : total - sent);
+      int final = !begin && (sent + n >= total);
+      if (begin && total == 0)
+         final = 1; /* nothing to ship: the begin chunk is the whole sync */
+
+      cJSON *body = cJSON_CreateObject();
+      cJSON_AddStringToObject(body, "method", "workspace.mirror-sync");
+      cJSON *args = cJSON_CreateArray();
+      cJSON *src_args = cJSON_GetObjectItemCaseSensitive(req, "args");
+      cJSON *a = NULL;
+      cJSON_ArrayForEach(a, src_args) if (cJSON_IsString(a))
+          cJSON_AddItemToArray(args, cJSON_CreateString(a->valuestring));
+      cJSON_AddItemToObject(body, "args", args);
+      char *slice = (char *)malloc(n + 1);
+      if (!slice)
+      {
+         cJSON_Delete(body);
+         rc = 1;
+         break;
+      }
+      memcpy(slice, diff + sent, n);
+      slice[n] = '\0';
+      cJSON_AddStringToObject(body, "diff", slice);
+      free(slice);
+      cJSON_AddNumberToObject(body, "seq", seq);
+      cJSON_AddBoolToObject(body, "final", final);
+      cJSON_AddStringToObject(body, "transfer", transfer);
+      if (final && head[0])
+         cJSON_AddStringToObject(body, "head", head);
+      if (final && branch[0])
+         cJSON_AddStringToObject(body, "branch", branch);
+      if (final && upstream[0])
+         cJSON_AddStringToObject(body, "upstream", upstream);
+
+      char *wire = cJSON_PrintUnformatted(body);
+      cJSON_Delete(body);
+      if (!wire)
+      {
+         rc = 1;
+         break;
+      }
+      int status = 0;
+      cJSON *resp =
+          cli_v1_send(remote, bearer, "POST", "/v1/workspace/mirror-sync", wire, timeout, &status);
+      free(wire);
+      if (!resp)
+      {
+         fprintf(stderr, "aimee: workspace mirror-sync: chunk %d of %d was not answered\n", seq + 1,
+                 chunks);
+         rc = 1;
+         break;
+      }
+      /* The refusal envelope is {"status":"error","message":...}; an "error" key
+       * only appears on some paths. Reading the wrong one made a server that had
+       * answered clearly ("PAYLOAD_TOO_LARGE ...") fall through to the
+       * capability message below and get reported as too old — a plain refusal
+       * dressed up as a version problem. */
+      cJSON *st = cJSON_GetObjectItemCaseSensitive(resp, "status");
+      cJSON *err = cJSON_GetObjectItemCaseSensitive(resp, "error");
+      int failed = (cJSON_IsString(st) && strcmp(st->valuestring, "error") == 0) || err != NULL;
+      if (failed)
+      {
+         cJSON *m = cJSON_GetObjectItemCaseSensitive(resp, "message");
+         if (!cJSON_IsString(m) && cJSON_IsObject(err))
+            m = cJSON_GetObjectItemCaseSensitive(err, "message");
+         if (!cJSON_IsString(m) && cJSON_IsString(err))
+            m = err;
+         fprintf(stderr, "aimee: workspace mirror-sync: chunk %d of %d refused: %s\n", seq + 1,
+                 chunks, cJSON_IsString(m) ? m->valuestring : "rejected");
+         cJSON_Delete(resp);
+         rc = 1;
+         break;
+      }
+      /* Refuse to keep going against a server that cannot reassemble: it would
+       * accept every chunk and end up storing only the last one. */
+      if (!final)
+      {
+         cJSON *ack = cJSON_GetObjectItemCaseSensitive(resp, "chunked");
+         if (!cJSON_IsTrue(ack))
+         {
+            fprintf(stderr,
+                    "aimee: workspace mirror-sync: this patch needs %d chunks but the server did "
+                    "not acknowledge chunked sync, so the parts would overwrite each other and the "
+                    "mirror would look complete while holding only the last one. Upgrade the "
+                    "server, or sync a tree small enough for one request.\n",
+                    chunks);
+            cJSON_Delete(resp);
+            rc = 1;
+            break;
+         }
+      }
+      cJSON_Delete(resp);
+
+      sent += n;
+      seq++;
+      if (final)
+         break;
+   }
+
+   free(remote);
+   free(bearer);
+
+   if (rc == 0 && !json_output)
+      printf("workspace mirror-sync: shipped %zu byte(s) in %d chunk(s)\n", total, seq);
+   return rc;
+}
+
 /* cli_v1_dispatch_local: dispatch a pre-marshalled {method, ...params} request to its
  * first-class /v1 route over the co-located transport — the local aimee-http.sock
  * on POSIX, or the configured remote on Windows (no UDS). Interactive
@@ -1827,7 +2104,12 @@ static int cli_v1_finish_response(const cli_v1_route_t *route, cJSON *resp, int 
    {
       exit_rc = 1;
    }
-   else if (strcmp(route->method, "agent.probe") == 0 && agent_probe_response_is_failure(resp))
+   else if (strcmp(route->method, "model.probe") == 0 && agent_probe_response_is_failure(resp))
+   {
+      exit_rc = 1;
+   }
+   else if (strcmp(route->method, "roundtable.review") == 0 &&
+            roundtable_review_response_is_failure(resp))
    {
       exit_rc = 1;
    }
@@ -2016,6 +2298,12 @@ int cli_v1_forward(const char *socket_path, const cli_v1_route_t *route, int jso
    }
 
    int timeout = route->timeout_ms > 0 ? route->timeout_ms : CLIENT_DEFAULT_TIMEOUT_MS;
+   if (strcmp(route->method, "workspace.mirror-sync") == 0)
+   {
+      int rc = cli_v1_mirror_sync_chunked(req, timeout, effective_json_output);
+      cJSON_Delete(req);
+      return rc;
+   }
    if (strcmp(route->method, "delegate") == 0)
    {
       int delegate_timeout = delegate_timeout_from_args(fwd_argc, fwd_argv);
@@ -2047,6 +2335,12 @@ int cli_v1_forward(const char *socket_path, const cli_v1_route_t *route, int jso
       rest_path = cli_v1_pathid_build(disp_method, req, pathid_buf, sizeof(pathid_buf), &rest_verb);
    if (!async_path && !rest_path)
       rest_path = cli_v1_route_for_method(disp_method, &rest_verb);
+   /* Whether the METHOD is a {id}-bearing route at all, independent of whether
+    * this invocation supplied the id. Captured HERE, before the request tree is
+    * freed: disp_method can point into `req` (bm->valuestring), so it dangles
+    * once cJSON_Delete(req) runs and must not be dereferenced below. */
+   const int is_pathid_route =
+       cli_v1_pathid_route_for_method(disp_method, NULL, NULL, NULL) != NULL;
 
    char *http_body = cJSON_PrintUnformatted(req);
    cJSON_Delete(req);
@@ -2071,6 +2365,32 @@ int cli_v1_forward(const char *socket_path, const cli_v1_route_t *route, int jso
        * connection; a full compute queue returns {status:error,"compute queue
        * full"}) — both clear fast. */
       const char *body = http_body;
+      /* A body over the listener's cap is dropped before it is ever parsed, so
+       * the send returns nothing and the failure reads as "could not reach the
+       * endpoint (is the server running?)" — pointing at a server that is up and
+       * answering every other request. Measured on a real workspace:
+       * `workspace mirror-sync` shipped 16.8MB (a repo with 247 untracked files)
+       * against the 4MB cap and reported the server as unreachable.
+       *
+       * Refuse here instead, naming the two numbers, so the size is the finding
+       * rather than something the operator has to infer. The roundtable review
+       * path has its own larger cap and is checked against that one. */
+      size_t body_len = body ? strlen(body) : 0;
+      size_t body_cap = rest_path && strcmp(rest_path, "/v1/roundtable/review") == 0
+                            ? (size_t)CLI_V1_MAX_ROUNDTABLE_BODY
+                            : (size_t)CLI_V1_MAX_BODY;
+      if (body_len > body_cap)
+      {
+         fprintf(stderr,
+                 "aimee: '%s' request body is %zu bytes, over the %zu-byte limit the server "
+                 "accepts, so it would be dropped before it was read. Reduce what the request "
+                 "carries (for a workspace sync, untracked files dominate it) and retry.\n",
+                 route->method, body_len, body_cap);
+         free(http_body);
+         free(bearer);
+         free(remote);
+         return -1;
+      }
       static const int retry_delays_ms[] = {200, 500, 1000};
       const int max_retries = (int)(sizeof(retry_delays_ms) / sizeof(retry_delays_ms[0]));
       for (int attempt = 0; attempt <= max_retries; attempt++)
@@ -2098,15 +2418,33 @@ int cli_v1_forward(const char *socket_path, const cli_v1_route_t *route, int jso
    }
    else if (http_body)
    {
-      /* No first-class route — unreachable given the coverage gates; surface it
-       * rather than silently dropping the command. This is a routing gap, not an
-       * unreachable server, so return early instead of falling through to the
-       * misleading "is the server running?" hint below. */
-      fprintf(stderr, "aimee: '%s' has no /v1 route\n", route->method);
+      /* Two different failures land here. A path-id route ({id}-bearing) whose id
+       * is missing produced no path, which is a MISSING ARGUMENT, not a routing
+       * gap: `aimee workspace get` with no path answered "'workspace.get' has no
+       * /v1 route" while `aimee workspace get <path>` worked fine, sending the
+       * user to look for a route that is present and correct. Ask
+       * cli_v1_pathid_route_for_method() which case this is -- it reports whether
+       * the METHOD is a path-id route at all, independently of whether this
+       * invocation supplied the id. */
+      const int missing_arg = is_pathid_route;
+      if (missing_arg)
+         fprintf(stderr, "aimee: '%s' needs an argument (the id or path to act on)\n",
+                 route->method);
+      else
+         /* Genuinely no first-class route — surface it rather than silently
+          * dropping the command. This is a routing gap, not an unreachable
+          * server, so return early instead of falling through to the misleading
+          * "is the server running?" hint below. */
+         fprintf(stderr, "aimee: '%s' has no /v1 route\n", route->method);
       free(http_body);
       free(bearer);
       free(remote);
-      return -1;
+      /* >= 0 means "handled, this is the exit code" and suppresses the caller's
+       * "server /v1 request failed" line. A missing argument IS fully handled --
+       * no request was ever attempted, so blaming the server on the next line is
+       * doubly wrong. A real routing gap keeps returning -1 so that path is
+       * unchanged. */
+      return missing_arg ? 1 : -1;
    }
 
    free(http_body);

@@ -165,6 +165,9 @@ static const struct
     {"curator", "contradictions", "curator.contradictions", NULL, NULL, 0},
     {"index", "blast-radius", "index.blast_radius", NULL, NULL, 0},
     {"index", "structure", "index.structure", NULL, NULL, 0},
+    {"index", "span", "index.span", NULL, NULL, 0},
+    {"index", "investigate", "index.investigate", NULL, NULL, 0},
+    {"index", "hybrid", "index.hybrid", NULL, NULL, 0},
     {"index", "callers", "index.find_callers", NULL, NULL, 0},
     {"index", "deps", "index.deps", NULL, NULL, 0},
     {"workspace", "add", "workspace.add", NULL, NULL, 300000},
@@ -240,7 +243,7 @@ static const struct
     {"pipeline", "gate", "pipeline.gate", NULL, NULL, 300000},
     {"delegate", "launch", "delegate.launch", NULL, NULL, 300000},
     {"delegate", "status", "delegate.status", NULL, NULL, 0},
-    {"delegate", "--list-roles", "agent.list", NULL, "agents", 0},
+    {"delegate", "--list-roles", "model.list", NULL, "agents", 0},
     {"delegate", "log", "delegate.log", NULL, "episodes", 0},
     {"delegate", "history", "delegate.log", NULL, "episodes", 0},
     {"delegate", "sandbox list", "delegate.sandbox_list", NULL, "images", 0},
@@ -274,6 +277,7 @@ static const struct
     {"aux", "", "aux.config_show", NULL, NULL, 0},
     {"config", "show", "config.show", NULL, NULL, 0},
     {"config", "get", "config.get", NULL, NULL, 0},
+    {"config", "deploy-env", "config.deploy_env", NULL, NULL, 0},
     {"config", "set", "config.set", NULL, NULL, 0},
     {"config", "", "config.show", NULL, NULL, 0},
     {"vault", "unlock", "vault.unlock", NULL, NULL, 0},
@@ -299,21 +303,34 @@ static const struct
     {"cron", "enable", "cron.enable", NULL, NULL, 0},
     {"cron", "disable", "cron.disable", NULL, NULL, 0},
     {"cron", "remove", "cron.remove", NULL, NULL, 0},
-    {"agent", "list", "agent.list", NULL, "agents", 0},
+    {"model", "list", "model.list", NULL, "agents", 0},
     {"audit", "verify", "audit.verify", NULL, NULL, 0},
     {"audit", "checkpoint", "audit.checkpoint", NULL, NULL, 0},
     {"audit", "seal", "audit.seal", NULL, NULL, 0},
     {"audit", "snapshot", "audit.snapshot", NULL, NULL, 0},
     {"audit", "", "audit.verify", NULL, NULL, 0},
-    {"agent", "episodes", "agent.episodes", NULL, "episodes", 0},
-    {"agent", "add", "agent.add", NULL, NULL, 300000},
-    {"agent", "local", "agent.local", NULL, NULL, 300000},
-    {"agent", "remove", "agent.remove", NULL, NULL, 0},
-    {"agent", "enable", "agent.enable", NULL, NULL, 0},
-    {"agent", "roles", "agent.roles", NULL, NULL, 0},
-    {"agent", "personas", "agent.personas", NULL, NULL, 0},
-    {"agent", "disable", "agent.disable", NULL, NULL, 0},
-    {"agent", "probe", "agent.probe", NULL, NULL, 300000},
+    {"model", "episodes", "model.episodes", NULL, "episodes", 0},
+    {"model", "add", "model.add", NULL, NULL, 300000},
+    {"model", "local", "model.local", NULL, NULL, 300000},
+    {"model", "remove", "model.remove", NULL, NULL, 0},
+    {"model", "enable", "model.enable", NULL, NULL, 0},
+    {"model", "roles", "model.roles", NULL, NULL, 0},
+    {"model", "personas", "model.personas", NULL, NULL, 0},
+    {"model", "disable", "model.disable", NULL, NULL, 0},
+    {"model", "probe", "model.probe", NULL, NULL, 300000},
+    /* Deprecated alias: the roster tab and its ops were called "agent" before
+     * they were named for what a roster entry actually is -- one model. Kept so
+     * existing scripts keep working; both spellings reach the same ops. */
+    {"agent", "list", "model.list", NULL, "agents", 0},
+    {"agent", "episodes", "model.episodes", NULL, "episodes", 0},
+    {"agent", "add", "model.add", NULL, NULL, 300000},
+    {"agent", "local", "model.local", NULL, NULL, 300000},
+    {"agent", "remove", "model.remove", NULL, NULL, 0},
+    {"agent", "enable", "model.enable", NULL, NULL, 0},
+    {"agent", "roles", "model.roles", NULL, NULL, 0},
+    {"agent", "personas", "model.personas", NULL, NULL, 0},
+    {"agent", "disable", "model.disable", NULL, NULL, 0},
+    {"agent", "probe", "model.probe", NULL, NULL, 300000},
     {"mcp", "audit", "mcp.audit", NULL, "items", 0},
     {"mcp", "recheck", "mcp.recheck", NULL, "items", 300000},
     {"audit", "trace", "evidence.trace_retrieval_event", NULL, NULL, 0},
@@ -323,6 +340,12 @@ static const struct
     {"get-help", NULL, "get_help", "help.get", NULL, 0},
     {"verify", NULL, "git.verify", "mcp.call", NULL, 900000},
     {"git", "verify", "git.verify", "mcp.call", NULL, 900000},
+    /* Every other git subcommand, wildcard so `aimee git <anything>` reaches the
+     * server's git tool instead of "not a subcommand of 'git'". MUST stay after
+     * the verify row: pass 2 takes the first match, and verify has its own
+     * marshaler (--status, async=). Wildcard also means argv[0] is the
+     * subcommand, which is what marshal_git_cli needs to pick the tool. */
+    {"git", NULL, "git.cli", "mcp.call", NULL, 300000},
     {"provider", "list", "provider.list", NULL, "providers", 300000},
     {"provider", "show", "provider.show", NULL, NULL, 0},
     {"provider", "models", "provider.models", NULL, "models", 300000},
@@ -331,9 +354,12 @@ static const struct
     {"provider", "", "provider.get", NULL, NULL, 0},
     {"provider", NULL, "provider.set", NULL, NULL, 0},
     {"use", NULL, "provider.set", NULL, NULL, 0},
-    {"model", "list", "model.list", NULL, "models", 0},
-    {"model", "show", "model.show", NULL, NULL, 0},
-    {"model", "refresh", "model.refresh", NULL, NULL, 300000},
+    /* The model CAPABILITY CATALOG (what a model can do: context window,
+     * pricing, flags). Distinct from the model ROSTER (`aimee model`),
+     * which is the configured fleet. */
+    {"catalog", "list", "catalog.list", NULL, "models", 0},
+    {"catalog", "show", "catalog.show", NULL, NULL, 0},
+    {"catalog", "refresh", "catalog.refresh", NULL, NULL, 300000},
     {"server", "status", "server.health", NULL, NULL, 0},
     {"server", "health", "server.health", NULL, NULL, 0},
     {"status", "", "server.health", NULL, NULL, 0},
@@ -526,274 +552,6 @@ cJSON *marshal_curator_contradictions(int argc, char **argv)
    return req;
 }
 
-/* Every ordered memory command carries the thin client's identity to the
- * server.  Explicit project/workspace values are useful for detached clients;
- * cwd is the normal active-project source and is never resolved on the KB
- * service host. */
-static void marshal_add_memory_scope(cJSON *req, const rpc_opts_t *opts)
-{
-   const char *v;
-   if ((v = rpc_get(opts, "project")))
-      cJSON_AddStringToObject(req, "project", v);
-   if ((v = rpc_get(opts, "workspace")))
-      cJSON_AddStringToObject(req, "workspace", v);
-   if ((v = rpc_get(opts, "scope")))
-      cJSON_AddStringToObject(req, "scope", v);
-   char cwd[4096];
-   if (getcwd(cwd, sizeof(cwd)))
-      cJSON_AddStringToObject(req, "cwd", cwd);
-}
-
-cJSON *marshal_memory_search(int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-
-   cJSON *req = marshal_no_args("memory.search");
-
-   cJSON *kw = cJSON_CreateArray();
-   for (int i = 0; i < opts.pos_count; i++)
-      cJSON_AddItemToArray(kw, cJSON_CreateString(opts.positional[i]));
-   cJSON_AddItemToObject(req, "keywords", kw);
-   cJSON_AddNumberToObject(req, "limit", rpc_get_int(&opts, "limit", 10));
-   marshal_add_memory_scope(req, &opts);
-   return req;
-}
-
-/* `aimee memory recall [task] [--task T] [--query Q] [--session-start]
- * [--limit-tokens N]` -> POST /v1/memory/recall. task_hint is required by the
- * endpoint; fall back to a generic hint so the command always succeeds. */
-cJSON *marshal_memory_recall(int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-
-   cJSON *req = marshal_no_args("memory.recall");
-
-   const char *task = rpc_get(&opts, "task");
-   if (!task && opts.pos_count > 0)
-      task = opts.positional[0];
-   cJSON_AddStringToObject(req, "task_hint", task && task[0] ? task : "session start");
-   if (rpc_has_flag(&opts, "session-start"))
-      cJSON_AddBoolToObject(req, "session_start", 1);
-   const char *q = rpc_get(&opts, "query");
-   if (q)
-      cJSON_AddStringToObject(req, "query", q);
-   int lt = rpc_get_int(&opts, "limit-tokens", 0);
-   if (lt > 0)
-      cJSON_AddNumberToObject(req, "limit_tokens", lt);
-   marshal_add_memory_scope(req, &opts);
-   return req;
-}
-
-cJSON *marshal_memory_store(int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-
-   cJSON *req = marshal_no_args("memory.store");
-
-   /* Accept both positional (`memory store <key> <content>`) and flag
-    * (`--key` / `--content`) forms; positional wins when present. Previously the
-    * flags were silently ignored, yielding a confusing "missing key or content". */
-   const char *key = opts.pos_count > 0 ? opts.positional[0] : rpc_get(&opts, "key");
-   const char *content = opts.pos_count > 1 ? opts.positional[1] : rpc_get(&opts, "content");
-   if (key)
-      cJSON_AddStringToObject(req, "key", key);
-   if (content)
-      cJSON_AddStringToObject(req, "content", content);
-
-   const char *v;
-   if ((v = rpc_get(&opts, "tier")))
-      cJSON_AddStringToObject(req, "tier", v);
-   if ((v = rpc_get(&opts, "kind")))
-      cJSON_AddStringToObject(req, "kind", v);
-   if ((v = rpc_get(&opts, "session")))
-      cJSON_AddStringToObject(req, "session_id", v);
-   if ((v = rpc_get(&opts, "confidence")))
-      cJSON_AddNumberToObject(req, "confidence", atof(v));
-   return req;
-}
-
-/* Shared marshaler for the db1 user-capture commands. Requires <key> <value>
- * positionals, rejects a key that would truncate under the prefix (avoids
- * silent collisions), and dispatches as the server op memory.user_capture with
- * kind + prefixed key + tier L2 so recall surfaces it. Returns NULL (a clear
- * usage/limit error) on bad input so cli_v1_forward reports it. */
-static cJSON *marshal_user_capture(const char *cmd, const char *kind, const char *prefix,
-                                   const char *tier, int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-   /* Content may be positional OR --content=<value>. The flag form is required
-    * for arbitrary bodies (e.g. the .md migration): rpc_parse would otherwise
-    * mis-read a value starting with `--` (frontmatter `---`) as a flag, whereas
-    * a --content=... value is taken verbatim after the first '='. */
-   const char *keyarg = opts.pos_count > 0 ? opts.positional[0] : NULL;
-   const char *content = opts.pos_count > 1 ? opts.positional[1] : rpc_get(&opts, "content");
-   if (!keyarg || !keyarg[0] || !content || !content[0])
-   {
-      fprintf(stderr,
-              "aimee: usage: aimee memory %s <key> <value>   (or: %s <key> --content=<value>)\n",
-              cmd, cmd);
-      return NULL;
-   }
-   char key[512];
-   int need = snprintf(key, sizeof(key), "%s%s", prefix, keyarg);
-   if (need < 0 || (size_t)need >= sizeof(key))
-   {
-      fprintf(stderr, "aimee: memory %s: key too long (max %zu chars)\n", cmd,
-              sizeof(key) - strlen(prefix) - 1);
-      return NULL;
-   }
-   cJSON *req = marshal_no_args("memory.user_capture");
-   cJSON_AddStringToObject(req, "kind", kind);
-   cJSON_AddStringToObject(req, "tier", tier);
-   cJSON_AddStringToObject(req, "key", key);
-   cJSON_AddStringToObject(req, "content", content);
-   return req;
-}
-
-/* `aimee memory identity <key> <value>` — a per-user identity fact in db1. */
-cJSON *marshal_memory_identity(int argc, char **argv)
-{
-   return marshal_user_capture("identity", "fact", "identity:", "L2", argc, argv);
-}
-
-/* `aimee memory prefer <key> <value>` — a per-user preference in db1. */
-cJSON *marshal_memory_prefer(int argc, char **argv)
-{
-   return marshal_user_capture("prefer", "preference", "pref:", "L2", argc, argv);
-}
-
-/* `aimee memory archive <name> <body>` — preserve a memory in db1 as a private,
- * NON-RECALLABLE archival row (kind='archive' + tier L1 both keep it out of the
- * L2/fact|preference recall selectors). The .md-retirement migration writes here
- * so nothing is lost and nothing leaks to org (db2) before operator
- * classification. */
-cJSON *marshal_memory_archive(int argc, char **argv)
-{
-   return marshal_user_capture("archive", "archive", "archive:", "L1", argc, argv);
-}
-
-cJSON *marshal_memory_list(int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-
-   cJSON *req = marshal_no_args("memory.list");
-
-   const char *v;
-   if ((v = rpc_get(&opts, "tier")))
-      cJSON_AddStringToObject(req, "tier", v);
-   if ((v = rpc_get(&opts, "kind")))
-      cJSON_AddStringToObject(req, "kind", v);
-   cJSON_AddNumberToObject(req, "limit", rpc_get_int(&opts, "limit", 20));
-   marshal_add_memory_scope(req, &opts);
-   return req;
-}
-
-cJSON *marshal_memory_get(int argc, char **argv)
-{
-   cJSON *req = marshal_no_args("memory.get");
-   if (argc > 0)
-      cJSON_AddNumberToObject(req, "id", atoll(argv[0]));
-   return req;
-}
-
-cJSON *marshal_memory_delete(int argc, char **argv)
-{
-   cJSON *req = marshal_no_args("memory.delete");
-   if (argc > 0)
-      cJSON_AddNumberToObject(req, "id", atoll(argv[0]));
-   return req;
-}
-
-/* `aimee memory supersede <old_id> <new_content> [--confidence=N] [--session=S]`
- * — mirrors mem_supersede()'s argument shape so the thin client and the
- * server-host command take the same thing. */
-cJSON *marshal_memory_supersede(int argc, char **argv)
-{
-   cJSON *req = marshal_no_args("memory.supersede");
-   int positional = 0;
-   for (int i = 0; i < argc; i++)
-   {
-      if (strncmp(argv[i], "--confidence=", 13) == 0)
-         cJSON_AddNumberToObject(req, "confidence", atof(argv[i] + 13));
-      else if (strncmp(argv[i], "--session=", 10) == 0)
-         cJSON_AddStringToObject(req, "session_id", argv[i] + 10);
-      else if (argv[i][0] == '-')
-         continue;
-      else if (positional == 0)
-      {
-         cJSON_AddNumberToObject(req, "old_id", atoll(argv[i]));
-         positional++;
-      }
-      else if (positional == 1)
-      {
-         cJSON_AddStringToObject(req, "new_content", argv[i]);
-         positional++;
-      }
-   }
-   return req;
-}
-
-cJSON *marshal_memory_read(int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-   cJSON *req = marshal_no_args("memory.read");
-   marshal_add_memory_scope(req, &opts);
-   return req;
-}
-
-/* Add `field` to req as an absolute path. The benchmark asset paths are
- * resolved against the client's cwd because aimee-server may run with a
- * different working directory; absolute paths are forwarded unchanged. */
-static void marshal_add_abs_path(cJSON *req, const char *field, const char *path)
-{
-   if (!path || !path[0])
-      return;
-   if (path[0] == '/')
-   {
-      cJSON_AddStringToObject(req, field, path);
-      return;
-   }
-   char cwd[4096];
-   if (!getcwd(cwd, sizeof(cwd)))
-   {
-      cJSON_AddStringToObject(req, field, path);
-      return;
-   }
-   char abs[4608];
-   snprintf(abs, sizeof(abs), "%s/%s", cwd, path);
-   cJSON_AddStringToObject(req, field, abs);
-}
-
-/* Marshal `aimee memory benchmark [code-graph-fusion] [--arm NAME]
- * [--corpus PATH] [--matrix PATH] [--fusion-state off|shadow|on]` into the
- * memory.benchmark request. Asset paths default on the server to the committed
- * benchmark files; when given here they are made absolute for the server. */
-cJSON *marshal_memory_benchmark(int argc, char **argv)
-{
-   rpc_opts_t opts;
-   rpc_parse(argc, argv, NULL, &opts);
-
-   cJSON *req = marshal_no_args("memory.benchmark");
-
-   const char *suite = (opts.pos_count >= 1) ? opts.positional[0] : "code-graph-fusion";
-   cJSON_AddStringToObject(req, "suite", suite);
-   const char *arm = rpc_get(&opts, "arm");
-   if (arm)
-      cJSON_AddStringToObject(req, "arm", arm);
-   const char *fstate = rpc_get(&opts, "fusion-state");
-   if (fstate)
-      cJSON_AddStringToObject(req, "fusion_state", fstate);
-   marshal_add_abs_path(req, "corpus", rpc_get(&opts, "corpus"));
-   marshal_add_abs_path(req, "matrix", rpc_get(&opts, "matrix"));
-   return req;
-}
-
 cJSON *marshal_index_scan(int argc, char **argv)
 {
    static const char *bool_flags[] = {"force", NULL};
@@ -860,6 +618,90 @@ static cJSON *marshal_index_file_request(const char *method, int argc, char **ar
 cJSON *marshal_index_blast_radius(int argc, char **argv)
 {
    return marshal_index_file_request("index.blast_radius", argc, argv);
+}
+
+/* `aimee index span <file> [start] [end]`, or the historic <project> <file> form
+ * with the range after it. Positional rather than flagged because this is meant
+ * to be typed inline in a chain of && commands, where three short positionals
+ * beat --line-start/--line-end. */
+cJSON *marshal_index_span(int argc, char **argv)
+{
+   static const char *bools[] = {"json", NULL};
+   rpc_opts_t opts;
+   rpc_parse(argc, argv, bools, &opts);
+
+   cJSON *req = marshal_no_args("index.span");
+   int at = 0;
+   /* A leading argument that is not a number and is followed by another
+    * non-number is the project, matching the other index commands. */
+   if (opts.pos_count > 1 && !isdigit((unsigned char)opts.positional[1][0]))
+   {
+      cJSON_AddStringToObject(req, "project", opts.positional[0]);
+      at = 1;
+   }
+   if (opts.pos_count > at)
+      cJSON_AddStringToObject(req, "file_path", opts.positional[at]);
+   if (opts.pos_count > at + 1)
+      cJSON_AddNumberToObject(req, "line_start", atoi(opts.positional[at + 1]));
+   if (opts.pos_count > at + 2)
+      cJSON_AddNumberToObject(req, "line_end", atoi(opts.positional[at + 2]));
+   char cwd[4096];
+   if (getcwd(cwd, sizeof(cwd)))
+      cJSON_AddStringToObject(req, "cwd", cwd);
+   return req;
+}
+
+/* `aimee index investigate "<question>" ["<question>" ...]`.
+ *
+ * EVERY positional is a question, so several become one invocation and one
+ * round trip -- the same reason the MCP tool grew a `queries` array. A single
+ * question still works and is sent as `query`, matching the tool's shape. */
+/* `aimee index hybrid "<phrase>" ["<phrase>" ...]` -- same positional-as-query
+ * shape as investigate, for the same reason: several phrases in one invocation
+ * is one round trip. --scope all widens beyond the active project. */
+cJSON *marshal_index_hybrid(int argc, char **argv)
+{
+   static const char *bools[] = {"json", NULL};
+   rpc_opts_t opts;
+   rpc_parse(argc, argv, bools, &opts);
+
+   cJSON *req = marshal_no_args("index.hybrid");
+   if (opts.pos_count == 1)
+      cJSON_AddStringToObject(req, "query", opts.positional[0]);
+   else if (opts.pos_count > 1)
+   {
+      cJSON *arr = cJSON_AddArrayToObject(req, "queries");
+      for (int i = 0; i < opts.pos_count; i++)
+         cJSON_AddItemToArray(arr, cJSON_CreateString(opts.positional[i]));
+   }
+   const char *scope = rpc_get(&opts, "scope");
+   if (scope && scope[0])
+      cJSON_AddStringToObject(req, "scope", scope);
+   char cwd[4096];
+   if (getcwd(cwd, sizeof(cwd)))
+      cJSON_AddStringToObject(req, "cwd", cwd);
+   return req;
+}
+
+cJSON *marshal_index_investigate(int argc, char **argv)
+{
+   static const char *bools[] = {"json", NULL};
+   rpc_opts_t opts;
+   rpc_parse(argc, argv, bools, &opts);
+
+   cJSON *req = marshal_no_args("index.investigate");
+   if (opts.pos_count == 1)
+      cJSON_AddStringToObject(req, "query", opts.positional[0]);
+   else if (opts.pos_count > 1)
+   {
+      cJSON *arr = cJSON_AddArrayToObject(req, "queries");
+      for (int i = 0; i < opts.pos_count; i++)
+         cJSON_AddItemToArray(arr, cJSON_CreateString(opts.positional[i]));
+   }
+   char cwd[4096];
+   if (getcwd(cwd, sizeof(cwd)))
+      cJSON_AddStringToObject(req, "cwd", cwd);
+   return req;
 }
 
 cJSON *marshal_index_structure(int argc, char **argv)
@@ -2045,9 +1887,9 @@ cJSON *marshal_roundtable_review(int argc, char **argv)
    }
    char *artifact_text = NULL;
    if (artifact_stdin)
-      artifact_text = marshal_read_stdin_limited(16u * 1024u * 1024u);
+      artifact_text = marshal_read_stdin_limited(CLI_V1_MAX_ROUNDTABLE_ARTIFACT);
    else if (artifact_path)
-      artifact_text = marshal_read_file_limited(artifact_path, 16u * 1024u * 1024u);
+      artifact_text = marshal_read_file_limited(artifact_path, CLI_V1_MAX_ROUNDTABLE_ARTIFACT);
    else if (opts.pos_count > 0 && opts.positional[0])
    {
       FILE *probe = fopen(opts.positional[0], "rb");
@@ -2055,7 +1897,8 @@ cJSON *marshal_roundtable_review(int argc, char **argv)
       {
          fclose(probe);
          artifact_positional = 1;
-         artifact_text = marshal_read_file_limited(opts.positional[0], 16u * 1024u * 1024u);
+         artifact_text =
+             marshal_read_file_limited(opts.positional[0], CLI_V1_MAX_ROUNDTABLE_ARTIFACT);
          if (!artifact_text)
          {
             cJSON_Delete(req);

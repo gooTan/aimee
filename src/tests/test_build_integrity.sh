@@ -242,6 +242,18 @@ else
     fail "KB entrypoint must export PGCTLTIMEOUT>60 before starting the cluster (export=$kb_pgctltimeout_line, start=$kb_pgctl_start_line, default=$kb_pgctltimeout_default)"
 fi
 
+# An ordinary docker stop/restart must terminate the supervising shell after it
+# forwards the signal and must stop embedded PostgreSQL before Docker's timeout
+# escalates to SIGKILL. Merely trapping TERM without exiting returns to the
+# monitor loop and makes every routine restart depend on WAL recovery.
+if grep -qF 'shutdown_embedded() {' ../deploy/container/aimee-kb-entrypoint.sh &&
+   grep -qF 'trap - EXIT HUP INT TERM' ../deploy/container/aimee-kb-entrypoint.sh &&
+   grep -qF "trap 'shutdown_embedded; exit 0' HUP INT TERM" ../deploy/container/aimee-kb-entrypoint.sh; then
+    pass "KB entrypoint makes signal-driven embedded PostgreSQL shutdown terminal"
+else
+    fail "KB entrypoint can return to its monitor loop after Docker requests shutdown"
+fi
+
 # The export path starts the same cluster in a stopped container, so it is
 # exposed to the identical recovery wait -- and an export timing out aborts with
 # the data intact but unread.
@@ -331,6 +343,19 @@ else
     fail "server plane supervisor can deadlock on an exited zombie child"
 fi
 
+# The optional-module gate decides which processes attach to the bus. Both
+# entrypoints must ship it, and it must honour AIMEE_MODULE_<ID> in BOTH
+# directions -- an enable-only gate cannot turn anything off.
+if sh tests/test_optional_modules.sh > /dev/null 2>&1 &&
+   grep -qF 'apply_optional_modules server' ../deploy/container/server-entrypoint.sh &&
+   grep -qF 'apply_optional_modules kb' ../deploy/container/aimee-kb-entrypoint.sh &&
+   grep -qF 'optional-modules-lib.sh' ../Dockerfile.server &&
+   grep -qF 'optional-modules-lib.sh' ../Dockerfile; then
+    pass "operator can enable and disable optional modules in both placements"
+else
+    fail "optional-module gate is missing, one-directional, or not shipped in an image"
+fi
+
 if grep -q 'go|c' ../deploy/container/server-entrypoint.sh ||
    grep -q 'wfe_autonomy_register();' server/server.c ||
    grep -q 'wfe_scheduler_init();' server/server.c; then
@@ -407,15 +432,26 @@ else
     fail "verify-local can race lint against a partial shipping build"
 fi
 
+if sed -n '/^verify-local:/,/^[^[:space:]#].*:/p' Makefile |
+   grep -qF 'python3 -I scripts/check_c_repository_lock.py'; then
+    pass "verify-local rejects stale extracted-repository source pins"
+else
+    fail "verify-local can pass with stale extracted-repository source pins"
+fi
+
 # Verification runs inside the server image, whose deployment posture is
 # expressed through AIMEE_* environment overrides. Those values are correct for
 # the live daemon but must not override config fixtures in repository unit tests.
-if sed -n '/^unit-tests:/,/^$(TESTPREFIX)\/unit-test-util:/p' tests/Rules.mk |
-   grep -qF 'unset AIMEE_HOME AIMEE_API_REMOTE_WRITES AIMEE_API_MTLS AIMEE_API_BEARER_TOKEN' &&
-   sed -n '/^unit-tests:/,/^$(TESTPREFIX)\/unit-test-util:/p' tests/Rules.mk |
-       grep -qF 'AIMEE_SERVER_HTTP_BIND AIMEE_WORKSPACES_DIR AIMEE_KB_API_URL' &&
-   sed -n '/^unit-tests:/,/^$(TESTPREFIX)\/unit-test-util:/p' tests/Rules.mk |
-       grep -qF 'AIMEE_KB_API_BEARER_TOKEN AIMEE_WFE_ENGINE AIMEE_WFE_HTTP_SOCKET'; then
+# Match in-shell rather than piping into grep -q. Under `set -o pipefail` such
+# a pipeline reports the SIGPIPE that grep's early exit sends back to its
+# writer, so the check starts failing purely because the recipe grew past a
+# 4KiB pipe block -- a false red that says nothing about the overrides.
+unit_tests_recipe=$(sed -n '/^unit-tests:/,/^$(TESTPREFIX)\/unit-test-util:/p' tests/Rules.mk)
+go_unit_tests_recipe=$(sed -n '/^go-unit-tests:/,/^verify-local:/p' Makefile)
+if [[ "$unit_tests_recipe" == *'unset AIMEE_HOME AIMEE_API_REMOTE_WRITES AIMEE_API_MTLS AIMEE_API_BEARER_TOKEN'* &&
+      "$unit_tests_recipe" == *'AIMEE_SERVER_HTTP_BIND AIMEE_WORKSPACES_DIR AIMEE_KB_API_URL'* &&
+      "$unit_tests_recipe" == *'AIMEE_KB_API_BEARER_TOKEN AIMEE_WFE_ENGINE AIMEE_WFE_HTTP_SOCKET'* &&
+      "$go_unit_tests_recipe" == *'unset AIMEE_WFE_ENGINE AIMEE_WFE_HTTP_SOCKET'* ]]; then
     pass "unit verification removes server deployment overrides"
 else
     fail "unit verification inherits server deployment overrides"
@@ -729,6 +765,56 @@ if [ -z "$missing_systemd_units" ]; then
     pass "install/update scripts refresh all systemd user units"
 else
     fail "install/update scripts miss systemd user units:$missing_systemd_units"
+fi
+
+# Native installs must ship the same Go workflow control plane and managed
+# factory definitions as the container image. Otherwise `aimee workflow list`
+# is empty after a successful source install even though config/workflows is
+# present in the checkout.
+native_factory_install_ok=1
+[ -f ../systemd/user/aimee-wfe.service ] || native_factory_install_ok=0
+grep -q 'AIMEE_WFE_ENGINE=go' ../systemd/user/aimee-server.service || native_factory_install_ok=0
+for script in ../install.sh ../update.sh; do
+    grep -q 'aimee-wfe' "$script" || native_factory_install_ok=0
+    grep -q 'seed-managed-defaults.sh' "$script" || native_factory_install_ok=0
+    grep -q 'config/workflows' "$script" || native_factory_install_ok=0
+done
+if [ "$native_factory_install_ok" -eq 1 ]; then
+    pass "native installs ship the Go WFE and seed factory workflows"
+else
+    fail "native installs omit the Go WFE or shipped factory workflows"
+fi
+
+# WFE must serve the workflow control stage over the module bus: the unit must
+# both pass --module-bus-socket and export AIMEE_MODULE_BUS_SOCKET with the same value.
+wfe_unit="../systemd/user/aimee-wfe.service"
+wfe_env_socket=$(grep -F 'Environment=AIMEE_MODULE_BUS_SOCKET=' "$wfe_unit" 2>/dev/null | sed -n 's/.*Environment=AIMEE_MODULE_BUS_SOCKET=//p' | head -1 | tr -d '\r' || true)
+wfe_flag_socket=$(grep -F -- '--module-bus-socket' "$wfe_unit" 2>/dev/null | sed -n 's/.*--module-bus-socket \([^ ]*\).*/\1/p' | head -1 | tr -d '\r' || true)
+if [ -n "$wfe_env_socket" ] && [ "$wfe_env_socket" = "$wfe_flag_socket" ] && [ "$wfe_env_socket" = "%h/.config/aimee/server-module-bus.sock" ]; then
+    pass "aimee-wfe.service exports the same module-bus socket it passes by flag"
+else
+    fail "aimee-wfe.service must export AIMEE_MODULE_BUS_SOCKET=%h/.config/aimee/server-module-bus.sock matching --module-bus-socket (env=$wfe_env_socket flag=$wfe_flag_socket)"
+fi
+
+managed_defaults_tmp=$(mktemp -d /tmp/aimee-managed-defaults.XXXXXX)
+mkdir -p "$managed_defaults_tmp/source"
+printf 'first\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+printf 'second\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+managed_update=$(cat "$managed_defaults_tmp/installed/demo.yaml")
+printf 'operator edit\n' > "$managed_defaults_tmp/installed/demo.yaml"
+printf 'third\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+operator_update=$(cat "$managed_defaults_tmp/installed/demo.yaml")
+rm -rf "$managed_defaults_tmp"
+if [ "$managed_update" = "second" ] && [ "$operator_update" = "operator edit" ]; then
+    pass "managed workflow defaults update without overwriting operator edits"
+else
+    fail "managed workflow default seeding overwrites or fails to refresh definitions"
 fi
 
 # 7c2. update.sh must refresh hooks/support files even when binaries are current.
@@ -1576,6 +1662,19 @@ else
     fail "curation must be enqueued after embedding, not during scan (scan=$scan_enqueues, embed=$embed_enqueues, gated=$embed_gated)"
 fi
 
+# A hook aimee never registers is not a guard. `aimee hooks` implements the
+# PreToolUse contract and require_aimee_git is ON by default, but the codex plugin
+# shipped no hooks file at all -- so across the benchmark's aimee cells the agent
+# made 98 shell `git` calls and zero calls to the aimee git tool. The manifest
+# entry and the emitted file must both exist, and must name the same path.
+hooks_decl=$(grep -c 'hooks/codex-hooks.json' ../src/client_integrations.c 2>/dev/null || true)
+hooks_cmd=$(grep -c '%s hooks' ../src/client_integrations.c 2>/dev/null || true)
+if [ "${hooks_decl:-0}" -ge 2 ] && [ "${hooks_cmd:-0}" -ge 1 ]; then
+    pass "codex plugin registers a PreToolUse hook and emits the file it declares"
+else
+    fail "codex plugin must declare hooks/codex-hooks.json in the manifest AND write it (decl=$hooks_decl cmd=$hooks_cmd)"
+fi
+
 if [ "$FAIL" = "0" ]; then
     if [ "$MODE" = "--build-variants" ]; then
         echo "All build variant checks passed."
@@ -1590,4 +1689,3 @@ else
     fi
     exit 1
 fi
-

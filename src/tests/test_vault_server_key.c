@@ -76,7 +76,7 @@ static void test_bad_master_key_not_overwritten(void)
    /* Clobber the (valid) key with a wrong-size file. */
    FILE *f = fopen(path, "wb");
    assert(f);
-   const char junk[10] = "BADKEYDATA";
+   static const char junk[] = "BADKEYDATA";
    assert(fwrite(junk, 1, sizeof(junk), f) == sizeof(junk));
    fclose(f);
 

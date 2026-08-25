@@ -17,6 +17,14 @@ delegates, tests, and the Windows client through `-Imodules/tools`) and `agent_t
 private seam shared across the three sources). These were relocated from `src/posix/` (the
 implementations) and `src/headers/` (the contract).
 
+The tool-dispatch classification stage now runs in the supervised Go
+`aimee-module-tools` process from `server-go/modules/tools`. The C
+`module_adapter.c` remains a byte-parity fixture. The dispatcher uses only the
+registered event-bus classifier; if it is absent or fails, the tool remains
+unclassified rather than falling back to a local name table. Tool execution,
+policy and workspace binding, schemas, and result handling are deliberately not
+claimed as ported by this first classification-stage conversion.
+
 `agent_tools.h` also declares a turn/snapshot/toolset session-state slice (`agent_tools_begin_turn`,
 `agent_tools_set_snap_id`, `agent_tools_set_active_toolset`) implemented in `src/server/agent_tools.c`:
 server-side tool-execution session orchestration that is not module-local, the same arrangement by

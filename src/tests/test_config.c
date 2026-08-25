@@ -148,11 +148,45 @@ static void test_bool_true_parses_as_true(void)
    printf("bool-true ");
 }
 
+/* A bundled embedder reaches the process as EMBEDDER_URL, never as the stored
+ * embedder_command: the kb entrypoint exports the URL when it starts the in-container
+ * model, and the wizard writes embedder_model. Anything asking "is an embedder
+ * available" must therefore go through the resolver.
+ *
+ * The curator drain asked the raw field instead, so on every bundled deployment its
+ * ingest_docs and embed_code stages saw "no embedder" and never ran -- while query
+ * embedding kept working, because that path resolves. The result was a KB that
+ * reported healthy, embedded every search query, and returned zero hits forever. */
+static void test_embedder_command_resolves_from_env(void)
+{
+   /* Deliberately NULL rather than a config_t: naming that type is a lint failure
+    * (config-encapsulation-check), and the invariant the drain gate depends on is
+    * exactly the no-stored-command case anyway -- a bundled deployment never writes
+    * embedder_command, so NULL models it faithfully. */
+   platform_unsetenv("EMBEDDER_URL");
+   /* Nothing configured anywhere: the honest answer is empty, which is what makes
+    * the resolver safe to use as an availability gate. */
+   assert(config_embedder_command(NULL, NULL)[0] == '\0');
+
+   /* The bundled case: the entrypoint exports EMBEDDER_URL for the model it just
+    * started, and that alone must make the resolver non-empty. This is the assertion
+    * the curator drain's en_embedder() now relies on. */
+   platform_setenv("EMBEDDER_URL", "http://127.0.0.1:8760");
+   assert(strcmp(config_embedder_command(NULL, NULL), "http://127.0.0.1:8760") == 0);
+
+   /* A per-call request still outranks the environment. */
+   assert(strcmp(config_embedder_command(NULL, "http://other:9"), "http://other:9") == 0);
+
+   platform_unsetenv("EMBEDDER_URL");
+   assert(config_embedder_command(NULL, NULL)[0] == '\0');
+}
+
 int main(void)
 {
    printf("config: ");
    test_kb_curator_tier();
    test_bool_true_parses_as_true();
+   test_embedder_command_resolves_from_env();
 
    /* Use isolated temp HOME */
    char tmpdir[512];
@@ -313,7 +347,8 @@ int main(void)
       snprintf(cfg.workspace_providers[2], sizeof(cfg.workspace_providers[2]), "mirror");
       snprintf(cfg.workspace_vcs_remote[2], sizeof(cfg.workspace_vcs_remote[2]),
                "https://example.com/r.git");
-      snprintf(cfg.workspace_vcs_head[2], sizeof(cfg.workspace_vcs_head[2]), "abc123def456");
+      snprintf(cfg.workspace_vcs_head[2], sizeof(cfg.workspace_vcs_head[2]),
+               "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
       cfg.memory_maintenance_trigger_inserts = 7;
       cfg.memory_maintenance_trigger_secs = 90;
       cfg.memory_cognify_async_enabled = 1;
@@ -517,12 +552,11 @@ int main(void)
                "--background-index");
       cfg.lsp_servers[0].extension_count = 1;
       snprintf(cfg.lsp_servers[0].extensions[0], sizeof(cfg.lsp_servers[0].extensions[0]), "c");
-      /* require_aimee_git + delegate_sandbox (both default ON): enforcement dials, so a
-       * value that does not survive save+reload is a guard silently in the wrong state
-       * after every restart. Set each to its OPT-OUT — the direction config_save has to
-       * persist explicitly, and the direction that is unsafe to lose. */
+      /* require_aimee_git (default ON): an enforcement dial, so a value that does not
+       * survive save+reload is a guard silently in the wrong state after every
+       * restart. Set it to its OPT-OUT — the direction config_save has to persist
+       * explicitly, and the direction that is unsafe to lose. */
       cfg.require_aimee_git = 0;
-      cfg.delegate_sandbox = 0;
       cfg.subagent_ban_enabled = 0; /* default-ON dial: opt-out must survive save+reload */
       config_save(&cfg);
 
@@ -563,7 +597,6 @@ int main(void)
        * turn it off. Save-without-parse and parse-without-save are the same bug from
        * opposite ends; a round-trip is the only thing that catches either. */
       assert(cfg2.require_aimee_git == 0);
-      assert(cfg2.delegate_sandbox == 0);
       /* Same save-without-parse / parse-without-save class as require_aimee_git:
        * subagent_ban_enabled is written only as the opt-out and must parse back. */
       assert(cfg2.subagent_ban_enabled == 0);
@@ -578,7 +611,8 @@ int main(void)
       assert(strcmp(cfg2.workspaces[2], "/tmp/ws-mirror-rt") == 0);
       assert(strcmp(cfg2.workspace_providers[2], "mirror") == 0);
       assert(strcmp(cfg2.workspace_vcs_remote[2], "https://example.com/r.git") == 0);
-      assert(strcmp(cfg2.workspace_vcs_head[2], "abc123def456") == 0);
+      assert(strcmp(cfg2.workspace_vcs_head[2],
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") == 0);
       assert(cfg2.worktree_gc_enabled == 0);
       assert(cfg2.worktree_gc_max_age_days == 21);
       assert(cfg2.memory_maintenance_trigger_inserts == 7);
@@ -1658,6 +1692,85 @@ int main(void)
       assert(strcmp(cfg2.sandbox.allow_paths[1], "/opt/b") == 0);
    }
 
+   /* --- sandbox mode: defaults, opt-out persistence, and bad input ---
+    *
+    * Read through config_sandbox() rather than a config_t. check-config-encapsulation
+    * ratchets config_t exposure in this file DOWNWARD — the baseline is debt, not
+    * headroom — so these cases go through the accessor the checker steers callers to.
+    * That is also the honest surface: the delegate shell guard in tool_bash() reads
+    * config_sandbox(), not a config_t.
+    *
+    * Deliberately NOT via config_reload(): publishing a snapshot makes every later
+    * config_load() in the process return that snapshot instead of the file
+    * (config.c:1128), which silently breaks any test after this one. With no snapshot
+    * live, config_sandbox() heap-loads from disk, which is what these cases want.
+    * AIMEE_NO_CACHE defeats the stat-keyed load cache so successive rewrites of the
+    * same path are always re-read. */
+   {
+      char cpath[512];
+      snprintf(cpath, sizeof(cpath), "%s/.config/aimee/aimee.yaml", tmpdir);
+      sandbox_config_t sb;
+      setenv("AIMEE_NO_CACHE", "1", 1);
+
+      /* DEFAULT-ON with no sandbox section. The guard refuses a delegated shell
+       * whenever the mode is OFF, so while this defaulted to the zero value it
+       * refused every co-located delegate shell on an unconfigured install. */
+      FILE *f = fopen(cpath, "w");
+      assert(f);
+      fprintf(f, "provider: claude\n");
+      fclose(f);
+      memset(&sb, 0, sizeof(sb));
+      config_sandbox(&sb);
+      assert(sb.mode == SANDBOX_MODE_WORKSPACE_ONLY);
+
+      /* The explicit opt-out SURVIVES a save. config_save persists the sandbox block
+       * only when it differs from the default; with the default flipped, testing that
+       * predicate against OFF would drop an operator's "off" on the next save and
+       * silently re-enable the sandbox. config_set_* performs a real load/modify/save
+       * cycle, so it exercises the persistence path without naming config_t. */
+      f = fopen(cpath, "w");
+      assert(f);
+      fprintf(f, "provider: claude\n"
+                 "sandbox:\n"
+                 "  mode: off\n");
+      fclose(f);
+      memset(&sb, 0, sizeof(sb));
+      config_sandbox(&sb);
+      assert(sb.mode == SANDBOX_MODE_OFF); /* opt-out parsed */
+
+      assert(config_set_fold_enabled(0) == 0); /* forces a save of the whole config */
+      memset(&sb, 0, sizeof(sb));
+      config_sandbox(&sb);
+      assert(sb.mode == SANDBOX_MODE_OFF); /* opt-out still honoured after the save */
+
+      /* An unknown mode string keeps the default and never downgrades.
+       * sandbox_mode_from_string() maps anything unrecognized to OFF, which would
+       * silently disable isolation on a typo now that the default is on. */
+      f = fopen(cpath, "w");
+      assert(f);
+      fprintf(f, "provider: claude\n"
+                 "sandbox:\n"
+                 "  mode: wokspace_only\n");
+      fclose(f);
+      memset(&sb, 0, sizeof(sb));
+      config_sandbox(&sb);
+      assert(sb.mode == SANDBOX_MODE_WORKSPACE_ONLY);
+
+      /* The loose leading-character parse is preserved, so configs saying "allow"
+       * or "workspace" do not regress into the default. */
+      f = fopen(cpath, "w");
+      assert(f);
+      fprintf(f, "provider: claude\n"
+                 "sandbox:\n"
+                 "  mode: allow\n");
+      fclose(f);
+      memset(&sb, 0, sizeof(sb));
+      config_sandbox(&sb);
+      assert(sb.mode == SANDBOX_MODE_ALLOWLIST);
+
+      unsetenv("AIMEE_NO_CACHE");
+   }
+
    /* --- compact config: defaults --- */
    {
       static config_t cfg;
@@ -2593,6 +2706,15 @@ int main(void)
 
          /* Clearing stays allowed: it is how an operator hands the role over. */
          assert(config_set("embedder_model", "") == 0);
+
+         /* api.enable changes the port and rate limit as one transaction. Two
+          * generated setters used to load the same published server snapshot;
+          * the rate-limit save then silently restored the old port. */
+         assert(config_set("provider", "gemini") == 0);
+         assert(config_set_api_http_listener(9123, 77) == 0);
+         assert(config_server_api_http_port() == 9123);
+         assert(config_server_api_rate_limit_per_min() == 77);
+         assert(strcmp(config_provider(), "gemini") == 0); /* unrelated disk state survives */
 
          platform_unsetenv("AIMEE_HOME");
       }

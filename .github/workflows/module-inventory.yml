@@ -5,11 +5,15 @@ name: Module inventory
 # classic Team-plan check, their workflow/script definitions are reviewable PR
 # content. Do not present proposal-ordering as an isolated trusted executor; a
 # stronger guarantee requires Enterprise required workflows or an external app.
+# These filters match the BASE branch. `feature/core-modularization` alone meant
+# every gate below ran on nothing for a PR into `testing` -- not a weaker gate, no
+# gate at all, which is the exact failure ci.yml warns about in its own filter.
+# Module work now merges to `testing`, so this list tracks ci.yml's.
 on:
   pull_request:
-    branches: [feature/core-modularization]
+    branches: [main, testing, feature/core-modularization, 'aimee/feat/**', 'agent/**']
   push:
-    branches: [feature/core-modularization]
+    branches: [main, testing, feature/core-modularization]
   workflow_dispatch:
 
 concurrency:
@@ -70,12 +74,72 @@ jobs:
         run: python3 -I -S scripts/check_module_source_ownership.py
       - name: Test module source ownership failure modes
         run: python3 -I scripts/tests/test_check_module_source_ownership.py -v
+      - name: Enforce module bus boundary
+        run: python3 -I -S scripts/check_module_bus_boundary.py
+      - name: Test module bus-boundary failure modes
+        run: python3 -I scripts/tests/test_check_module_bus_boundary.py -v
       - name: Enforce panel contract boundary
         run: python3 -I -S scripts/check_panel_contract_boundary.py
       - name: Test panel contract boundary failure modes
         run: python3 -I scripts/tests/test_check_panel_contract_boundary.py -v
+      # The surface baseline is a digest of the PUBLIC surface: 370 public
+      # headers, the routes, the schemas, the CLI help. That is a release
+      # question, so it gates `main` and not the integration branch.
+      #
+      # On `testing` it was answering a question nobody asked. A branch whose
+      # job is to absorb in-flight work touches public headers constantly, so
+      # every PR re-froze the digest -- a mechanical diff nobody reads -- and
+      # any two concurrent PRs then collided on the same regenerated lines.
+      # Nineteen rebases in one migration, none of which surfaced a single real
+      # change to the surface.
+      #
+      # Nothing is lost by moving it. The promoting testing -> main PR runs this
+      # and fails until the baseline is refrozen, and THAT diff is the useful
+      # artifact: one review of everything a release changes on the public
+      # surface, instead of nineteen refreezes read by nobody.
       - name: Enforce refactor surface baselines
+        if: github.base_ref != 'testing' && github.ref != 'refs/heads/testing'
         run: python3 -I -S scripts/refactor_baselines.py
+      # The surface baseline is a RELEASE gate, enforced on `main` by the step
+      # above and deliberately not here. That makes re-freezing it on a `testing`
+      # PR pure cost: it is a whole-tree digest, so any two PRs touching public
+      # headers rewrite the same lines and collide. It cost a rebase on three of
+      # five PRs in one migration, and the collisions were never about the
+      # surface -- the digest was recomputed, the diff was mechanical, nobody
+      # read it.
+      #
+      # So on `testing` the baseline is simply NOT MAINTAINED. It goes stale,
+      # which is intended: the promoting testing -> main PR re-freezes it once,
+      # and THAT diff is the useful artifact -- one review of everything a
+      # release changed on the public surface.
+      #
+      # Adding a public header therefore does not require touching this file.
+      - name: Refuse a baseline re-freeze on the integration branch
+        if: github.base_ref == 'testing'
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          if git diff --quiet FETCH_HEAD -- tests/baselines/refactor/index.json; then
+            echo "surface baseline untouched: ok"
+            exit 0
+          fi
+          cat >&2 <<'MSG'
+          ::error::This PR changes tests/baselines/refactor/index.json, and it targets `testing`.
+
+          The public-surface baseline is a release question. It gates `main`, not this
+          branch, so re-freezing it here achieves nothing and collides with every other
+          PR that does the same.
+
+          Revert the file and push again:
+
+              git checkout origin/testing -- tests/baselines/refactor/index.json
+
+          You do NOT need to re-freeze after adding or changing a public header. The
+          baseline is expected to be stale on `testing`; the promotion PR into `main`
+          re-freezes it once, and that single diff is the review of what the release
+          changed on the public surface.
+          MSG
+          exit 1
       - name: Enforce refactor cleanup accounting
         run: python3 -I -S scripts/check_cleanup_ledger.py
       - name: Test refactor baseline failure modes
@@ -184,7 +248,17 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # scan_history walks every commit since the historical cutoff -- 2397 of them
+    # against this tip -- and spends two git subprocesses on each, so one run is
+    # about two minutes and this job performs three plus the suite. The 5-minute
+    # budget was set when the job only ran on feature/core-modularization; on
+    # testing it cancels the job mid-step. Raised to fit the real cost.
+    #
+    # This grows with history. Making scan_history a single git-log pass would
+    # remove it, but that means reimplementing rename/copy detection and the
+    # blob claim scan in a gate that governs the Git core contract, so it is
+    # deliberately left as separate, reviewable work rather than folded in here.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

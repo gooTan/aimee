@@ -157,6 +157,14 @@ CFG_KEY_DESC = {
     "cache_aware_rewrite_enabled": "Rewrite prompts to align with the provider's prompt cache.",
     "cache_min_chars": "Minimum prompt size (chars) before cache-shaping applies.",
     "cache_shaping_enabled": "Enable prompt cache-shaping.",
+    "extended_thinking_enabled": (
+        "Ask for extended thinking on aimee's OWN Anthropic requests (default off). "
+        "Sends the adaptive thinking config, and only to a model whose capabilities "
+        "report that it accepts it -- a model nobody has reported that for is left "
+        "alone rather than sent a shape the provider would reject. Off by default "
+        "because thinking tokens are billed: enabling it changes spend, not just "
+        "visibility."
+    ),
     "delegate_graph_context_enabled": "Prepend a structural code-graph context block (callers/dependencies of files a delegate task references) to the delegate prompt (advisory, fail-open, default off).",
     "memory_md_retire": "Retire the agent file-memory surface into aimee (default on): a Write under ~/.claude/projects/<slug>/memory/<name>.md is intercepted into aimee's db1 and the .md is never materialized; session-start skips .md hydration. Set false for the legacy re-materialized .md mirrors.",
     "claude_model": "Default Claude model (empty = CLI default).",
@@ -235,31 +243,20 @@ CFG_KEY_DESC = {
     "aimee-server where the forge credential stays in-process; delegates are also spawned "
     "without git/gh credentials. Note the env strip also drops SSH_AUTH_SOCK (no agent-backed "
     "SSH to any host) and neuters the global/system git config (default on).",
-    "delegate_sandbox": "Run a delegate's shell and file ops INSIDE its own container "
-    "(via the `docker` delegate backend) instead of in-process in aimee-server. On by "
-    "default; set `delegate_sandbox: false` to opt out, and a delegate's `bash`/read/write/"
-    "list then run with aimee-server's filesystem and environment. This is not yet a full "
-    "sandbox on its own: the container still has a network, so `require_aimee_git` and the "
-    "credential strip remain the live boundary. The delegate image must carry whatever the "
-    "work needs (a toolchain, or `verify` fails). The server logs OFF/INERT/ARMED at boot, "
-    "probing `docker version`. Check it because an unreachable daemon means every delegate "
-    "runs on the host; set `delegate_sandbox_require_isolation` to refuse rather than fall "
-    "back to un-isolated host execution.",
     "delegate_sandbox_package_access": "Runtime package-access policy for a `--network none` "
     "delegate sandbox. aimee always performs and logs the fetch (the delegate holds no outside "
     "socket); this selects how much: `proxy` (default) proxies package-manager fetches to any "
     "host through aimee for out-of-the-box functionality; `off` no runtime proxy "
     "(build-time installs + learned pre-bake only); `gated` host-allowlisted registries, "
     "off-allowlist requires human approval; `governance` allowlist from a governance provider, "
-    "off-allowlist refused. Only meaningful when `delegate_sandbox` is on.",
+    "off-allowlist refused.",
     "delegate_sandbox_require_isolation": "Fail-closed guard for the `--network none` delegate "
-    "sandbox (default off; only meaningful when `delegate_sandbox` is on). aimee always passes "
+    "sandbox (default off). aimee always passes "
     "`--network none`, but some runtimes ignore it and give the sandbox real egress, defeating the "
     "package-access proxy. After the container starts aimee asks the host daemon whether a network "
     "with an IP is attached and always logs an error on a breach; when this is set, sandboxing is "
-    "mandatory. aimee refuses to run the delegate at all (rather than fall back to un-isolated "
-    "in-process host execution) on any failure to isolate: a breach, an unverifiable probe, docker "
-    "being unavailable, or a failed acquire.",
+    "mandatory. A delegate always runs in its own container -- there is no in-process host path to "
+    "fall back to -- and this additionally refuses on a breach or an unverifiable probe.",
     "delegate_sandbox_learn_packages": "Learned toolchain for delegate sandboxes (default on). "
     "aimee captures the apt packages a delegate installs inside its `--network none` sandbox, "
     "records them per project (git root), and pre-bakes the learned set into that project's next "
@@ -777,6 +774,29 @@ ENV_DESC = {
         "kb -> embedder hop into $AIMEE_HOME/embedder-tls at startup, independently of the "
         "synthesis hop. Unset for an external embedder reached over plain HTTPS, or when no "
         "embedder is deployed. The sidecar refuses to start without this material.",
+    ),
+    "AIMEE_KB_EMBED_ALL_FILES": (
+        "Knowledge base (aimee-kb)",
+        "Set to 1 to give EVERY indexed file a dense document vector, including source. "
+        "Off by default because source files are already embedded by the code path, and "
+        "embedding them a second time as prose was 82% of the doc-embedding token budget "
+        "on a real corpus. Chunk rows are written either way, so lexical and FTS search "
+        "over source is unaffected by this setting; only the redundant vector is skipped.",
+    ),
+    "AIMEE_EMBED_HTTP_TIMEOUT_MS": (
+        "Knowledge base (aimee-kb)",
+        "Deadline for one embedding HTTP call, default 180000. The previous hardcoded 30s "
+        "was shorter than a cold model load plus a large batch, so the first request of a "
+        "run could fail on a healthy embedder.",
+    ),
+    "AIMEE_KB_READ_TIMEOUT_MS": (
+        "Knowledge base (aimee-kb)",
+        "Deadline for a single KB read issued by the client, in milliseconds.",
+    ),
+    "AIMEE_KB_SCAN_TIMEOUT_MS": (
+        "Knowledge base (aimee-kb)",
+        "Deadline for a code-index scan request, in milliseconds. Scans are queued and "
+        "drained by the ingest workers, so this bounds the REQUEST rather than the work.",
     ),
     "AIMEE_KB_EMIT_ENROLL": ("Knowledge base (aimee-kb)", "Emit a client enrollment token on KB start."),
     "AIMEE_KB_EMIT_SCOPE": ("Knowledge base (aimee-kb)", "Scope for the emitted enrollment token."),
@@ -1388,7 +1408,8 @@ AGENT_FIELD_DESC = {
     "fallback_chain": "Ordered fallback agent chain.",
     "session_reuse": "Reuse a session across calls.",
     "cli_cmd": "CLI command for a cli-backend agent.",
-    "cli_kind": "CLI agent kind (claude / codex / opencode).",
+    "cli_kind": "CLI agent kind (claude / codex / mistral / acp / agy / oracle).",
+    "reasoning_effort": "Per-seat reasoning effort for CLI agents that expose one (codex effort, claude --effort). Empty uses the CLI's default.",
     "is_server_hosted": "Whether the provider session is hosted by the aimee server.",
     "primary_only": "Restrict this agent to primary sessions; do not use it for delegates.",
     "cli_idle_timeout_ms": "Idle timeout (ms) for a CLI agent.",
@@ -1416,7 +1437,12 @@ AGENT_FIELD_RE = re.compile(r'cJSON_GetObjectItem(?:CaseSensitive)?\(\s*\w+\s*,\
 
 
 def parse_agent_fields():
-    f = SRC / "server" / "agent_config.c"
+    # DELIBERATELY the config module only. An agent object is also parsed by
+    # src/modules/vault/agent_credentials.c, which reads the credential-bearing
+    # fields -- and the vault is an attack surface, so generated public docs do
+    # not enumerate what it holds or name the file that reads it. Operators who
+    # need those field names have `aimee agent setup`, which prompts for them.
+    f = SRC / "modules" / "config" / "agent_config.c"
     if not f.exists():
         return set()
     return set(AGENT_FIELD_RE.findall(f.read_text(encoding="utf-8")))
@@ -1431,7 +1457,8 @@ def render_config_files(agent_fields):
            "### `agents.json`: agent / model definitions",
            "",
            "`{\"default_agent\": \"<name>\", \"agents\": [ {<agent>}, … ]}`. Each agent "
-           "object's fields (scanned from `src/server/agent_config.c`):",
+           "object's non-credential fields (credential fields are vault-held and "
+           "deliberately not enumerated here):",
            "",
            "| Field | Description |",
            "|-------|-------------|"]

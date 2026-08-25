@@ -11,7 +11,9 @@
 #include "client_session_worktree.h"
 #include "platform_path.h"
 #include "platform_random.h"
+#include "util.h"
 #include "cJSON.h"
+#include <aimee/protocols/mcp/mcp_tools.h> /* mcp_compact_tool_prose */
 #include <ctype.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -152,6 +154,43 @@ static int session_id_read_published(const char *path, char *out, size_t cap)
    return 0;
 }
 
+/* How long the proxy will wait for the host's SessionStart hook to publish the
+ * real session id before minting one of its own, and how often it looks.
+ *
+ * Only paid when the parent IS the host (see session_id_host_parent), and only
+ * on the first startup of a session -- once the id is published the read hits
+ * immediately. Two seconds is far longer than the hook needs to reach its
+ * publish, which happens before it chooses a transport or contacts a server. */
+#define SESSION_ID_HOST_WAIT_MS 2000
+#define SESSION_ID_HOST_POLL_MS 25
+
+/* Is `pid` the agent host that runs a SessionStart hook? Same signal the hook's
+ * own ancestor walk uses, so the writer and the waiter agree on who to expect.
+ * Linux-only: elsewhere there is no /proc to ask and the proxy mints as before,
+ * which is the pre-existing behaviour rather than a regression. */
+static int session_id_host_parent(int pid)
+{
+#if defined(__linux__)
+   char path[64];
+   snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+   FILE *fp = fopen(path, "r");
+   if (!fp)
+      return 0;
+   char buf[64] = "";
+   if (!fgets(buf, sizeof(buf), fp))
+   {
+      fclose(fp);
+      return 0;
+   }
+   fclose(fp);
+   buf[strcspn(buf, "\r\n")] = '\0';
+   return strcmp(buf, "claude") == 0;
+#else
+   (void)pid;
+   return 0;
+#endif
+}
+
 /* Mint this agent session's id and publish it at session-ppid-<ppid>, so every
  * process of the session (hook, this proxy, delegates) resolves the SAME id.
  * Mirrors config.c's session_id(), which the thin client does not link.
@@ -188,6 +227,32 @@ static int client_session_id_ensure(char *out, size_t cap)
    /* Already published by a sibling (or an earlier run of this session). */
    if (session_id_read_published(path, out, cap) == 0)
       return 0;
+
+   /* Nothing published YET is not the same as nothing coming.
+    *
+    * The host fires its SessionStart hook and starts this proxy at roughly the
+    * same moment, and only the hook knows the host's session id. Minting the
+    * instant the file is missing loses that race about as often as it wins it,
+    * and the loss is expensive: the proxy keys a SECOND worktree, so the
+    * session runs on two and everything behind the proxy -- delegates, `aimee
+    * git` -- operates on the empty one. Measured on a repro box, running the
+    * proxy before the hook produced exactly that: two worktrees, one keyed on a
+    * minted id and one on the host's.
+    *
+    * So wait briefly for the hook, but only when there is a hook to wait for:
+    * the wait is gated on the parent being the host process, which is the same
+    * signal client_session_id_publish walks to. Any other MCP host -- one with
+    * no aimee hook installed -- mints immediately as before and pays nothing. */
+   if (session_id_host_parent(ppid))
+   {
+      for (int waited_ms = 0; waited_ms < SESSION_ID_HOST_WAIT_MS;
+           waited_ms += SESSION_ID_HOST_POLL_MS)
+      {
+         usleep(SESSION_ID_HOST_POLL_MS * 1000);
+         if (session_id_read_published(path, out, cap) == 0)
+            return 0;
+      }
+   }
 
    unsigned char rnd[16];
    if (platform_random_bytes(rnd, sizeof(rnd)) != 0)
@@ -430,6 +495,37 @@ static int mcp_enter_session_worktree(char *out, size_t cap)
    return 1;
 }
 
+/* A remote MCP bridge starts in the developer's canonical checkout, then enters
+ * a hidden per-session worktree for isolation. If the first code-index request
+ * is forwarded only after that chdir, the remote server sees a hidden
+ * `.aimee/worktrees/.../main` cwd while its KB has no canonical project to map
+ * it to. Bootstrap the canonical repository before isolation. The remote helper
+ * first asks index.list and uploads only when the project/root is absent, so an
+ * ordinary initialize is one cheap read rather than a full rescan. */
+static void mcp_ensure_remote_repo_index(void)
+{
+   if (!cli_v1_remote_endpoint_is_network())
+      return;
+
+   char cwd[MAX_PATH_LEN];
+   if (!getcwd(cwd, sizeof(cwd)) || !cwd[0])
+      return;
+   const char *const argv[] = {"git", "-C", cwd, "rev-parse", "--show-toplevel", NULL};
+   char *root = NULL;
+   if (safe_exec_capture(argv, &root, MAX_PATH_LEN) != 0 || !root)
+   {
+      free(root);
+      return; /* not a repository: there is no project to index */
+   }
+   size_t len = strlen(root);
+   while (len > 0 && (root[len - 1] == '\n' || root[len - 1] == '\r' || root[len - 1] == ' ' ||
+                      root[len - 1] == '\t'))
+      root[--len] = '\0';
+   if (root[0] && cli_index_ensure_remote(root) != 0)
+      fprintf(stderr, "aimee: warning: could not bootstrap the remote code index for %s\n", root);
+   free(root);
+}
+
 static void handle_initialize(cJSON *id)
 {
    cJSON *result = cJSON_CreateObject();
@@ -468,19 +564,56 @@ static void handle_initialize(cJSON *id)
     *
     * Discovery is for what is NOT in the list. Leading with it taxes every session
     * to buy something almost none of them need. */
+   /* AND SAY WHICH SURFACE IS CHEAPER, because this text is the reason agents
+    * pick the expensive one.
+    *
+    * It used to say the listed tools were the "first move on repository
+    * questions", full stop. That is the ONE instruction guaranteed to reach every
+    * MCP session -- it rides the initialize handshake, before any work, whether or
+    * not the agent calls a tool we happen to hook. Measured result: 13.3 MCP tool
+    * calls per benchmark cell and ZERO `aimee ...` invocations across 13 cells,
+    * with the binary on PATH throughout.
+    *
+    * An MCP call is one call, one turn, and the whole conversation re-sent. The
+    * same lookups as commands join with && into a shell call the agent is already
+    * making. The tools are not worse; the SURFACE is, whenever more than one
+    * lookup is wanted. So the cheaper form leads and the tools stay named for the
+    * cases that have no command form.
+    *
+    * Hooking memory_recall(session_start) instead was tried first and did not
+    * work: that tool is optional, the agent simply never called it, and the
+    * guidance never arrived. Only the handshake is unskippable. */
    static const char *const base_instructions =
        "The tools in tools/list are directly callable — call them directly, by "
        "name, with their arguments. Do not route a listed tool through call_tool, "
-       "and do not look one up before using it. find_symbol, "
-       "preview_blast_radius, search_docs and search_memory are listed: use them "
-       "as your first move on repository questions rather than after a shell "
-       "search. Only when you need a tool that is NOT listed: find_tools("
+       "and do not look one up before using it. "
+       "IF YOU CAN RUN A SHELL COMMAND, USE THE COMMAND FORM, NOT THE TOOL. "
+       "`aimee index find <symbol>`, `aimee index callers <symbol>`, `aimee index "
+       "blast-radius <file>`, `aimee index structure <file>`, `aimee index span "
+       "<file> <start> <end>`, `aimee index investigate \"<question>\"`, `aimee "
+       "index deps <file>`, `aimee index hybrid \"<phrase>\"` and `aimee memory "
+       "search <terms>` answer the same questions as the "
+       "listed tools. They are ordinary commands, so they join with && inside a "
+       "shell call you are already making — one round trip for as many lookups as "
+       "you want. Every tool call is instead its own turn and re-sends the whole "
+       "conversation, so N tool calls cost N times what the same N commands cost. "
+       "This holds for a single lookup too: fold it into the command you were "
+       "already going to run. "
+       "Use the listed tools when there is no command form — ast_grep_search — or when "
+       "you genuinely cannot run a shell command. Tool calls cannot be chained, so "
+       "when you do call one, use its plural argument (spans, queries, symbols, "
+       "identifiers) instead of repeating the call. "
+       "Only when you need a tool that is NOT listed: find_tools("
        "\"<keyword>\") to locate it, describe_tool(\"<name>\") for its schema, "
        "then call_tool with that name and matching arguments. get_help(\"<topic>\") "
        "explains how aimee itself works — work queue, delegation, memory, git, "
        "build, conventions — when you are unsure; it is not a required first step. "
        "Do not use provider-native sub-agent tools such as spawn_agent or Agent; "
        "use the aimee delegate tool for delegated work.";
+
+   /* The canonical checkout must be known to the remote index before isolation
+    * moves this process underneath its hidden .aimee/worktrees directory. */
+   mcp_ensure_remote_repo_index();
 
    /* Isolate before serving any tool call, and tell the caller where its work
     * will land — the host's own idea of the cwd is now stale for aimee's tools. */
@@ -542,6 +675,14 @@ static void handle_tools_list(cJSON *id)
       return;
    }
 
+   /* Trim guidance prose on the way out, when asked. The server applies the same
+    * function at its own choke point, but this is the one that decides what THIS
+    * consumer's context carries, and a thin client can face a server it does not
+    * control. Hides no tool and alters no callable shape; see mcp_compact_tool_prose.
+    * Off unless AIMEE_MCP_TOOL_PROSE=lean, so the default payload is unchanged. */
+   if (mcp_tool_prose_lean())
+      (void)mcp_compact_tool_prose(tools);
+
    cJSON *result = cJSON_CreateObject();
    cJSON_AddItemToObject(result, "tools", cJSON_DetachItemFromObjectCaseSensitive(resp, "tools"));
    mcp_respond(id, result);
@@ -573,6 +714,27 @@ static void handle_tools_call(cJSON *id, cJSON *req)
     * polls then filled the 64-worker cap and made an unrelated tools/list fail.
     * The helper is idempotent, so subsequent tool calls are cheap. */
    cli_workspace_reverse_channel_start();
+
+   /* A remote Git tool runs in the server's reconstructed mirror. Refresh its
+    * immutable client snapshot on every call: unchanged trees reuse the same
+    * generation (preserving server-side commits/index state), while local
+    * commits or edits select a fresh worktree. Fail closed if the refresh cannot
+    * be acknowledged; forwarding would knowingly act on stale source. */
+   if (strcmp(tool, "git") == 0 && cli_workspace_reverse_channel_sync() != 0)
+   {
+      cJSON *result = cJSON_CreateObject();
+      cJSON *content = cJSON_AddArrayToObject(result, "content");
+      cJSON *block = cJSON_CreateObject();
+      cJSON_AddStringToObject(block, "type", "text");
+      cJSON_AddStringToObject(
+          block, "text",
+          "could not refresh the remote workspace mirror; refusing to run Git against a stale "
+          "checkout. Verify the Aimee server connection and retry.");
+      cJSON_AddItemToArray(content, block);
+      cJSON_AddBoolToObject(result, "isError", 1);
+      mcp_respond(id, result);
+      return;
+   }
 
    int timeout = DEFAULT_TIMEOUT_MS;
    if (strcmp(tool, "delegate") == 0)

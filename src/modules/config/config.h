@@ -306,7 +306,7 @@ typedef struct config
     * a server-side worktree) automatically. Empty for shared/detached entries.
     * Indexed alongside workspaces[]; persisted in the {path,provider,...} object. */
    char workspace_vcs_remote[64][512];
-   char workspace_vcs_head[64][64];
+   char workspace_vcs_head[64][65]; /* SHA-1/SHA-256 object id + NUL */
    /* Per-workspace delegate-sandbox image override ("" == none; fall through to the
     * global delegate_sandbox_image, then the backend default). Indexed alongside
     * workspaces[]; persisted in the {path,provider,...,sandbox_image} object. The
@@ -509,6 +509,21 @@ typedef struct config
     * prefix (instead of prepended) on the OpenAI/Codex Responses path, so the
     * provider's automatic prefix cache is not invalidated each turn. */
    int ingress_cache_placement_enabled;
+   /* Delegation available at all. Default 1. When 0, the delegate tools are
+    * withheld from the tool surface AND the manager persona block is omitted --
+    * that block exists to direct work to delegates, so it is noise without them.
+    * Advertising delegation on a surface that cannot perform it costs tokens on
+    * every request and was measured doing exactly nothing: zero delegate calls
+    * across a whole benchmark corpus whose prompt said "ALWAYS delegate". */
+   int delegates_enabled;
+   /* Emit the manager persona block. Default 1. Independent off switch for
+    * callers that keep delegation but want the shorter prompt. */
+   int prompt_manager_block_enabled;
+   /* Emit the roundtable-review mandate inside the manager block. Default 1.
+    * Separable because it is obeyed and each review is a full round trip: on
+    * small bounded tasks that is pure overhead, which is why benchmarks turn it
+    * off while production keeps it. */
+   int prompt_manager_review_enabled;
    /* Session-isolation guard (opt-in): when on, the PreToolUse attention-guard
     * fails closed on a mutating tool whose target is NOT inside an aimee-managed
     * worktree (.aimee/worktrees/...), forcing every mutating session into an
@@ -560,19 +575,10 @@ typedef struct config
     * through git_commit on the server, which supplies its own identity). */
    int require_aimee_git;
 
-   /* Delegate sandbox: run a delegate's shell and file ops INSIDE its own
-    * container instead of in-process in aimee-server (delegate-sandbox proposal).
-    *
-    * DEFAULT OFF, and deliberately so. This moves where every delegate's shell
-    * runs — a delegate whose image lacks the toolchain stops being able to
-    * `verify`, which is not a subtle failure but is a total one. Off, nothing
-    * changes: td_bash falls through to run_cmd exactly as today.
-    *
-    * Enabling it is only half a sandbox on its own: it puts the delegate in a
-    * container but does not yet take its network. The order matters and is the
-    * lesson of PR #1351 — a capability must exist on aimee's side BEFORE the
-    * environment removes it, or the rule is just breakage. */
-   int delegate_sandbox;
+   /* `delegate_sandbox` was removed: a delegate runs in a container or not at all,
+    * so there is no longer a second execution model for it to select. The key is
+    * still accepted by the schema and warned about at load, so an existing config
+    * that sets it does not become an "unknown key". */
 
    /* Global default delegate-sandbox image ("" == the backend default, ubuntu:22.04).
     * Lowest-precedence image source: a repo's .aimee/project.yaml `sandbox` block and
@@ -1146,6 +1152,15 @@ typedef struct config
    char compact_per_tool[CONFIG_COMPACT_MAX_PER_TOOL][128]; /* "tool_name=threshold" */
    int compact_per_tool_count;
 
+   /* Session-compaction summary derivation. 0 (default) = the legacy prose scan
+    * (guess paths by shape, match "error"/"decided" keywords). 1 = derive from the
+    * economizer's deterministic extractors instead: Coordinate Closet coordinates
+    * conserved VERBATIM, and fold_register's settled/hazard classification of the
+    * agent's own turns. Default-off because compaction quality is still unmeasured
+    * (docs/proposals/pending/compaction-quality-baseline.md); the legacy path stays
+    * selectable until that baseline can say which is better. */
+   int compact_from_record;
+
    /* Coordinate Closet (fold §2): conserve verbatim identifiers from compacted
     * tool results. Nested under the "compact" config section. Default-off.
     * coord_closet_enabled: 0 = off (default), 1 = on.
@@ -1179,6 +1194,11 @@ typedef struct config
     * fold_recall_ttl_turns: don't re-surface the same key within this many turns. */
    int fold_recall_enabled;
    int fold_recall_ttl_turns;
+   /* fold_recall_inject: put the hint in front of the model instead of only reporting
+    * it. Separate from _enabled and default-off, because tracking what was evicted is
+    * inert while injecting CHANGES WHAT THE MODEL DOES, and whether that helps or
+    * derails a turn is a behavioural question for live traffic to answer. */
+   int fold_recall_inject;
 
    /* The single economizer mode. OFF is the pristine baseline. PROOF_GATED
     * verifies the signed empty registry and freezes the completed provider body;
@@ -1190,8 +1210,8 @@ typedef struct config
     * workflows (orchestration hooks), and optional roundtable panels. Each is a TRISTATE:
     *   -1  unspecified — the config does not set it; the resolver falls back to the module's
     *       deprecated env toggle (AIMEE_STAGE_MEMORY / _GOVERNANCE / AIMEE_ORCH_DELEGATES /
-    *       _WORKFLOWS / AIMEE_MODULE_ROUNDTABLE) and then to its descriptor default (roundtable
-    *       defaults OFF; the legacy gateway-stage modules default ON).
+    *       _WORKFLOWS / AIMEE_MODULE_ROUNDTABLE) and then to its descriptor default (governance
+    *       and roundtable default OFF; the remaining legacy gateway-stage modules default ON).
     *    0  user-disabled.    1  user-enabled.
     * Resolution is centralized in config_module_enabled() so the future admin/governance FORCE
     * tier (aimee-kb governance state that can pin a module on or off over the user's choice)
@@ -1417,6 +1437,23 @@ typedef struct config
     * provider caches the stable system prompt across calls. Anthropic-only; never
     * alters the stateless /v1/messages proxy or any non-Anthropic provider. */
    int cache_shaping_enabled;
+
+   /* Extended thinking on aimee's OWN Anthropic requests (extended_thinking.*).
+    * extended_thinking_enabled: 0 = off (default), 1 = on. The IR request builder
+    *   never set the Anthropic `thinking` config, so ir->thinking was populated
+    *   only by an inbound client request and an aimee-originated turn asked for no
+    *   reasoning at all -- measured 2026-08-09: reasoning appears only when a
+    *   provider volunteers it unprompted. Default-OFF because thinking tokens are
+    *   billed: turning this on changes what aimee spends, not just what it reads.
+    *
+    * There is no budget knob. The shape this used to feed --
+    * {"type":"enabled", budget_tokens: N} -- was removed by Anthropic and is a
+    * 400 on Opus 4.7 and later; the builder now emits {"type":"adaptive"},
+    * which takes no budget, and only for a model whose capabilities report
+    * that it accepts that shape (MODEL_CAP_THINKING_ADAPTIVE). Enabling this
+    * against a model nobody has reported that for is a no-op by design: see
+    * agent_request_build.c. */
+   int extended_thinking_enabled;
 
    /* Ingress cost-accounting rollout knobs (ingress.*; §2/§4/#3).
     * ingress_usage_accounting_enabled: 1 = on (default), 0 = off. Master gate for
@@ -2030,8 +2067,6 @@ typedef struct config
    int skills_stale_after_days;
    int skills_archive_after_days;
    int skills_dispatch_enabled;
-   int skills_curator_enabled;
-   int skills_curator_interval_hours;
    int skills_dispatch_max_index;
    int skills_dispatch_advisory;
    int skills_capability_autostub;
@@ -2420,6 +2455,12 @@ int config_workspace_remove(const char *path);
  * exist yet. Idempotent. */
 int config_persist_defaults(void);
 
+/* Enable the loopback /v1 HTTP listener in one disk-based config transaction.
+ * Both values must be positive. Reading the file avoids stale live-snapshot
+ * writes inside aimee-server, and the successful update republishes the
+ * snapshot before returning. */
+int config_set_api_http_listener(int http_port, int rate_limit_per_min);
+
 /* Disable the /v1 HTTP listener and persist. Reads the FILE, not the snapshot --
  * see config_save.c for why this one cannot use the generated setter. */
 int config_disable_api_http_listener(void);
@@ -2469,6 +2510,18 @@ int config_remove_model_concurrency(const char *model);
 const char *config_default_dir(void);
 
 /* Default config path: ~/.config/aimee/aimee.yaml */
+/* Is cache-bypass requested (AIMEE_NO_CACHE)?
+ *
+ * One knob, one meaning -- "do not serve anything from a cache" -- was read with
+ * a raw getenv() in seven places across three modules and db2, including two
+ * file-identity cache loaders on the request path, so a lookup paid a getenv()
+ * per call. Reading it here also puts it where the other 200-plus AIMEE_* knobs
+ * belong: behind the config module, not scattered through callers.
+ *
+ * Deliberately NOT cached itself: tests toggle it between cases and expect the
+ * next call to observe the change. getenv() is a pointer chase, not I/O. */
+int config_cache_disabled(void);
+
 const char *config_default_path(void);
 
 /* Output directory (same as config dir). */
@@ -2482,11 +2535,16 @@ int config_sandbox_package_access_valid(const char *s);
 
 /* Resolve the embedding command actually used to embed text. Precedence:
  * a per-call `requested` command (e.g. from a request payload), then the
- * configured cfg->embedder_command, then "builtin". Either argument may be
- * NULL. "builtin" is a 384-dim deterministic hash that real halfvec(1024)/
- * (2560) columns reject, so it is only correct in a 384-dim shim/test setup;
- * every production path must carry a real embedder via config or request. This
- * is the single point of truth -- do not re-inline the ternary at call sites. */
+ * EMBEDDER_URL environment variable, then the configured cfg->embedder_command,
+ * then "" when nothing is selected. Either argument may be NULL.
+ *
+ * EMBEDDER_URL outranks config because it is how the RUNNING embedder announces
+ * itself: the kb entrypoint exports it when it starts the bundled in-container
+ * model, so a bundled model and an operator's external endpoint arrive by the
+ * same route. Callers asking "is an embedder available at all" must come through
+ * here for that reason -- the stored field alone is empty on every bundled
+ * deployment. This is the single point of truth -- do not re-inline the
+ * ternary at call sites. */
 const char *config_embedder_command(const config_t *cfg, const char *requested);
 
 /* As config_embedder_command, but the caller never holds a config_t. Prefer
@@ -2495,8 +2553,11 @@ const char *config_embedder_command(const config_t *cfg, const char *requested);
  * this thread. */
 const char *config_embedder_command_current(const char *requested);
 
-/* The raw configured value, empty when unset — unlike the resolving form
- * above, which never returns empty. */
+/* The raw configured value: empty when unset, and ALSO empty whenever the
+ * embedder came from EMBEDDER_URL rather than config — which is every bundled
+ * deployment. Use this only to answer "did the operator write this key", never
+ * "is an embedder available"; for that, call the resolving form above and test
+ * for empty. */
 const char *config_embedder_command_field(void);
 
 /* Copy one element of a config array out. For callers that pass the whole

@@ -15,6 +15,8 @@
 #include <stdarg.h>
 #include <stddef.h> /* offsetof */
 #include <stdlib.h> /* getenv — EMBEDDER_URL default */
+#include "log.h"
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -874,6 +876,15 @@ int config_save(const config_t *cfg)
       cJSON_AddBoolToObject(root, "ingress_cache_placement_enabled", 1);
    if (cfg->ingress_compress_min_chars != 80)
       cJSON_AddNumberToObject(root, "ingress_compress_min_chars", cfg->ingress_compress_min_chars);
+   /* Written when FALSE, not when true: these three default ON, and the
+    * surrounding convention of "emit only if set" would silently drop the OFF
+    * state on save -- turning a deliberate disable back on at the next load. */
+   if (!cfg->delegates_enabled)
+      cJSON_AddBoolToObject(root, "delegates_enabled", 0);
+   if (!cfg->prompt_manager_block_enabled)
+      cJSON_AddBoolToObject(root, "prompt_manager_block_enabled", 0);
+   if (!cfg->prompt_manager_review_enabled)
+      cJSON_AddBoolToObject(root, "prompt_manager_review_enabled", 0);
    if (cfg->gateway_prevent_subagents)
       cJSON_AddBoolToObject(root, "gateway_prevent_subagents", 1);
    if (cfg->gateway_pin_model)
@@ -897,8 +908,6 @@ int config_save(const config_t *cfg)
       cJSON_AddBoolToObject(root, "require_aimee_git", 0);
    if (!cfg->subagent_ban_enabled) /* default-on: persist only the opt-out */
       cJSON_AddBoolToObject(root, "subagent_ban_enabled", 0);
-   if (!cfg->delegate_sandbox) /* default-on: persist only the opt-out */
-      cJSON_AddBoolToObject(root, "delegate_sandbox", 0);
    if (cfg->delegate_sandbox_image[0])
       cJSON_AddStringToObject(root, "delegate_sandbox_image", cfg->delegate_sandbox_image);
    /* Persist only when non-default ("proxy"); absence means the default. */
@@ -1038,12 +1047,14 @@ int config_save(const config_t *cfg)
 
    /* Tool result compaction (only save non-default values) */
    if (!cfg->compact_enabled || cfg->compact_threshold || cfg->compact_head_bytes ||
-       cfg->compact_tail_bytes || cfg->compact_per_tool_count || !cfg->coord_closet_enabled ||
-       cfg->coord_closet_budget_bytes || cfg->coord_closet_max_ratio_pct ||
-       cfg->coord_closet_denylist[0])
+       cfg->compact_tail_bytes || cfg->compact_per_tool_count || cfg->compact_from_record ||
+       !cfg->coord_closet_enabled || cfg->coord_closet_budget_bytes ||
+       cfg->coord_closet_max_ratio_pct || cfg->coord_closet_denylist[0])
    {
       cJSON *cmpct = cJSON_AddObjectToObject(root, "compact");
       cJSON_AddBoolToObject(cmpct, "enabled", cfg->compact_enabled);
+      if (cfg->compact_from_record) /* default-off: persist only the opt-in */
+         cJSON_AddBoolToObject(cmpct, "from_record", cfg->compact_from_record);
       if (cfg->compact_threshold)
          cJSON_AddNumberToObject(cmpct, "threshold", cfg->compact_threshold);
       if (cfg->compact_head_bytes)
@@ -1106,6 +1117,8 @@ int config_save(const config_t *cfg)
          cJSON_AddBoolToObject(recall, "enabled", cfg->fold_recall_enabled);
          if (cfg->fold_recall_ttl_turns)
             cJSON_AddNumberToObject(recall, "ttl_turns", cfg->fold_recall_ttl_turns);
+         if (cfg->fold_recall_inject) /* default-off: persist only the opt-in */
+            cJSON_AddBoolToObject(recall, "inject", cfg->fold_recall_inject);
       }
    }
 
@@ -1164,8 +1177,13 @@ int config_save(const config_t *cfg)
          cJSON_AddNumberToObject(sess, "max_worktrees", cfg->max_worktrees);
    }
 
-   /* Sandbox config (only save if non-default) */
-   if (cfg->sandbox.mode != SANDBOX_MODE_OFF || cfg->sandbox.network_isolated ||
+   /* Sandbox config (only save if non-default). The default is now
+    * SANDBOX_MODE_WORKSPACE_ONLY, so the value that MUST survive a save is the
+    * explicit opt-out (`mode: "off"`) — mirroring require_aimee_git above, which
+    * persists only its opt-out. Testing against SANDBOX_MODE_OFF here (the old
+    * predicate) would drop an operator's "off" on the next save and silently
+    * re-enable the sandbox from the default. */
+   if (cfg->sandbox.mode != SANDBOX_MODE_WORKSPACE_ONLY || cfg->sandbox.network_isolated ||
        cfg->sandbox.allow_path_count > 0)
    {
       cJSON *sbox = cJSON_AddObjectToObject(root, "sandbox");
@@ -1711,6 +1729,42 @@ int config_workspace_add(const char *path, const char *provider, const char *rem
          if (strcmp(cfg->workspaces[i], path) == 0)
             rc = -2;
       int cap = (int)(sizeof(cfg->workspaces) / sizeof(cfg->workspaces[0]));
+      /* PRUNE THE DEAD BEFORE REFUSING. A workspace whose directory no longer
+       * exists cannot be used for anything: it is a corpse holding a slot. The
+       * registry had no removal path other than an explicit `workspace remove`,
+       * so any workflow that creates short-lived checkouts -- CI, benchmark
+       * cells, ephemeral worktrees -- eventually filled all 64 and then every
+       * `workspace add` failed with "maximum workspace count reached", on a
+       * machine where none of the 64 still existed on disk.
+       *
+       * Only entries whose path is gone are dropped, so a workspace on an
+       * unmounted volume is NOT collected -- stat failing for any reason other
+       * than ENOENT leaves the entry alone. */
+      if (rc == 0 && cfg->workspace_count >= cap)
+      {
+         int kept = 0;
+         for (int i = 0; i < cfg->workspace_count; i++)
+         {
+            struct stat st;
+            if (stat(cfg->workspaces[i], &st) != 0 && errno == ENOENT)
+               continue; /* gone: drop it */
+            if (kept != i)
+            {
+               memcpy(cfg->workspaces[kept], cfg->workspaces[i], sizeof(cfg->workspaces[0]));
+               memcpy(cfg->workspace_providers[kept], cfg->workspace_providers[i],
+                      sizeof(cfg->workspace_providers[0]));
+               memcpy(cfg->workspace_vcs_remote[kept], cfg->workspace_vcs_remote[i],
+                      sizeof(cfg->workspace_vcs_remote[0]));
+               memcpy(cfg->workspace_vcs_head[kept], cfg->workspace_vcs_head[i],
+                      sizeof(cfg->workspace_vcs_head[0]));
+            }
+            kept++;
+         }
+         if (kept < cfg->workspace_count)
+            aimee_log(LOG_INFO, "workspace", "pruned %d registered workspace(s) whose path is gone",
+                      cfg->workspace_count - kept);
+         cfg->workspace_count = kept;
+      }
       if (rc == 0 && cfg->workspace_count >= cap)
          rc = -3;
       if (rc == 0)
@@ -1724,6 +1778,37 @@ int config_workspace_add(const char *path, const char *provider, const char *rem
          snprintf(cfg->workspace_vcs_head[idx], sizeof(cfg->workspace_vcs_head[idx]), "%s",
                   head ? head : "");
          rc = config_save(cfg);
+      }
+      else if (rc == -2)
+      {
+         /* Already registered: REFRESH the coordinates the caller supplied.
+          *
+          * These are not static properties of a path — a mirror workspace's head
+          * is whichever commit the client's patch applies to, and it moves every
+          * time the developer commits or pushes. Leaving the first value frozen
+          * meant a re-attaching client shipped a patch against one commit while
+          * the server still checked out another, and `git apply` failed on a
+          * tree that had been fine at first attach.
+          *
+          * Only non-NULL arguments are written, so a caller that supplies just a
+          * head (workspace.mirror-sync) does not erase the remote. Still returns
+          * -2, which callers treat as idempotent success. */
+         for (int i = 0; i < cfg->workspace_count; i++)
+         {
+            if (strcmp(cfg->workspaces[i], path) != 0)
+               continue;
+            if (provider)
+               snprintf(cfg->workspace_providers[i], sizeof(cfg->workspace_providers[i]), "%s",
+                        strcmp(provider, "shared") != 0 ? provider : "");
+            if (remote)
+               snprintf(cfg->workspace_vcs_remote[i], sizeof(cfg->workspace_vcs_remote[i]), "%s",
+                        remote);
+            if (head)
+               snprintf(cfg->workspace_vcs_head[i], sizeof(cfg->workspace_vcs_head[i]), "%s", head);
+            if (provider || remote || head)
+               (void)config_save(cfg);
+            break;
+         }
       }
    }
    free(cfg);
@@ -1772,15 +1857,36 @@ int config_workspace_remove(const char *path)
    return rc;
 }
 
-/* Disable the /v1 HTTP listener and persist, reading the FILE rather than the
- * live snapshot.
+/* Enable the /v1 HTTP listener and persist both settings atomically, reading the
+ * FILE rather than the live snapshot.
  *
- * The generated config_set_server_api_http_port() would work everywhere else,
- * but it goes through config_load, which in the SERVER returns the published
- * snapshot. This runs inside aimee-server under the bearer-mutation lock, and
- * writing back a snapshot would discard anything written to aimee.yaml since the
- * last publish. Reading the file keeps the read-modify-write over the same thing
- * config_save is about to overwrite. */
+ * The generated setters go through config_load, which in the SERVER returns the
+ * published snapshot. Calling the port and rate-limit setters back-to-back made
+ * the second save start from the same stale snapshot and overwrite the port the
+ * first save had just written. Reading the file once also preserves edits made
+ * since the last publish. */
+int config_set_api_http_listener(int http_port, int rate_limit_per_min)
+{
+   if (http_port <= 0 || rate_limit_per_min <= 0)
+      return -1;
+   config_t *cfg = calloc(1, sizeof(*cfg));
+   if (!cfg)
+      return -1;
+   int rc = config_load_file(cfg);
+   if (rc == 0)
+   {
+      cfg->server_api_http_port = http_port;
+      cfg->server_api_rate_limit_per_min = rate_limit_per_min;
+      rc = config_save(cfg);
+      if (rc == 0 && config_reload() < 0)
+         rc = -1;
+   }
+   free(cfg);
+   return rc;
+}
+
+/* Disable the /v1 HTTP listener and persist, reading the FILE rather than the
+ * live snapshot for the same stale-write reason as the enable path above. */
 int config_disable_api_http_listener(void)
 {
    config_t *cfg = calloc(1, sizeof(*cfg));

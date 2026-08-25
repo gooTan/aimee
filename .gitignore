@@ -4,6 +4,7 @@
 /aimee-server
 aimee-forwarder
 /aimee-mcp
+/aimee-webchat
 /aimee-kb
 /aimee-witness-verify
 /aimee-kb-resolver
@@ -23,6 +24,7 @@ aimee-forwarder
 /aimee-negation-eval
 /aimee-blast-radius-eval
 /aimee-runtime-web
+/aimee-wfe
 # `go build ./...` inside runtime-web/ drops the binary next to its source; it was
 # tracked for a while and rode along in unrelated commits.
 runtime-web/runtime-web
@@ -198,14 +200,33 @@ scratchpad/
 .stack-smoke.sh
 .modelcache-test.sh
 .hashcmp.sh
+.hashcheck.sh
 .ocicheck.sh
 .health-probe.sh
 .prefix-test.sh
 .matrix-test.sh
 .verify-ghcr.sh
+.finish-move.sh
+.move-containerd.sh
+.restart-matrix.sh
+.run-remote.sh
+.unit.log
+.upgrade-rehearsal/
 .review-guide.md
 .upgrade-*.sh
 .start-*.sh
 .ship.sh
 .mt.tgz
 .mt.b64
+
+# Benchmark scratch: analysis scripts and deploy helpers for the ponytail codex
+# comparison. These are working files for one investigation, not product code —
+# they were committed by mistake and belong with the bench notes, not the repo.
+/.deploytmp/
+/*.py
+/*.sh
+
+# Transient deploy/sync bundles for the test container.
+.synctmp/
+src/.testlogs/
+benchmarks/compaction-quality/.cache-ab/

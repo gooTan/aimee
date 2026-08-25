@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "cli_attention_guard.h"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 
 /* Stubs/fakes for handle_attention_guard's deps. read_stdin + aimee_home are
  * driven by the functional test below via these globals. */
@@ -130,7 +131,7 @@ static void rm_path(const char *p)
 static void test_guard_enforcement(void)
 {
    /* Isolated, real temp home so config + the session log persist. */
-   snprintf(g_home, sizeof(g_home), "/tmp/aimee_ag_test_%d", (int)getpid());
+   snprintf(g_home, sizeof(g_home), "%s/aimee_ag_test_%d", platform_tmpdir(), (int)getpid());
    mkdir(g_home, 0700);
    char logpath[400], cfgpath[400];
    snprintf(logpath, sizeof(logpath), "%s/.cache/attention/agtest.json", g_home);
@@ -177,8 +178,8 @@ static void test_session_scratch_decision(const char *primary_cwd)
 {
    const char *sid = "21bc2e70-537c-4d1d-b970-7afc858a7769";
    char tmproot[256], outside[256], cmd[700];
-   snprintf(tmproot, sizeof(tmproot), "/tmp/aimee_scratch_test_%d", (int)getpid());
-   snprintf(outside, sizeof(outside), "/tmp/aimee_scratch_out_%d", (int)getpid());
+   snprintf(tmproot, sizeof(tmproot), "%s/aimee_scratch_test_%d", platform_tmpdir(), (int)getpid());
+   snprintf(outside, sizeof(outside), "%s/aimee_scratch_out_%d", platform_tmpdir(), (int)getpid());
    setenv("TMPDIR", tmproot, 1);
 
    char root[512], p[900];
@@ -340,6 +341,51 @@ static void test_session_isolation_decision(void)
    assert(attn_unregistered_lineage_blocked(0, 0) == 1);
    assert(attn_unregistered_lineage_blocked(0, 1) == 1);
 
+   /* ---- git probe directory (attn_git_dir_for) ----
+    * THE REGRESSION: the probe directory was derived by stripping ONE component off the
+    * target. For a new file in a not-yet-created directory that yields another missing
+    * path, so `git -C` fails and BOTH lineage probes come back empty. The caller reads
+    * default_resolved == 0 and fails closed (asserted just above) — so creating a file in
+    * a new subdirectory was refused with a branch-lineage error that had nothing to do
+    * with the branch, for every session without a registry row. */
+   {
+      char tmpl[256];
+      snprintf(tmpl, sizeof tmpl, "%s/aimee_attn_gitdir_XXXXXX", platform_tmpdir());
+      const char *root = mkdtemp(tmpl);
+      assert(root != NULL);
+
+      char got[2048];
+
+      /* An existing directory is returned as-is. */
+      attn_git_dir_for(root, got, sizeof(got));
+      assert(strcmp(got, root) == 0);
+
+      /* An existing FILE resolves to its (existing) parent. */
+      char existing_file[2200];
+      snprintf(existing_file, sizeof(existing_file), "%s/present.txt", root);
+      FILE *f = fopen(existing_file, "w");
+      assert(f != NULL);
+      fclose(f);
+      attn_git_dir_for(existing_file, got, sizeof(got));
+      assert(strcmp(got, root) == 0);
+
+      /* A new file in a MISSING directory must still resolve to a real directory —
+       * one level of absence... */
+      char one_deep[2200];
+      snprintf(one_deep, sizeof(one_deep), "%s/newdir/corpus.json", root);
+      attn_git_dir_for(one_deep, got, sizeof(got));
+      assert(strcmp(got, root) == 0);
+
+      /* ...and several. A single strip returned "<root>/a/b/c", which does not exist. */
+      char deep[2400];
+      snprintf(deep, sizeof(deep), "%s/a/b/c/corpus.json", root);
+      attn_git_dir_for(deep, got, sizeof(got));
+      assert(strcmp(got, root) == 0);
+
+      unlink(existing_file);
+      rmdir(root);
+   }
+
    /* ---- Bash reaching outside the worktree (attn_bash_escapes_worktree) ----
     * The observed bypass: cwd was a valid managed worktree, so the isolation check
     * passed, while the command cd'd to the shared checkout and wrote there. */
@@ -489,7 +535,7 @@ static void test_external_memory_decision(void)
  * opts out, no env-var bypass). */
 static void test_external_memory_enforcement(void)
 {
-   snprintf(g_home, sizeof(g_home), "/tmp/aimee_mem_test_%d", (int)getpid());
+   snprintf(g_home, sizeof(g_home), "%s/aimee_mem_test_%d", platform_tmpdir(), (int)getpid());
    mkdir(g_home, 0700);
    char cfgpath[400];
    snprintf(cfgpath, sizeof(cfgpath), "%s/aimee.yaml", g_home);
@@ -547,7 +593,7 @@ static void test_external_memory_enforcement(void)
 static int capture_stderr(char *out, size_t outsz)
 {
    char tmp[256];
-   snprintf(tmp, sizeof(tmp), "/tmp/aimee_attn_stderr_%d", (int)getpid());
+   snprintf(tmp, sizeof(tmp), "%s/aimee_attn_stderr_%d", platform_tmpdir(), (int)getpid());
    int saved = dup(STDERR_FILENO);
    assert(saved >= 0);
    FILE *f = fopen(tmp, "w+");
@@ -570,7 +616,7 @@ static int capture_stderr(char *out, size_t outsz)
 
 static void test_isolation_enforcement(void)
 {
-   snprintf(g_home, sizeof(g_home), "/tmp/aimee_iso_test_%d", (int)getpid());
+   snprintf(g_home, sizeof(g_home), "%s/aimee_iso_test_%d", platform_tmpdir(), (int)getpid());
    mkdir(g_home, 0700);
    char cfgpath[400];
    snprintf(cfgpath, sizeof(cfgpath), "%s/aimee.yaml", g_home);
@@ -602,6 +648,17 @@ static void test_isolation_enforcement(void)
 
    /* (4) Enabled: an Edit whose target is inside a managed worktree is allowed. */
    g_stdin_json = EDIT_WORKTREE_HOOK;
+   assert(handle_attention_guard() == 0);
+
+   /* Workflow-owned slice worktrees are already isolated. The CLI delegate's
+    * MCP proxy must stay in this tree instead of creating a nested session
+    * worktree that hides its edits from the workflow engine. */
+   char wfe_hook[1024];
+   snprintf(wfe_hook, sizeof(wfe_hook),
+            "{\"session_id\":\"isotest\",\"tool_name\":\"Edit\",\"tool_input\":{"
+            "\"file_path\":\"%s/wfe-worktrees/wi_child/src/x.c\"}}",
+            g_home);
+   g_stdin_json = wfe_hook;
    assert(handle_attention_guard() == 0);
 
    /* (5) Enabled: a Read on the primary checkout is allowed (non-mutating). */

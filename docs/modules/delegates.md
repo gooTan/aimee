@@ -7,6 +7,19 @@ messages, use tools, and return auditable results. The module owns delegation pl
 provider drivers, execution backends, credentials, sandbox/workspace coordination, and lifecycle. It is
 not an optional extension and does not own roundtable policy, tools, vault, or workspace storage.
 
+### Go process stage
+
+The supervised `delegate-invocation` stage runs in the shared pure-Go module
+runtime. Its handler preserves the fixed DROL/DCAN role-normalization contract
+for old bus callers and adds a version-2 execution contract for the native WFE
+and roundtable. The latter selects a configured CLI agent and owns its bounded
+subprocess lifecycle entirely in Go; no agent-service HTTP call returns to the C
+daemon. Workflow lifecycle fields stay caller-side and never enter this wire.
+
+The C adapter remains a wire-parity fixture. The C daemon still hosts the event
+bus and external control surfaces, but it is not the producer used by Go
+workflows or module-to-module delegation.
+
 ## Public contracts
 
 Current canonical source under `src/modules/delegates` includes `delegate_driver`, routing, launch/plan,

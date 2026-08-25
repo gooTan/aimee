@@ -540,9 +540,13 @@ static void chat_stream_worker_codex(compute_ctx_t *cctx, const char *message,
 
 static void chat_agent_add_default_roles(agent_t *ag)
 {
-   const char *roles[] = {"code", "review", "explain", "refactor", "draft", "execute"};
+   /* These agents are synthesized from legacy provider settings, not from an
+    * operator role selection. Review gate authority must therefore stay off
+    * until the agent is explicitly registered with the review role. */
+   const char *roles[] = {"code", "explain", "refactor", "draft", "execute"};
    ag->role_count = 0;
-   for (int i = 0; i < 6 && ag->role_count < MAX_AGENT_ROLES; i++)
+   for (int i = 0; i < (int)(sizeof(roles) / sizeof(roles[0])) && ag->role_count < MAX_AGENT_ROLES;
+        i++)
       snprintf(ag->roles[ag->role_count++], sizeof(ag->roles[0]), "%s", roles[i]);
 }
 
@@ -1065,14 +1069,10 @@ static int chat_provider_uses_codex_cli(const char *provider)
    if (strcmp(provider, "codex") != 0)
       return 0;
 
-   agent_config_t acfg;
-   if (agent_load_config(&acfg) != 0)
+   agent_t ag;
+   if (agent_registry_find("codex", &ag) != 0)
       return 1;
-
-   agent_t *ag = agent_find(&acfg, "codex");
-   if (!ag)
-      return 1;
-   return !agent_adapter_agent_is_direct(ag);
+   return !agent_adapter_agent_is_direct(&ag);
 }
 
 static int chat_provider_uses_primary_session(const char *provider)

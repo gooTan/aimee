@@ -28,6 +28,7 @@
 #include "openai_responses_store.h"             /* previous_response_id continuation store */
 #include "openai_runs_store.h"                  /* GET /v1/runs/{id} record store */
 #include "aimee.h" /* EMBED_MAX_DIM, MAX_PATH_LEN (used by agent_types.h below) */
+#include "log.h"   /* LOG_WARN: name the provider's error instead of discarding it */
 #include "aimee_errors.h"
 #include "config.h" /* config_t, config_load */
 #include "agent_config.h"
@@ -35,7 +36,7 @@
 #include "agent_protocol.h"                  /* parsed_response_t, message_history_repair */
 #include <aimee/delegates/delegate_driver.h> /* single provider step for the Codex proxy */
 #include "http_retry.h"
-#include "economizer_wire_snapshot.h"
+#include "wire_fence.h"
 #include "gateway_mutate_wire.h"
 #include "server_http_identity.h"
 #include "cJSON.h"
@@ -99,7 +100,8 @@ static void record_avoided_turn(const char *model, double avoided_cost)
  * on and the client supplied an explicit Idempotency-Key. The caller has already
  * rejected streaming, and this path runs no tools — both v1 requirements. The key
  * is built from the RESOLVED backend (ag), so it is computed after agent/config
- * resolution and two requests resolving to a different backend never collide. */
+ * resolution and two requests resolving to a different backend never collide.
+ * Returns -1 when the required response-composition module cannot produce a key. */
 static int dedup_eligible(char *key, size_t key_cap, const agent_t *ag, const char *endpoint,
                           const char *body, const char *context, int *ttl_out)
 {
@@ -126,7 +128,8 @@ static int dedup_eligible(char *key, size_t key_cap, const agent_t *ag, const ch
        .context = context,
        .behavior_flags = flags,
    };
-   response_dedup_key(&in, key, key_cap);
+   if (response_dedup_key(&in, key, key_cap) != 0)
+      return -1;
    if (ttl_out)
       *ttl_out = config_dedup_window_seconds() > 0 ? config_dedup_window_seconds()
                                                    : RESPONSE_DEDUP_TTL_SECONDS;
@@ -176,32 +179,24 @@ static int run_completion(int chat, const char *body, char *resp, int cap)
     * (or empty) means the default agent; any other value selects a configured
     * agent by name, and is rejected with model_not_found when it matches none
     * (never silently falls back to a different model). */
-   agent_config_t acfg;
-   if (agent_load_config(&acfg) != 0)
-   {
-      free(pi_env);
-      free(prompt);
-      openai_format_error_code(resp, cap, "server_error", "no agent configuration available",
-                               AIMEE_ERR_NO_PRIMARY);
-      return 503;
-   }
+   agent_t agbuf;
    agent_t *ag = NULL;
    if (model[0] && strcmp(model, "aimee") != 0)
    {
       /* An explicitly requested model must match a configured agent — never
        * silently fall back to the default (that would run a different model than
        * the client asked for and echo the wrong name back). */
-      ag = agent_find(&acfg, model);
-      if (!ag)
+      if (agent_registry_find(model, &agbuf) != 0)
       {
          free(pi_env);
          free(prompt);
          openai_format_error(resp, cap, "model_not_found", "the requested model is not available");
          return 404;
       }
+      ag = &agbuf;
    }
-   if (!ag)
-      ag = agent_default_primary(&acfg);
+   if (!ag && agent_registry_default_primary(&agbuf) == 0)
+      ag = &agbuf;
    if (!ag)
    {
       free(pi_env);
@@ -255,8 +250,9 @@ static int run_completion(int chat, const char *body, char *resp, int cap)
 
          /* Same response-side policing the streaming path runs, so a denied
           * subagent-spawning call cannot reach an external caller. */
-         if (parsed.is_tool_call && parsed.call_count > 0 && gateway_prevent_subagents_enabled())
-            (void)gw_response_run_governance(&parsed, openai_governance_enabled());
+         if (parsed.is_tool_call && parsed.call_count > 0)
+            (void)gw_response_run_governance(&parsed, openai_governance_enabled(),
+                                             gateway_prevent_subagents_enabled());
 
          long tcreated = (long)time(NULL);
          char tid[48];
@@ -293,6 +289,13 @@ static int run_completion(int chat, const char *body, char *resp, int cap)
    const char *endpoint = chat ? "/v1/chat/completions" : "/v1/completions";
    int dedup_on =
        dedup_eligible(dedup_key, sizeof(dedup_key), ag, endpoint, body, pi_env, &dedup_ttl);
+   if (dedup_on < 0)
+   {
+      free(pi_env);
+      free(prompt);
+      openai_format_error(resp, cap, "server_error", "response composition unavailable");
+      return 503;
+   }
    if (dedup_on)
    {
       char *cached = NULL;
@@ -661,28 +664,21 @@ static int responses_handler(const char *body, char *resp, int cap)
       return 400;
    }
 
-   agent_config_t acfg;
-   if (agent_load_config(&acfg) != 0)
-   {
-      free(prompt);
-      openai_format_error_code(resp, cap, "server_error", "no agent configuration available",
-                               AIMEE_ERR_NO_PRIMARY);
-      return 503;
-   }
+   agent_t agbuf;
    agent_t *ag = NULL;
    if (model[0] && strcmp(model, "aimee") != 0)
    {
       /* Explicit model must match a configured agent — no silent fallback. */
-      ag = agent_find(&acfg, model);
-      if (!ag)
+      if (agent_registry_find(model, &agbuf) != 0)
       {
          free(prompt);
          openai_format_error(resp, cap, "model_not_found", "the requested model is not available");
          return 404;
       }
+      ag = &agbuf;
    }
-   if (!ag)
-      ag = agent_default_primary(&acfg);
+   if (!ag && agent_registry_default_primary(&agbuf) == 0)
+      ag = &agbuf;
    if (!ag)
    {
       free(prompt);
@@ -743,7 +739,7 @@ static int responses_handler(const char *body, char *resp, int cap)
    free(combined);
 
    int len = openai_format_response(id, model, result.response, created, result.prompt_tokens,
-                                    result.completion_tokens, resp, cap);
+                                    result.completion_tokens, result.cache_read_tokens, resp, cap);
    free(result.response);
    if (len < 0)
    {
@@ -780,16 +776,19 @@ static void emit_text_chunk(server_http_sse_emit emit, void *ctx, const char *id
 
 /* Resolve the agent for `model` into *acfg (caller-owned, must outlive the
  * returned pointer — it indexes into acfg). Returns NULL when none configured. */
-static agent_t *stream_pick_agent(agent_config_t *acfg, const char *model)
+/* Fills `out` with the selected agent; returns 0 on success.
+ *
+ * Took an agent_config_t* and returned a pointer into it, which meant every
+ * caller put 350,968 bytes on the stack of a request thread to obtain one
+ * 16,720-byte agent. It now asks the registry for just that agent. */
+static int stream_pick_agent(agent_t *out, const char *model)
 {
-   if (agent_load_config(acfg) != 0)
-      return NULL;
-   /* An explicitly requested model must match a configured agent. Returning NULL
+   /* An explicitly requested model must match a configured agent. Failing
     * (rather than falling back to the default) makes callers refuse instead of
     * silently streaming a different model than the client asked for. */
    if (model[0] && strcmp(model, "aimee") != 0)
-      return agent_find(acfg, model);
-   return agent_default_primary(acfg);
+      return agent_registry_find(model, out);
+   return agent_registry_default_primary(out);
 }
 
 static int chat_stream_handler(const char *body, server_http_sse_emit emit, void *ctx)
@@ -809,8 +808,8 @@ static int chat_stream_handler(const char *body, server_http_sse_emit emit, void
       return 0;
    }
 
-   agent_config_t acfg;
-   agent_t *ag = stream_pick_agent(&acfg, model);
+   agent_t agbuf;
+   agent_t *ag = stream_pick_agent(&agbuf, model) == 0 ? &agbuf : NULL;
    if (!ag)
    {
       emit_chunk(emit, ctx, id, model, created, 1, "no agent configured", 0);
@@ -855,8 +854,9 @@ static int chat_stream_handler(const char *body, server_http_sse_emit emit, void
                                       parsed.cache_write_tokens, parsed.cache_read_tokens,
                                       "openai-ingress", NULL);
 
-         if (parsed.is_tool_call && parsed.call_count > 0 && gateway_prevent_subagents_enabled())
-            (void)gw_response_run_governance(&parsed, openai_governance_enabled());
+         if (parsed.is_tool_call && parsed.call_count > 0)
+            (void)gw_response_run_governance(&parsed, openai_governance_enabled(),
+                                             gateway_prevent_subagents_enabled());
 
          if (parsed.is_tool_call && parsed.call_count > 0)
          {
@@ -942,8 +942,8 @@ static int completion_stream_handler(const char *body, server_http_sse_emit emit
       return 0;
    }
 
-   agent_config_t acfg;
-   agent_t *ag = stream_pick_agent(&acfg, model);
+   agent_t agbuf;
+   agent_t *ag = stream_pick_agent(&agbuf, model) == 0 ? &agbuf : NULL;
    if (!ag)
    {
       emit_text_chunk(emit, ctx, id, model, created, "no agent configured", 0);
@@ -1044,6 +1044,43 @@ static char *openai_build_body(const agent_t *agent, const delegate_driver_t *dr
    return body;
 }
 
+/* Drop tools the provider will reject, and say which.
+ *
+ * A single tool with an empty name invalidates the WHOLE request: the ChatGPT
+ * Responses backend answers 400 `Invalid 'tools[16].name': empty string`, so the
+ * turn dies and every other tool in the catalog dies with it. Measured with a real
+ * Codex client, which sends 17 tools; the legacy responses->chat translator filters
+ * non-function and nameless tools, and the IR path that runs ahead of it does not,
+ * so which translator handled the request decided whether the turn worked.
+ *
+ * Dropping one unusable entry is strictly better than failing the turn: a tool the
+ * provider will not accept cannot be called either way. Logged per tool so a
+ * silently-missing capability is diagnosable rather than mysterious. */
+static int strip_unusable_tools(cJSON *tools)
+{
+   if (!cJSON_IsArray(tools))
+      return 0;
+   int dropped = 0;
+   for (int i = cJSON_GetArraySize(tools) - 1; i >= 0; i--)
+   {
+      cJSON *t = cJSON_GetArrayItem(tools, i);
+      const cJSON *name = cJSON_GetObjectItemCaseSensitive(t, "name");
+      if (!cJSON_IsString(name) || !name->valuestring[0])
+      {
+         const cJSON *fn = cJSON_GetObjectItemCaseSensitive(t, "function");
+         name = fn ? cJSON_GetObjectItemCaseSensitive(fn, "name") : NULL;
+      }
+      if (cJSON_IsString(name) && name->valuestring[0])
+         continue;
+      const cJSON *type = cJSON_GetObjectItemCaseSensitive(t, "type");
+      LOG_WARN("openai.responses", "dropping tool[%d] with no usable name (type=%s)", i,
+               cJSON_IsString(type) ? type->valuestring : "?");
+      cJSON_DeleteItemFromArray(tools, i);
+      dropped++;
+   }
+   return dropped;
+}
+
 static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *tools,
                                   const char *system_prompt, int max_tokens, double temperature,
                                   parsed_response_t *out)
@@ -1053,19 +1090,37 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
    memset(out, 0, sizeof(*out));
    if (!agent || !messages)
       return -1;
+   strip_unusable_tools(tools);
 
+   /* Every bare `return -1` below reported the same generic failure to the client.
+    * Each now says which precondition failed: the difference between "no driver for
+    * this provider" and "this agent has no usable token" is the whole diagnosis, and
+    * the client message ("upstream model request failed") actively misdirects,
+    * because on three of these paths nothing upstream was ever contacted. */
    delegate_drivers_init();
    const delegate_driver_t *driver = delegate_driver_get(agent->provider);
    if (!driver || !driver->build_request || !driver->parse_response)
+   {
+      LOG_WARN("openai.responses", "no usable driver for provider=%s (agent=%s)",
+               agent->provider ? agent->provider : "?", agent->name ? agent->name : "?");
       return -1;
+   }
 
    char url[MAX_ENDPOINT_LEN + 64];
    if (delegate_build_url(driver, agent, url, sizeof(url)) != 0)
+   {
+      LOG_WARN("openai.responses", "build_url failed: driver=%s endpoint=%s", driver->name,
+               agent->endpoint ? agent->endpoint : "?");
       return -1;
+   }
 
    char auth_header[MAX_API_KEY_LEN + 32];
    if (agent_resolve_auth(agent, auth_header, sizeof(auth_header)) != 0)
+   {
+      LOG_WARN("openai.responses", "auth unresolved: agent=%s auth_type=%s",
+               agent->name ? agent->name : "?", agent->auth_type ? agent->auth_type : "?");
       return -1;
+   }
    char extra_headers[512];
    agent_build_extra_headers(agent, extra_headers, sizeof(extra_headers));
 
@@ -1104,6 +1159,7 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
    {
       /* Misconfigured stage catalog: fail closed (like the anthropic ingress) rather
        * than run a partial/empty pipeline that skips tool policing + routing. */
+      LOG_WARN("openai.responses", "stage catalog build failed; refusing a partial pipeline");
       cJSON_Delete(gw_raw);
       return -1;
    }
@@ -1115,9 +1171,10 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
 
    int tok = agent_request_max_tokens(agent, max_tokens);
 
-   /* AGGRESSIVE may apply the existing lossy reducer to OpenAI-family request
-    * history. SAFE never enters this path. Anthropic-backed routes remain
-    * untouched to preserve their cache prefix. */
+   /* AGGRESSIVE may apply the existing lossy reducer to request history. SAFE
+    * never enters this path. Anthropic-backed routes are no longer excluded: the
+    * gateway's per-session freeze keeps a folded prefix byte-identical, which is
+    * what their cache prefix actually requires. */
    gw_mutate_ctx_t gwmc;
    gw_mutate_ctx_init(&gwmc);
    cJSON *mbox = NULL;
@@ -1142,6 +1199,8 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
        openai_build_body(agent, driver, econ_messages, eff_tools, eff_system, tok, temperature);
    if (!body)
    {
+      LOG_WARN("openai.responses", "openai_build_body returned nothing: driver=%s model=%s",
+               driver->name, agent->model ? agent->model : "?");
       cJSON_Delete(mbox);
       gw_mutate_ctx_free(&gwmc);
       cJSON_Delete(gw_raw);
@@ -1150,13 +1209,13 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
 
    int economizer_active = econ_mode_current() != ECON_MODE_OFF;
    int wire_anthropic = driver && driver->name && strcmp(driver->name, "anthropic") == 0;
-   econ_wire_route_t wire_route = wire_anthropic              ? ECON_WIRE_ANTHROPIC_MESSAGES
-                                  : strstr(url, "/responses") ? ECON_WIRE_OPENAI_RESPONSES
-                                                              : ECON_WIRE_OPENAI_CHAT;
-   econ_wire_snapshot_t *wire_snapshot = NULL;
-   econ_wire_bytes_t wire_body;
-   if (econ_wire_select(economizer_active, wire_route, body, strlen(body), &wire_snapshot,
-                        &wire_body) != 0)
+   wire_fence_route_t wire_route = wire_anthropic              ? WIRE_FENCE_ANTHROPIC_MESSAGES
+                                   : strstr(url, "/responses") ? WIRE_FENCE_OPENAI_RESPONSES
+                                                               : WIRE_FENCE_OPENAI_CHAT;
+   wire_fence_t *wire_snapshot = NULL;
+   wire_fence_bytes_t wire_body;
+   if (wire_fence_select(economizer_active, wire_route, body, strlen(body), &wire_snapshot,
+                         &wire_body) != 0)
    {
       free(body);
       cJSON_Delete(mbox);
@@ -1173,7 +1232,7 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
                                                    &response_body, agent->timeout_ms, extra_headers,
                                                    ra, rb, rm, agent->provider, agent->model, NULL);
    free(body);
-   econ_wire_snapshot_destroy(wire_snapshot);
+   wire_fence_destroy(wire_snapshot);
 
    cJSON_Delete(mbox);
    gw_mutate_ctx_free(&gwmc);
@@ -1181,6 +1240,18 @@ static int agent_execute_messages(const agent_t *agent, cJSON *messages, cJSON *
 
    if (http_status != 200 || !response_body)
    {
+      /* Say WHAT the provider said. This path reports a single generic
+       * "upstream model request failed" to the client, which is all a Codex user
+       * ever sees -- and the buffered /v1/responses handler on the SAME agent and
+       * the SAME url succeeds, so "the provider is down" is not the explanation
+       * and the difference is in this request. Discarding the body here meant the
+       * only way to find out was to read the source and guess.
+       *
+       * Truncated because a provider error can carry an HTML error page. */
+      LOG_WARN("openai.responses",
+               "streaming upstream failed: status=%d provider=%s model=%s url=%s body=%.400s",
+               http_status, agent->provider ? agent->provider : "?",
+               agent->model ? agent->model : "?", url, response_body ? response_body : "(none)");
       free(response_body);
       return -1;
    }
@@ -1237,7 +1308,7 @@ static int responses_stream_handler(const char *body, server_http_sse_event_emit
       if (openai_format_responses_created(id, model, created, frame, sizeof(frame)) > 0)
          emit(ctx, "response.created", frame);
       if (openai_format_responses_completed(id, model, "invalid responses request", created, 0, 0,
-                                            frame, sizeof(frame)) > 0)
+                                            0, frame, sizeof(frame)) > 0)
          emit(ctx, "response.completed", frame);
       free(instructions);
       cJSON_Delete(messages);
@@ -1246,14 +1317,14 @@ static int responses_stream_handler(const char *body, server_http_sse_event_emit
    }
    (void)stream; /* this handler is the streaming path; flag is informational */
 
-   agent_config_t acfg;
-   agent_t *ag = stream_pick_agent(&acfg, model);
+   agent_t agbuf;
+   agent_t *ag = stream_pick_agent(&agbuf, model) == 0 ? &agbuf : NULL;
    if (!ag)
    {
       if (openai_format_responses_created(id, model, created, frame, sizeof(frame)) > 0)
          emit(ctx, "response.created", frame);
-      if (openai_format_responses_completed(id, model, "no agent configured", created, 0, 0, frame,
-                                            sizeof(frame)) > 0)
+      if (openai_format_responses_completed(id, model, "no agent configured", created, 0, 0, 0,
+                                            frame, sizeof(frame)) > 0)
          emit(ctx, "response.completed", frame);
       free(instructions);
       cJSON_Delete(messages);
@@ -1355,19 +1426,27 @@ static int responses_stream_handler(const char *body, server_http_sse_event_emit
    if (erc == 0 && parsed.is_tool_call && parsed.call_count > 0)
    {
       /* P2c streaming: when gateway_prevent_subagents is ON, run the police
-       * function on the parsed struct first (drops denied subagent tool_call
+       * event-bus governance module first (drops denied subagent tool_call
        * entries in place; preserves upstream stop_reason in partial-drop,
-       * rewrites to "end_turn" on all-dropped). When OFF, this is a no-op
-       * and the dispatch below runs byte-for-byte identical to today's loop.
+       * rewrites to "end_turn" on all-dropped). The module receives the
+       * already-resolved policy gate; it remains the sole decision path.
        * Police contract is finalized in PR #677 (buffered) and PR #679
        * (streaming Anthropic). */
       int police_drops = 0;
-      if (gateway_prevent_subagents_enabled())
-         police_drops = gw_response_run_governance(&parsed, openai_governance_enabled());
+      police_drops = gw_response_run_governance(&parsed, openai_governance_enabled(),
+                                                gateway_prevent_subagents_enabled());
       (void)police_drops; /* drop count plumbed through the pipeline total
                              for the future P2b audit pass; today the only
                              visible effect is the parsed.calls[] mutation. */
 
+      /* Name every call handed back to the client. A Codex client sends its MCP
+       * servers as `namespace` groups and can only route a call whose name is
+       * namespace-qualified; a bare nested name comes back as
+       * "unsupported call: <name>" and the turn is wasted. Logging the names is the
+       * only way to tell "the provider emitted it bare" from "we stripped it". */
+      for (int ci = 0; ci < parsed.call_count; ci++)
+         LOG_INFO("openai.responses", "returning tool call name=%s",
+                  parsed.calls[ci].name[0] ? parsed.calls[ci].name : "(empty)");
       openai_responses_emit_policed(&parsed, id, model, created, emit, ctx);
    }
    else
@@ -1419,7 +1498,8 @@ static int responses_stream_handler(const char *body, server_http_sse_event_emit
                emit(ctx, "response.incomplete", cf);
          }
          else if (openai_format_responses_completed(id, model, txt, created, parsed.prompt_tokens,
-                                                    parsed.completion_tokens, cf, (int)ccap) > 0)
+                                                    parsed.completion_tokens,
+                                                    parsed.cache_read_tokens, cf, (int)ccap) > 0)
             emit(ctx, "response.completed", cf);
          free(cf);
       }
@@ -1462,8 +1542,9 @@ typedef struct
  * the pointer (buf) on success or "{}" if it does not fit. */
 static const char *run_status_json(const run_job_t *j, const char *status, char *buf, int cap)
 {
-   return openai_format_run(j->run_id, j->model, "", j->created, 0, 0, status, buf, cap) > 0 ? buf
-                                                                                             : "{}";
+   return openai_format_run(j->run_id, j->model, "", j->created, 0, 0, 0, status, buf, cap) > 0
+              ? buf
+              : "{}";
 }
 
 /* Tool-event hook for /v1/runs: append a `tool_call.started` /
@@ -1513,7 +1594,8 @@ static void *run_job_worker(void *arg)
                                   run_status_json(j, "in_progress", buf, RUN_JSON_CAP));
 
    agent_config_t acfg;
-   agent_t *ag = stream_pick_agent(&acfg, j->model);
+   agent_t agbuf;
+   agent_t *ag = stream_pick_agent(&agbuf, j->model) == 0 ? &agbuf : NULL;
    if (!ag)
    {
       openai_runs_store_append_event(j->run_id, "error", "{\"error\":\"no agent configured\"}");
@@ -1605,7 +1687,8 @@ static void *run_job_worker(void *arg)
       cJSON_Delete(mc);
    }
    if (openai_format_run(j->run_id, j->model, result.response, j->created, result.prompt_tokens,
-                         result.completion_tokens, "completed", buf, RUN_JSON_CAP) > 0)
+                         result.completion_tokens, result.cache_read_tokens, "completed", buf,
+                         RUN_JSON_CAP) > 0)
    {
       openai_runs_store_append_event(j->run_id, "response.completed", buf);
       openai_runs_store_finalize(j->run_id, OPENAI_RUN_COMPLETED, buf);
@@ -1643,8 +1726,8 @@ static int runs_handler(const char *body, char *resp, int cap)
    }
 
    /* Validate an agent is configured synchronously so callers still get 503 fast. */
-   agent_config_t acfg;
-   agent_t *ag = stream_pick_agent(&acfg, model);
+   agent_t agbuf;
+   agent_t *ag = stream_pick_agent(&agbuf, model) == 0 ? &agbuf : NULL;
    if (!ag)
    {
       free(prompt);
@@ -1662,7 +1745,7 @@ static int runs_handler(const char *body, char *resp, int cap)
    snprintf(id, sizeof(id), "run_%ld_%lu", created, atomic_fetch_add(&g_run_seq, 1) + 1);
 
    /* Queued snapshot returned to the caller and stored for GET /v1/runs/{id}. */
-   int len = openai_format_run(id, model, "", created, 0, 0, "queued", resp, cap);
+   int len = openai_format_run(id, model, "", created, 0, 0, 0, "queued", resp, cap);
    if (len < 0)
    {
       free(prompt);

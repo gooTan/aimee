@@ -1,0 +1,71 @@
+# Subscription-factory workflow for routine, well-understood changes.
+#
+# prep -> implement -> freeze -> review -> human gate -> deliver
+#
+# Every model-facing step is pinned to a budget seat: `luna` (cheap Codex
+# model) prepares context and reviews the frozen diff, and `deepseek`
+# (OpenCode ACP, DeepSeek V4 Flash) implements and repairs. This workflow makes
+# ZERO premium (sol/fable) calls by construction, and the premium ledger in the
+# engine enforces that no node here could smuggle one in.
+#
+# Deterministic verification is not a node: the `implement` block runs the
+# repository verifier after every delegate pass, and a failure loops the
+# diagnostic straight back to the implementer (`on_fail: implement`) for at
+# most two bounded repair rounds before parking for a human. Review findings
+# take the same cheap path. Model claims never advance the workflow; only the
+# verifier and the review gate do.
+name: quick-change
+intent_tags:
+  - routine-change
+  - quick-fix
+  - small-change
+enforced: true
+start: prep
+nodes:
+  - id: prep
+    block: understand
+    params:
+      delegate: luna
+      max_rounds: 2
+    next: implement
+    on_fail: prep
+  - id: implement
+    block: implement
+    in:
+      plan: prep.out
+    params:
+      delegate: deepseek
+      max_rounds: 2
+    next: freeze
+    on_fail: implement
+  - id: freeze
+    block: freeze
+    in:
+      branch: implement.out
+    next: review
+  # Luna reviews the frozen diff. Routine findings return directly to the
+  # DeepSeek implementer; two review rounds, then park for a human.
+  - id: review
+    block: review
+    in:
+      src: freeze.out
+    params:
+      delegate: luna
+      persona: reviewer
+      max_rounds: 2
+    on_pass: human_gate
+    on_fail: implement
+  # Delivery stops at a human. Automation cannot approve this gate; the
+  # browser or /v1/workflow/items/{id}/gate decision is the only way through.
+  - id: human_gate
+    block: gate.human
+    in:
+      src: freeze.out
+    params:
+      policy: confirm the reviewed change before delivery
+    on_pass: deliver
+    on_fail: implement
+  - id: deliver
+    block: gate.deliver
+    in:
+      verdict: human_gate.out

@@ -21,7 +21,6 @@
 #include "server_mgmt_checkpoint_client.h"
 #include "pki.h" /* P8a per-request durable cert revocation/expiry re-check */
 #include "modules/workspace/workspace_runner_registry.h" /* ws_runner_registry_poll/_respond for the /v1 reverse channel */
-#include "modules/git/forge_credentials.h" /* forge_cred_install for the /v1 token-install route */
 #include <time.h>
 #include "persona.h"
 #include "role_templates.h"
@@ -60,9 +59,9 @@
 #include <unistd.h>
 #include <stdatomic.h>
 
-#define SHTTP_MAX_BODY            (4 * 1024 * 1024)
-#define SHTTP_MAX_ROUNDTABLE_BODY (128 * 1024 * 1024)
-#define SHTTP_BACKLOG             16
+/* SHTTP_MAX_BODY / SHTTP_MAX_ROUNDTABLE_BODY now live in headers/server.h so
+ * clients can honour the same cap. */
+#define SHTTP_BACKLOG 16
 /* ── per-session persona store ──────────────────────────────────────────── */
 
 #define SHTTP_MAX_SESSIONS 256
@@ -420,8 +419,8 @@ int route_session_primary_set(const char *session_id, const char *body, char *re
    cJSON_Delete(req);
 
    /* Validate the agent exists in the pool before pinning it. */
-   agent_config_t acfg;
-   if (agent_load_config(&acfg) != 0 || !agent_find(&acfg, name))
+   agent_t agbuf;
+   if (agent_registry_find(name, &agbuf) != 0)
       return err_json(resp, cap, 404, "no such agent");
 
    session_primary_set(session_id, name);
@@ -1886,31 +1885,25 @@ void handle_conn(int fd, int is_tcp, int is_management)
          return;
       }
       body_len = (int)declared;
-      body = malloc((size_t)body_len + 1);
+      /* Allocate against bytes RECEIVED, not bytes claimed -- http_read_body
+       * grows as data arrives, with `body_len` (already validated against the
+       * route limit above) as the ceiling. */
+      const char *bs = strstr(buf, "\r\n\r\n");
+      int prefix_len = 0;
+      if (bs)
+      {
+         bs += 4;
+         prefix_len = (int)(buf + total - bs);
+         if (prefix_len < 0)
+            prefix_len = 0;
+         if (prefix_len > body_len)
+            prefix_len = body_len;
+      }
+      int already = 0;
+      body = http_read_body(fd, bs, prefix_len, body_len, &already);
       if (body)
       {
          int declared_body_len = body_len;
-         int already = 0;
-         const char *bs = strstr(buf, "\r\n\r\n");
-         if (bs)
-         {
-            bs += 4;
-            already = (int)(buf + total - bs);
-            if (already < 0)
-               already = 0;
-            if (already > body_len)
-               already = body_len;
-            if (already > 0)
-               memcpy(body, bs, (size_t)already);
-         }
-         while (already < body_len)
-         {
-            int n = server_conn_io_read(fd, body + already, (int)(body_len - already));
-            if (n <= 0)
-               break;
-            already += n;
-         }
-         body[already] = '\0';
          if (server_http_keepalive_peek() && already != declared_body_len)
          {
             server_http_keepalive_set(0);
@@ -2081,7 +2074,7 @@ void handle_conn(int fd, int is_tcp, int is_management)
    g_rpc_conn_caps = CAPS_READ_ONLY;
    server_http_identity_clear();
    send_response(fd, status, resp, request_id);
-   LOG_INFO("server.http", "%s %s -> %d req_id=%s", method, path, status, request_id);
+   server_http_log_access(method, path, status, request_id);
    free(resp);
    free(body);
 }

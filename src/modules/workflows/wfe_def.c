@@ -1,6 +1,7 @@
 /* wfe_def.c -- workflow definition: block catalog + YAML->struct parser. */
 #include "wfe_def.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +37,13 @@ static const struct
      * {dir, ref, suffix, workspace, mode, max_spend_usd} — the same vocabulary
      * as a `watch-dir` trigger_rules stanza, composed in the graph instead. */
     {WFE_BLK_TRIGGER_WATCH_DIR, "trigger.watch-dir", WFE_ART_PROPOSAL, 0, {WFE_ART_NONE}},
-    {WFE_BLK_AUTHOR_PLAN, "author.plan", WFE_ART_PLAN, 1, {WFE_ART_PROPOSAL, WFE_ART_NONE}},
+    /* author.plan also accepts intent: understand brief:true emits the validated ContextBrief as
+     * intent for the native build planner. */
+    {WFE_BLK_AUTHOR_PLAN,
+     "author.plan",
+     WFE_ART_PLAN,
+     1,
+     {WFE_ART_PROPOSAL, WFE_ART_INTENT, WFE_ART_NONE}},
     /* implement also accepts an INTENT directly (S0): a single-packet `hotfix`
      * feeds understand -> implement without a split step. */
     {WFE_BLK_IMPLEMENT,
@@ -436,16 +443,16 @@ int wfe_feedback_write(const char *work_item_id, const char *text)
    const char *home = getenv("AIMEE_HOME");
    char dir[1024];
    snprintf(dir, sizeof dir, "%s/wfe-feedback", (home && home[0]) ? home : ".");
-   WFE_MKDIR(dir);
+   if (WFE_MKDIR(dir) != 0 && errno != EEXIST)
+      return -1;
    char path[1200];
    wfe_feedback_path(work_item_id, path, sizeof path);
    FILE *f = fopen(path, "wb");
    if (!f)
       return -1;
-   if (text && text[0])
-      fwrite(text, 1, strlen(text), f);
-   fclose(f);
-   return 0;
+   size_t len = (text && text[0]) ? strlen(text) : 0;
+   int ok = len == 0 || fwrite(text, 1, len, f) == len;
+   return (fclose(f) == 0 && ok) ? 0 : -1;
 }
 
 int wfe_feedback_read(const char *work_item_id, char *buf, size_t cap)

@@ -46,6 +46,9 @@ cJSON *marshal_index_find_callers(int argc, char **argv);
 cJSON *marshal_index_list(int argc, char **argv);
 cJSON *marshal_index_scan(int argc, char **argv);
 cJSON *marshal_index_structure(int argc, char **argv);
+cJSON *marshal_index_span(int argc, char **argv);
+cJSON *marshal_index_investigate(int argc, char **argv);
+cJSON *marshal_index_hybrid(int argc, char **argv);
 cJSON *marshal_insights_overview(int argc, char **argv);
 cJSON *marshal_job_id_request(const char *method, int argc, char **argv);
 cJSON *marshal_jobs_list(int argc, char **argv);
@@ -146,6 +149,10 @@ void pt_print_delegate(const char *method, cJSON *resp);
 void pt_print_delegate_launch(const char *method, cJSON *resp);
 void pt_print_delegate_log(const char *method, cJSON *resp);
 void pt_print_roundtable_review(const char *method, cJSON *resp);
+/* 1 when the response carries no review artifact, so the caller's exit status
+ * reports "no review happened" rather than success. Defined beside the printer
+ * because both answer the same question about the same response. */
+int roundtable_review_response_is_failure(cJSON *resp);
 void pt_print_delegate_status(const char *method, cJSON *resp);
 void pt_print_dogfood_report(const char *method, cJSON *resp);
 void pt_print_dogfood_tag(const char *method, cJSON *resp);
@@ -165,6 +172,9 @@ void pt_print_index_find_callers(const char *method, cJSON *resp);
 void pt_print_index_list(const char *method, cJSON *resp);
 void pt_print_index_scan(const char *method, cJSON *resp);
 void pt_print_index_structure(const char *method, cJSON *resp);
+void pt_print_index_span(const char *method, cJSON *resp);
+void pt_print_index_investigate(const char *method, cJSON *resp);
+void pt_print_index_hybrid(const char *method, cJSON *resp);
 void pt_print_init_run(const char *method, cJSON *resp);
 void pt_print_insights_overview(const char *method, cJSON *resp);
 void pt_print_job_cancel(const char *method, cJSON *resp);
@@ -240,4 +250,24 @@ const char *rpc_get(const rpc_opts_t *opts, const char *name);
 int rpc_get_int(const rpc_opts_t *opts, const char *name, int def);
 int rpc_has_flag(const rpc_opts_t *opts, const char *name);
 void rpc_parse(int argc, char **argv, const char **bool_flags, rpc_opts_t *out);
+
+/* The largest /v1 request body the server will accept, mirrored client-side so
+ * the CLI can refuse an oversized request itself. A body over this is dropped by
+ * the listener before it is parsed, which the client can otherwise only report as
+ * "could not reach the endpoint" — blaming a server that is up and answering.
+ *
+ * Mirrored rather than included because headers/server.h pulls in the server's
+ * own dependency chain, which the CLI does not build against.
+ * test_cli_v1_body_cap_matches_server pins these equal to SHTTP_MAX_BODY /
+ * SHTTP_MAX_ROUNDTABLE_BODY. */
+#define CLI_V1_MAX_BODY (4 * 1024 * 1024)
+
+/* Keep in step with ROUNDTABLE_MAX_ARTIFACT / SHTTP_MAX_ROUNDTABLE_BODY in
+ * headers/server.h (2x the artifact); test_cli_v1_body_cap_matches_server pins
+ * them equal. CLI_V1_MAX_ROUNDTABLE_ARTIFACT is what the three artifact reads in
+ * marshal_roundtable_review pass to marshal_read_*_limited -- it was written out
+ * as a bare 16MB literal at each of them. */
+#define CLI_V1_MAX_ROUNDTABLE_ARTIFACT (8 * 1024 * 1024)
+#define CLI_V1_MAX_ROUNDTABLE_BODY     (2 * CLI_V1_MAX_ROUNDTABLE_ARTIFACT)
+
 #endif

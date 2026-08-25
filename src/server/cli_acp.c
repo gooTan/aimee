@@ -6,7 +6,7 @@
  * Protocol (standard Agent Client Protocol, JSON-RPC over stdio):
  *   1. spawn subprocess (cli_cmd = "claude-code-acp", "aider --acp", etc.)
  *   2. initialize  {protocolVersion, clientCapabilities:{fs:{read,write}}}  id 1
- *   3. session/new {cwd, mcpServers:[]}  id 2  -> capture result.sessionId
+ *   3. session/new {cwd, mcpServers:[aimee]}  id 2 -> capture result.sessionId
  *   4. session/prompt {sessionId, prompt:[{type:text,text}]}  id 3
  *   5. read session/update notifications (accumulate agent_message_chunk text,
  *      count tool_call), serve agent fs/permission requests against the
@@ -254,6 +254,33 @@ static int acp_read_session_id(acp_proc_t *p, int msg_id, char *sid, size_t sid_
       cJSON_Delete(obj);
    }
    return -1;
+}
+
+/* Read lines until the response for `msg_id` arrives. Returns 1 when it holds
+ * a result, -1 when it holds an error, 0 on timeout/EOF. Used for requests
+ * whose success matters (model pinning), unlike acp_drain_response. */
+static int acp_read_request_status(acp_proc_t *p, int msg_id, long long deadline_ms)
+{
+   for (int i = 0; i < 20; i++)
+   {
+      char *line = acp_read_line(p, deadline_ms);
+      if (!line)
+         break;
+      cJSON *obj = cJSON_Parse(line);
+      free(line);
+      if (!obj)
+         continue;
+      cJSON *id_j = cJSON_GetObjectItem(obj, "id");
+      int matched = id_j && cJSON_IsNumber(id_j) && (int)id_j->valuedouble == msg_id;
+      if (matched)
+      {
+         int has_error = cJSON_GetObjectItem(obj, "error") != NULL;
+         cJSON_Delete(obj);
+         return has_error ? -1 : 1;
+      }
+      cJSON_Delete(obj);
+   }
+   return 0;
 }
 
 /* Append delta text to a growing heap buffer. Returns 0 on success, -1 on OOM. */
@@ -504,6 +531,12 @@ static char *acp_error_response(cJSON *id, int code, const char *message)
  * request (no id, or a response) and should be handled as turn content. */
 int acp_serve_client_request(const char *line, const char *workdir, char **resp_out)
 {
+   return acp_serve_client_request_gated(line, workdir, 1, resp_out);
+}
+
+int acp_serve_client_request_gated(const char *line, const char *workdir, int write_capable,
+                                   char **resp_out)
+{
    if (resp_out)
       *resp_out = NULL;
    if (!line || !resp_out)
@@ -553,8 +586,10 @@ int acp_serve_client_request(const char *line, const char *workdir, char **resp_
       cJSON *pj = params ? cJSON_GetObjectItem(params, "path") : NULL;
       cJSON *cj = params ? cJSON_GetObjectItem(params, "content") : NULL;
       char full[PATH_MAX * 2];
-      if (!pj || !cJSON_IsString(pj) || !cj || !cJSON_IsString(cj) ||
-          acp_resolve_in_workdir(workdir, pj->valuestring, full, sizeof(full)) != 0)
+      if (!write_capable)
+         *resp_out = acp_error_response(id_j, -32603, "write denied: delegate role is read-only");
+      else if (!pj || !cJSON_IsString(pj) || !cj || !cJSON_IsString(cj) ||
+               acp_resolve_in_workdir(workdir, pj->valuestring, full, sizeof(full)) != 0)
          *resp_out = acp_error_response(id_j, -32602, "invalid or out-of-workdir path");
       else
       {
@@ -582,9 +617,11 @@ int acp_serve_client_request(const char *line, const char *workdir, char **resp_
    }
    else if (strcmp(method, "session/request_permission") == 0)
    {
-      /* Auto-approve: the delegate already runs in an isolated worktree and the
-       * operator opted in via --acp. Select the first "allow" option, else the
-       * first option, else cancel. */
+      /* Write-capable delegates auto-approve: they already run in an isolated
+       * worktree and the operator opted in via --acp. Select the first "allow"
+       * option, else the first option, else cancel. A read-only delegate is the
+       * opposite: pick a reject/deny option, else cancel, so an agent that asks
+       * for permission to mutate anything is refused rather than waved through. */
       const char *opt_id = NULL;
       cJSON *options = params ? cJSON_GetObjectItem(params, "options") : NULL;
       if (options && cJSON_IsArray(options))
@@ -598,13 +635,21 @@ int acp_serve_client_request(const char *line, const char *workdir, char **resp_
                continue;
             if (!first)
                first = oid;
-            if (kind && cJSON_IsString(kind) && strncmp(kind->valuestring, "allow", 5) == 0)
+            if (!kind || !cJSON_IsString(kind))
+               continue;
+            if (write_capable && strncmp(kind->valuestring, "allow", 5) == 0)
+            {
+               opt_id = oid->valuestring;
+               break;
+            }
+            if (!write_capable && (strncmp(kind->valuestring, "reject", 6) == 0 ||
+                                   strncmp(kind->valuestring, "deny", 4) == 0))
             {
                opt_id = oid->valuestring;
                break;
             }
          }
-         if (!opt_id && first)
+         if (!opt_id && write_capable && first)
             opt_id = first->valuestring;
       }
       cJSON *resp = acp_response_envelope(id_j);
@@ -687,7 +732,8 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       char msg[1024];
       snprintf(msg, sizeof(msg),
                "{\"jsonrpc\":\"2.0\",\"method\":\"session/new\","
-               "\"params\":{\"cwd\":%s,\"mcpServers\":[]},\"id\":2}",
+               "\"params\":{\"cwd\":%s,\"mcpServers\":[{\"name\":\"aimee\","
+               "\"command\":\"aimee\",\"args\":[\"mcp-serve\"],\"env\":[]}]},\"id\":2}",
                cwd_esc ? cwd_esc : "\".\"");
       free(cwd_esc);
       if (acp_write_line(&p, msg) != 0)
@@ -699,6 +745,61 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       /* A sessionId is preferred but not fatal if absent (some agents are
        * single-session and ignore it); proceed either way. */
       acp_read_session_id(&p, 2, acp_session, sizeof(acp_session), util_now_ms() + 10000);
+   }
+
+   /* 2b. Model pinning. aimee's doctrine for a pinned agent is exact-or-fail:
+    * when the agent config names a model, a peer that cannot honor
+    * session/set_model must not silently run the turn on whatever default it
+    * has (OpenCode, for example, would substitute its own default model). An
+    * unpinned agent skips this entirely. */
+   if (cfg->agent->model[0])
+   {
+      char *sid_esc = cJSON_PrintUnformatted(cJSON_CreateString(acp_session));
+      char *model_esc = cJSON_PrintUnformatted(cJSON_CreateString(cfg->agent->model));
+      char msg[1024];
+      snprintf(msg, sizeof(msg),
+               "{\"jsonrpc\":\"2.0\",\"method\":\"session/set_model\","
+               "\"params\":{\"sessionId\":%s,\"modelId\":%s},\"id\":4}",
+               sid_esc ? sid_esc : "\"\"", model_esc ? model_esc : "\"\"");
+      free(sid_esc);
+      free(model_esc);
+      if (acp_write_line(&p, msg) != 0 ||
+          acp_read_request_status(&p, 4, util_now_ms() + 10000) != 1)
+      {
+         snprintf(out->error, sizeof(out->error),
+                  "acp adapter: agent did not accept pinned model '%s' (session/set_model)",
+                  cfg->agent->model);
+         acp_proc_close(&p);
+         return -1;
+      }
+   }
+
+   /* 2c. Reasoning effort. Generic ACP exact-or-fail transport for a
+    * configured non-empty reasoning effort: any ACP peer configured with an
+    * explicit effort must accept it or fail rather than silently choose a
+    * default. Mirrors the model-pinning pattern (JSON escaping + 10s window,
+    * id 5, exact-or-fail). Prompt id 3 stays unchanged. */
+   if (cfg->agent->reasoning_effort[0])
+   {
+      char *sid_esc = cJSON_PrintUnformatted(cJSON_CreateString(acp_session));
+      char *eff_esc = cJSON_PrintUnformatted(cJSON_CreateString(cfg->agent->reasoning_effort));
+      char msg[1024];
+      snprintf(msg, sizeof(msg),
+               "{\"jsonrpc\":\"2.0\",\"method\":\"session/set_config_option\","
+               "\"params\":{\"sessionId\":%s,\"configId\":\"effort\",\"value\":%s},\"id\":5}",
+               sid_esc ? sid_esc : "\"\"", eff_esc ? eff_esc : "\"\"");
+      free(sid_esc);
+      free(eff_esc);
+      if (acp_write_line(&p, msg) != 0 ||
+          acp_read_request_status(&p, 5, util_now_ms() + 10000) != 1)
+      {
+         snprintf(
+             out->error, sizeof(out->error),
+             "acp adapter: agent did not accept reasoning effort '%s' (session/set_config_option)",
+             cfg->agent->reasoning_effort);
+         acp_proc_close(&p);
+         return -1;
+      }
    }
 
    /* 3. session/prompt: the prompt is an array of typed content blocks. */
@@ -737,7 +838,7 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       /* Agent-issued client requests (fs read/write, permission) act on aimee's
        * worktree and must be answered before the turn can complete. */
       char *client_resp = NULL;
-      if (acp_serve_client_request(line, cfg->cwd, &client_resp))
+      if (acp_serve_client_request_gated(line, cfg->cwd, cfg->agent->write_capable, &client_resp))
       {
          if (client_resp)
          {

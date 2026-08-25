@@ -1,0 +1,40 @@
+{
+  "descriptor_version": 1,
+  "id": "sandbox",
+  "dependencies": [
+    "audit",
+    "config",
+    "module-runtime"
+  ],
+  "enabled_by_default": true,
+  "runtime_toggle": {
+    "supported": true
+  },
+  "ownership_complete": true,
+  "sources": [
+    "src/modules/sandbox/sandbox_learned.c",
+    "src/modules/sandbox/sandbox_pkg_proxy.c"
+  ],
+  "go_sources": [
+    "server-go/modules/sandbox/sandbox.go",
+    "server-go/modules/sandbox/module.go",
+    "server-go/modules/sandbox/proxy_policy.go"
+  ],
+  "go_tests": [
+    "server-go/modules/sandbox/sandbox_test.go",
+    "server-go/modules/sandbox/proxy_policy_test.go"
+  ],
+  "public_headers": [
+    "src/modules/sandbox/include/aimee/sandbox/module_api.h"
+  ],
+  "private_headers": [
+    "src/modules/sandbox/sandbox_learned.h",
+    "src/modules/sandbox/sandbox_pkg_proxy.h"
+  ],
+  "tests": [
+    "src/tests/test_sandbox_pkg_proxy_adapter.c"
+  ],
+  "docs": [
+    "docs/modules/sandbox.md"
+  ]
+}

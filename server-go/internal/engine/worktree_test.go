@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,134 @@ func TestParentUsesFeatureWorktreeAndChildBranchesFromIt(t *testing.T) {
 	}
 	if branch != "aimee/wi/wi_child" {
 		t.Fatalf("child branch=%s", branch)
+	}
+}
+
+func TestParentFeatureStartsFromAdmittedIntegrationBranch(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@example",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@example")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-b", "trunk", repo)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", repo, "add", "README")
+	run("-C", repo, "commit", "-m", "init")
+	run("-C", repo, "remote", "add", "origin", repo)
+	run("-C", repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+	run("-C", repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+	run("-C", repo, "switch", "-c", "integration")
+	if err := os.WriteFile(filepath.Join(repo, "integration.txt"), []byte("admitted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", repo, "add", "integration.txt")
+	run("-C", repo, "commit", "-m", "integration")
+	run("-C", repo, "update-ref", "refs/remotes/origin/integration", "HEAD")
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, db1.CreateWorkItem{ID: "wi_parent", Repo: repo,
+		ProposalPath: "p", WorkflowName: "build", StartStage: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ := store.WorkItem(ctx, "wi_parent")
+	workdir, _, err := manager.Ensure(ctx, item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "integration.txt")); err != nil {
+		t.Fatalf("feature did not start from admitted integration branch: %v", err)
+	}
+	base, err := frozenWorktreeBase(ctx, item, workdir)
+	if err != nil || base != "origin/integration" {
+		t.Fatalf("root frozen-diff base=%q err=%v, want origin/integration", base, err)
+	}
+}
+
+func TestCleanupIsIdempotentAfterManagedPathWasRemoved(t *testing.T) {
+	root := t.TempDir()
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := db1.WorkItem{ID: "wi_missing", Repo: filepath.Join(root, "repo"),
+		Worktree: filepath.Join(root, "trees", "wi_missing")}
+	if err := manager.Cleanup(t.Context(), item); err != nil {
+		t.Fatalf("repeat cleanup of removed managed path: %v", err)
+	}
+
+	item.Worktree = filepath.Join(root, "outside-managed-root")
+	if err := manager.Cleanup(t.Context(), item); err == nil {
+		t.Fatal("missing path outside the managed root bypassed scope validation")
+	}
+}
+
+func TestCleanupRemovesOrphanedWorktreeWhenTheRepoIsGone(t *testing.T) {
+	// A deleted workspace leaves its worktrees behind. Every `git -C <repo>` then
+	// fails with "cannot change to <repo>", so Cleanup used to return an error
+	// forever and the work item never reached a terminal state -- observed on a
+	// live server retrying one item ~92 times a minute.
+	root := t.TempDir()
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The checkout exists; the repository it belonged to does not.
+	tree := filepath.Join(root, "trees", "wi_orphan")
+	if err := os.MkdirAll(tree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	item := db1.WorkItem{ID: "wi_orphan", Repo: filepath.Join(root, "repo-that-was-deleted"),
+		Worktree: tree}
+
+	if err := manager.Cleanup(t.Context(), item); err != nil {
+		t.Fatalf("cleanup with a missing repo must succeed, got: %v", err)
+	}
+	if _, err := os.Stat(tree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphaned worktree still present after cleanup: %v", err)
+	}
+
+	// Scope validation still applies: a missing repo is not a licence to delete
+	// anything outside the managed root.
+	outside := filepath.Join(root, "outside-managed-root")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	item.Worktree = outside
+	if err := manager.Cleanup(t.Context(), item); err == nil {
+		t.Fatal("a missing repo bypassed managed-root scope validation")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("path outside the managed root was removed: %v", err)
 	}
 }
 

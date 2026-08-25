@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"syscall"
+
+	"github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
 var (
@@ -177,19 +179,42 @@ func (s *ArtifactStore) NodeArtifact(workItemID, nodeID string) (Artifact, error
 	return artifact, nil
 }
 
-type Finding struct {
-	ID             string `json:"id"`
-	Persona        string `json:"persona"`
-	Severity       string `json:"severity"`
-	Location       string `json:"location,omitempty"`
-	Summary        string `json:"summary"`
-	Recommendation string `json:"recommendation"`
+// Findings and review feedback are the roundtable's vocabulary, and the
+// roundtable now owns them: it runs as a module process whose sources cannot
+// import internal/, so the definitions live there and the control plane refers
+// to them here. These are aliases, not copies -- one type, no conversion, and
+// no way for the two sides to drift apart.
+type Finding = panel.Finding
+type ReviewFeedback = panel.ReviewFeedback
+
+// RunConfig carries per-run operator choices made at admission, such as
+// reseating a pinned delegate for just this run ("factory this using sol").
+// It lives beside the run's artifacts so no schema migration is needed and
+// the choice survives restarts with the run.
+type RunConfig struct {
+	// DelegateAliases remaps pinned workflow delegates (from -> to) for this
+	// run only, taking precedence over the server-wide AIMEE_DELEGATE_ALIASES.
+	DelegateAliases map[string]string `json:"delegate_aliases,omitempty"`
 }
 
-type ReviewFeedback struct {
-	SchemaVersion int       `json:"schema_version"`
-	ArtifactHash  string    `json:"artifact_hash"`
-	Findings      []Finding `json:"findings"`
+func (s *ArtifactStore) PutRunConfig(workItemID string, config RunConfig) error {
+	content, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("encode run config: %w", err)
+	}
+	return s.replace(workItemID, "run-config.json", content)
+}
+
+func (s *ArtifactStore) RunConfig(workItemID string) (RunConfig, error) {
+	content, err := s.read(workItemID, "run-config.json")
+	if err != nil {
+		return RunConfig{}, err
+	}
+	var config RunConfig
+	if err := json.Unmarshal(content, &config); err != nil {
+		return RunConfig{}, fmt.Errorf("decode run config: %w", err)
+	}
+	return config, nil
 }
 
 func (s *ArtifactStore) PutFeedback(workItemID string, feedback ReviewFeedback) error {

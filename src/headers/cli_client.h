@@ -169,6 +169,10 @@ int cli_workspace_serve_loop(const char *workspace_id, const char *sock, const c
  * this client. start() returns 1 if a channel was started (remote configured),
  * 0 otherwise (incl. co-located). stop() tears it down. One channel per process. */
 int cli_workspace_reverse_channel_start(void);
+/* Refresh the active mirror snapshot from the client's current Git tree.
+ * Remote Git calls use this immediately before dispatch so a long-lived MCP
+ * bridge cannot keep operating on the checkout it saw at process startup. */
+int cli_workspace_reverse_channel_sync(void);
 void cli_workspace_reverse_channel_stop(void);
 
 /* Return the path to an already-running compatible server, or NULL if none
@@ -247,6 +251,12 @@ char *cli_v1_client_bearer(void);
  * Return 0 on success. POSIX only (no-op error on Windows). */
 int cli_workspace_add_remote(const char *path);
 int cli_index_scan_remote(int argc, char **argv);
+
+/* Ensure a local repository is present in a remote server's code index. This
+ * is intentionally narrower than `workspace add`: it does not register the
+ * caller's live tree as an executable workspace; it only pushes source files
+ * when the remote index does not already contain this project/root pair. */
+int cli_index_ensure_remote(const char *root);
 
 /* Launch metadata parsed from server output */
 typedef struct

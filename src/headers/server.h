@@ -49,11 +49,52 @@ typedef struct cJSON cJSON;
 #define SERVER_LISTEN_BACKLOG  128
 #define CONN_WRITE_DEADLINE_MS 10000 /* 10 seconds */
 
+/* The largest /v1 request body the HTTP listener will accept (the roundtable
+ * review path has its own, larger cap). Lives here rather than inside
+ * server_http.c so a CLIENT can refuse an oversized request itself and say why:
+ * a body over this is dropped by the listener, which the client could otherwise
+ * only report as "could not reach the endpoint" — blaming a server that is up
+ * and answering. The sibling LIMIT_* values below are already documented against
+ * it. */
+#define SHTTP_MAX_BODY (4 * 1024 * 1024)
+
+/* The roundtable review artifact is hard-limited where the CLI reads it --
+ * marshal_read_stdin_limited / marshal_read_file_limited in cli_v1_routes.c, all
+ * three call sites -- so a review body is that artifact plus a small envelope.
+ *
+ * THE ARTIFACT IS BOUNDED BY THE REVIEWING MODEL, NOT BY THE WIRE. It is the
+ * thing being read, so an artifact bigger than the context that has to hold it
+ * cannot be reviewed -- it is truncated or refused downstream, and accepting it
+ * here only moves the failure later. A 1M-token context holds roughly 3-4MB of
+ * code (code tokenizes at about 3-3.5 chars/token), so 8MB is already twice the
+ * largest artifact that can be read, with room for tokenizer variance and
+ * multi-byte UTF-8. 16MB was inherited from 842ff35656 ("preserve exact review
+ * artifacts"), a Go-side change that touched the C client limit in passing; it
+ * had no recorded rationale.
+ *
+ * For scale on this repo: the largest single source file is 0.25MB, and EVERY
+ * .c and .h in src/ concatenated is 32.8MB -- larger than even the 16MB limit
+ * this replaces, so "review the whole tree at once" never fit either way.
+ *
+ * The transport cap is TWICE the artifact: real review text and diffs escape at
+ * about 1.02x, and the doubling covers the envelope plus quote/backslash-dense
+ * content with room to spare.
+ *
+ * It was 128MB. That assumed a 6x blowup -- every byte a control character
+ * escaping to \u00XX -- and rounded up to 2^27, which made this route accept 32x
+ * what the rest of /v1 does. The artifact reaches cJSON as a NUL-terminated
+ * string, so the all-control-bytes case it was sized for cannot arrive intact.
+ * If an escape-dense artifact ever genuinely needs more room, raise
+ * ROUNDTABLE_MAX_ARTIFACT and let the cap follow; do not re-inflate the
+ * transport limit on its own, because the listener allocates against it. */
+#define ROUNDTABLE_MAX_ARTIFACT   (8 * 1024 * 1024)
+#define SHTTP_MAX_ROUNDTABLE_BODY (2 * ROUNDTABLE_MAX_ARTIFACT)
+
 /* Per-method payload size limits */
 #define LIMIT_MEMORY     (256 * 1024)        /* 256KB for memory operations */
 #define LIMIT_TOOL       (4 * 1024 * 1024)   /* 4MB for tool I/O */
 #define LIMIT_DELEGATE   (4 * 1024 * 1024)   /* 4MB: supports 2MB prompt-file + JSON overhead */
-#define LIMIT_ROUNDTABLE (128 * 1024 * 1024) /* 16MB artifact plus worst-case JSON escaping */
+#define LIMIT_ROUNDTABLE SHTTP_MAX_ROUNDTABLE_BODY /* artifact + JSON escaping; see above */
 #define LIMIT_CHAT       (512 * 1024)        /* 512KB for chat messages */
 #define LIMIT_INGEST     (1024 * 1024)       /* 1MB: client-pushed code files (kb req cap) */
 #define LIMIT_TRANSCRIPT                                                                           \
@@ -267,15 +308,20 @@ server_ctx_t *server_active_ctx(void);
 int server_send_response(server_conn_t *conn, cJSON *resp);
 int server_send_error(server_conn_t *conn, const char *message, const char *request_id);
 
-/* Fault classes for server_send_error_kind. The dispatch envelope otherwise says
- * only "error", which leaves anything mapping it to HTTP unable to separate a
- * caller's mistake from a server-side failure — so runtime-web called all of
- * them 502. Optional and additive: an unclassified error keeps the old
- * behaviour. */
+/* Fault classes for server_send_error_kind. The runtime-web process maps these
+ * over the event bus and the server adds its status to the dispatch envelope.
+ * Optional and additive: an unclassified or unavailable decision remains a
+ * generic 502 at the physical web boundary. */
 #define SERVER_ERR_INVALID_ARGUMENT  "invalid_argument"  /* caller sent bad/missing input */
 #define SERVER_ERR_NOT_FOUND         "not_found"         /* named thing does not exist */
 #define SERVER_ERR_PERMISSION_DENIED "permission_denied" /* caller not allowed */
 #define SERVER_ERR_UNAVAILABLE       "unavailable"       /* a dependency is down */
+
+/* The typed error as a VALUE, for commands that RETURN a result rather than write
+ * one. jo_err is not a substitute: it omits `kind` and the derived `http_status`,
+ * so splitting an RPC handler through it downgrades a typed error to an untyped
+ * one. Same function builds both forms, so they cannot drift. */
+cJSON *server_error_kind_json(const char *kind, const char *message, const char *request_id);
 
 int server_send_error_kind(server_conn_t *conn, const char *kind, const char *message,
                            const char *request_id);
@@ -325,6 +371,14 @@ int handle_memory_search(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
  * active identity is missing; caller must clear the client context. */
 int server_memory_scope_begin(cJSON *req);
 int handle_memory_store(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+/* The same command in the shape the core command table routes: takes arguments,
+ * RETURNS the result, writes to no connection. The handler above is now only the
+ * RPC surface's connection write. This is the shape every surface needs, and the
+ * lack of it is why capability surface was declared four separate times. */
+cJSON *memory_store_command(const cJSON *req);
+cJSON *memory_list_command(const cJSON *req);
+cJSON *memory_get_command(cJSON *req);
+cJSON *memory_delete_command(cJSON *req);
 int handle_memory_list(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_memory_stats(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_memory_get(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
@@ -338,6 +392,9 @@ int handle_index_find(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_index_list(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_index_blast_radius(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_index_structure(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_index_span(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_index_investigate(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_index_hybrid(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_index_find_callers(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_index_deps(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_blast_radius_preview(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
@@ -424,7 +481,9 @@ int handle_identity_diff(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_tool_execute(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_delegate(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_delegate_aggregate(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
-int handle_roundtable_review_proxy(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_roundtable_review(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_delegate_reservation_forget(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_delegate_cancel_unassigned(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 /* Deepening sweep (Part B): analysis-only — proposes seams per area and re-grounds
  * each against the live code index; returns a JSON report. Files nothing. */
 int handle_dev_sweep(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
@@ -464,6 +523,7 @@ int handle_coord_job_cancel(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_aux_config_show(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_config_show(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_config_get(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
+int handle_config_deploy_env(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_config_set(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_aux_test(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);
 int handle_delegate_reply(server_ctx_t *ctx, server_conn_t *conn, cJSON *req);

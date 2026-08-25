@@ -18,6 +18,13 @@
  * back to a heap-loaded config when no snapshot is live. */
 int config_field_read(size_t offset, size_t size, void *dst);
 
+int config_verify_cross_project(void)
+{
+   int v = 0;
+   config_field_read(offsetof(config_t, verify_cross_project), sizeof(v), &v);
+   return v;
+}
+
 int config_cross_verify(void)
 {
    int v = 0;
@@ -172,6 +179,13 @@ int config_compact_threshold(void)
    return v;
 }
 
+int config_compact_from_record(void)
+{
+   int v = 0;
+   config_field_read(offsetof(config_t, compact_from_record), sizeof(v), &v);
+   return v;
+}
+
 int config_compact_head_bytes(void)
 {
    int v = 0;
@@ -267,6 +281,13 @@ int config_fold_recall_enabled(void)
 {
    int v = 0;
    config_field_read(offsetof(config_t, fold_recall_enabled), sizeof(v), &v);
+   return v;
+}
+
+int config_fold_recall_inject(void)
+{
+   int v = 0;
+   config_field_read(offsetof(config_t, fold_recall_inject), sizeof(v), &v);
    return v;
 }
 
@@ -634,6 +655,13 @@ int config_cache_shaping_enabled(void)
    return v;
 }
 
+int config_extended_thinking_enabled(void)
+{
+   int v = 0;
+   config_field_read(offsetof(config_t, extended_thinking_enabled), sizeof(v), &v);
+   return v;
+}
+
 int config_dedup_window_seconds(void)
 {
    int v = 0;
@@ -981,19 +1009,5 @@ int config_kb_bg_ingest_enabled(void)
 {
    int v = 0;
    config_field_read(offsetof(config_t, kb_bg_ingest_enabled), sizeof(v), &v);
-   return v;
-}
-
-int config_kb_bg_ingest_interval_hours(void)
-{
-   int v = 0;
-   config_field_read(offsetof(config_t, kb_bg_ingest_interval_hours), sizeof(v), &v);
-   return v;
-}
-
-int config_kb_bg_watch_enabled(void)
-{
-   int v = 0;
-   config_field_read(offsetof(config_t, kb_bg_watch_enabled), sizeof(v), &v);
    return v;
 }

@@ -132,6 +132,13 @@ typedef struct
 
 typedef int (*route_handler_fn)(const route_req_t *rq, char *resp, int cap);
 
+/* First slab for a request body. Bodies are overwhelmingly small, so this is the
+ * only allocation most requests ever make; http_body_reserve (server_http_body.c)
+ * doubles from here as bytes actually arrive, rather than trusting the declared
+ * Content-Length. */
+#define HTTP_BODY_INITIAL_ALLOC (64u * 1024u)
+char *http_read_body(int fd, const char *prefix, int prefix_len, int declared, int *out_len);
+
 /* Narrow request-scoped keepalive used by the P5 management challenge. */
 void server_http_keepalive_set(int enabled);
 int server_http_keepalive_peek(void);
@@ -145,9 +152,14 @@ uint32_t server_http_enrollment_caps(uint32_t caps, int is_tcp, int mtls_authent
 void server_http_gzip_set(int enabled);
 int server_http_gzip_peek(void);
 
+/* One access-log line per served request (server_http_response.c). Demotes the
+ * shapes that are noise BY DESIGN — see the definition — so the log stays
+ * readable; everything else logs at INFO as before. */
+void server_http_log_access(const char *method, const char *path, int status,
+                            const char *request_id);
+
 /* PC2: CI webhook route handler (defined in server_ci_route.c). */
 int rh_dev_ci_event(const route_req_t *rq, char *resp, int cap);
-
 
 /* Workflow Actions lifecycle + project-file-browser route adapters + the shared
  * unsigned-long query-param helper — defined in server_http_config_routes.c
@@ -194,5 +206,13 @@ int rh_workspace_session_dir(const route_req_t *rq, char *resp, int cap);
 int rh_workspace_editor(const route_req_t *rq, char *resp, int cap);
 int rh_git_credentials(const route_req_t *rq, char *resp, int cap);
 int rh_git_sshkey(const route_req_t *rq, char *resp, int cap);
+
+/* Max flag arguments workspace_add_flag_args can write: --provider/--remote/--head. */
+#define WS_ADD_FLAG_ARGS_MAX 6
+
+/* Build the `workspace.add` flag arguments for a REST workspace registration.
+ * See the definition in workspace_register_args.c. Returns the count written. */
+int workspace_add_flag_args(const char *provider, const char *remote, const char *head,
+                            const char *out[], int out_cap);
 
 #endif /* SERVER_HTTP_INTERNAL_H */

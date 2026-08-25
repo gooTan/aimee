@@ -142,20 +142,9 @@ static int send_roundtable_mcp_result(server_conn_t *conn, cJSON *result)
 static int handle_mcp_roundtable_review(server_conn_t *conn, cJSON *args)
 {
    char err[320] = "";
-   cJSON *run = mcp_roundtable_submit(args, conn->capabilities, err, sizeof(err));
-   return run ? send_roundtable_mcp_result(conn, run)
-              : server_send_error(conn, err[0] ? err : "roundtable submission failed", NULL);
-}
-
-static int handle_mcp_roundtable_status(server_conn_t *conn, cJSON *args)
-{
-   uint32_t required = server_capability_for_method("roundtable.review");
-   if (required && conn && (conn->capabilities & required) == 0)
-      return server_send_error(conn, "forbidden: insufficient capabilities", NULL);
-   char err[320] = "";
-   cJSON *run = mcp_roundtable_status(args, err, sizeof(err));
-   return run ? send_roundtable_mcp_result(conn, run)
-              : server_send_error(conn, err[0] ? err : "roundtable status failed", NULL);
+   cJSON *verdict = mcp_roundtable_review(args, conn->capabilities, err, sizeof(err));
+   return verdict ? send_roundtable_mcp_result(conn, verdict)
+                  : server_send_error(conn, err[0] ? err : "roundtable review failed", NULL);
 }
 cJSON *tool_get_help(cJSON *args)
 {
@@ -707,8 +696,18 @@ cJSON *tool_memory_get(cJSON *args)
    if (id <= 0)
       return text_content("error: missing memory id or memory:<id> handle");
 
+   /* The EVENT-time question. This used to call kb_client_memory_get, which only
+    * answers what the memory says NOW, and ignored as_of entirely -- the parameter
+    * was not even in the schema, so an agent could not ask. A memory superseded
+    * last week therefore read exactly like a current one: no error, no verdict,
+    * maximum confidence, wrong. The CLI has answered this since --as-of shipped;
+    * the agent surface silently did not. */
+   const cJSON *jas_of = cJSON_GetObjectItemCaseSensitive(args, "as_of");
+   const char *as_of = cJSON_IsString(jas_of) ? jas_of->valuestring : NULL;
+
    memory_t m;
-   int memory_rc = kb_client_memory_get(id, &m);
+   kb_valid_at_t verdict = KB_VALID_AT_UNASKED;
+   int memory_rc = kb_client_memory_get_as_of(id, as_of, &m, &verdict);
    if (memory_rc > 0)
       return kb_empty_result_content("memory not found");
    if (memory_rc < 0)
@@ -718,6 +717,13 @@ cJSON *tool_memory_get(cJSON *args)
    dstr_init(&d);
    dstr_appendf(&d, "Memory: memory:%lld\nTier: %s\nKind: %s\nKey: %s\nConfidence: %.3f\n",
                 (long long)m.id, m.tier, m.kind, m.key, m.confidence);
+   /* Answer beside the question: a verdict with no timestamp is unreadable, and
+    * "unknown" is kept distinct from "no" -- could not tell and was not in force
+    * are different answers, and collapsing them is how a hedge becomes a denial. */
+   if (verdict != KB_VALID_AT_UNASKED && as_of)
+      dstr_appendf(&d, "Valid at %s: %s\n", as_of,
+                   verdict == KB_VALID_AT_UNKNOWN ? "unknown"
+                                                  : (verdict == KB_VALID_AT_YES ? "yes" : "no"));
    if (m.headline[0])
       dstr_appendf(&d, "Headline: %s\n", m.headline);
    if (m.updated_at[0])
@@ -1005,22 +1011,16 @@ cJSON *tool_list_hosts(void)
    return text_content(buf);
 }
 
-cJSON *smcp_tool_find_symbol(cJSON *args)
+/* Look one identifier up and append its section to `buf`. Split out of
+ * smcp_tool_find_symbol so a batched call can loop it: resolving five symbols
+ * cost five round trips, and a round trip re-sends the whole conversation
+ * prefix. Returns the new write position, or -1 if the index lookup itself
+ * failed (the caller decides whether that kills the batch). */
+static int fs_append_one(const char *ident, const char *project, int all_projects, char *buf,
+                         int pos, int cap)
 {
-   cJSON *jid = cJSON_GetObjectItemCaseSensitive(args, "identifier");
-   if (!cJSON_IsString(jid))
-      return text_content("error: missing 'identifier' parameter");
-
-   int all_projects = mcp_code_scope_all(args);
-   if (all_projects < 0)
-      return text_content("error: scope must be 'current' or 'all'");
-   const char *project = mcp_code_project_from_args(args);
-   if (!all_projects && !project)
-      return text_content("error: no active project determined from cwd; pass 'project' or "
-                          "scope='all' explicitly");
-
    term_hit_t hits[20];
-   int count = kb_client_index_find_scoped(project, all_projects, jid->valuestring, hits, 20);
+   int count = kb_client_index_find_scoped(project, all_projects, ident, hits, 20);
    if (count < 0)
    {
       /* Name the dependency that actually failed. "symbol index unavailable"
@@ -1031,41 +1031,102 @@ cJSON *smcp_tool_find_symbol(cJSON *args)
                 "index_find_scoped failed: status=%s project=%s all_projects=%d",
                 kb_client_result_status_name(kb_client_last_result_status()),
                 project ? project : "(none)", all_projects);
-      return kb_last_result_content("code index lookup failed; see result_status for whether the "
-                                    "knowledge service was unreachable, unauthorized, or the "
-                                    "scope did not resolve");
+      return -1;
    }
    int matched = 0;
    for (int i = 0; i < count; i++)
       if (all_projects || !project || strcmp(hits[i].project, project) == 0)
          matched++;
 
-   char buf[4096];
-   int pos = 0;
    if (matched == 0)
-      pos = mcp_appendf(buf, pos, (int)sizeof(buf), "No symbol found for '%s'%s%s%s",
-                        jid->valuestring, project ? " in project '" : "", project ? project : "",
-                        project ? "'" : "");
-   else
+      return mcp_appendf(buf, pos, cap, "No symbol found for '%s'%s%s%s\n", ident,
+                         project ? " in project '" : "", project ? project : "",
+                         project ? "'" : "");
+
+   pos = mcp_appendf(buf, pos, cap, "Found %d match(es) for '%s':\n\n", matched, ident);
+   for (int i = 0; i < count && pos < cap - 256; i++)
    {
-      pos = mcp_appendf(buf, pos, (int)sizeof(buf), "Found %d match(es) for '%s':\n\n", matched,
-                        jid->valuestring);
-      for (int i = 0; i < count && pos < (int)sizeof(buf) - 256; i++)
+      if (!all_projects && project && strcmp(hits[i].project, project) != 0)
+         continue;
+      /* Show the body span (line-line_end) when known, so a `file::symbol`
+       * read can fetch exactly that range; fall back to the start line. */
+      if (hits[i].line_end > hits[i].line)
+         pos = mcp_appendf(buf, pos, cap, "- %s:%d-%d [%s] in project '%s'\n", hits[i].file_path,
+                           hits[i].line, hits[i].line_end, hits[i].kind, hits[i].project);
+      else
+         pos = mcp_appendf(buf, pos, cap, "- %s:%d [%s] in project '%s'\n", hits[i].file_path,
+                           hits[i].line, hits[i].kind, hits[i].project);
+   }
+   return pos;
+}
+
+cJSON *smcp_tool_find_symbol(cJSON *args)
+{
+   cJSON *jid = cJSON_GetObjectItemCaseSensitive(args, "identifier");
+   cJSON *jids = cJSON_GetObjectItemCaseSensitive(args, "identifiers");
+   int batch = cJSON_IsArray(jids) && cJSON_GetArraySize(jids) > 0;
+   if (!batch && !cJSON_IsString(jid))
+      return text_content("error: missing 'identifier' parameter");
+
+   int all_projects = mcp_code_scope_all(args);
+   if (all_projects < 0)
+      return text_content("error: scope must be 'current' or 'all'");
+   const char *project = mcp_code_project_from_args(args);
+   if (!all_projects && !project)
+      return text_content("error: no active project determined from cwd; pass 'project' or "
+                          "scope='all' explicitly");
+
+   /* One section per identifier, so the batch buffer scales with the request. */
+   static const int FS_BUF = 16384;
+   char *buf = calloc(1, (size_t)FS_BUF);
+   if (!buf)
+      return text_content("error: out of memory");
+   int pos = 0;
+
+   if (!batch)
+   {
+      pos = fs_append_one(jid->valuestring, project, all_projects, buf, pos, FS_BUF);
+      if (pos < 0)
       {
-         if (!all_projects && project && strcmp(hits[i].project, project) != 0)
-            continue;
-         /* Show the body span (line-line_end) when known, so a `file::symbol`
-          * read can fetch exactly that range; fall back to the start line. */
-         if (hits[i].line_end > hits[i].line)
-            pos = mcp_appendf(buf, pos, (int)sizeof(buf), "- %s:%d-%d [%s] in project '%s'\n",
-                              hits[i].file_path, hits[i].line, hits[i].line_end, hits[i].kind,
-                              hits[i].project);
-         else
-            pos = mcp_appendf(buf, pos, (int)sizeof(buf), "- %s:%d [%s] in project '%s'\n",
-                              hits[i].file_path, hits[i].line, hits[i].kind, hits[i].project);
+         free(buf);
+         return kb_last_result_content("code index lookup failed; see result_status for whether "
+                                       "the knowledge service was unreachable, unauthorized, or "
+                                       "the scope did not resolve");
       }
    }
-   return text_content(buf);
+   else
+   {
+      cJSON *it = NULL;
+      int failed = 0;
+      cJSON_ArrayForEach(it, jids)
+      {
+         if (!cJSON_IsString(it) || !it->valuestring[0])
+            continue; /* skip the malformed entry; the rest of the batch still answers */
+         if (pos >= FS_BUF - 512)
+         {
+            pos = mcp_appendf(buf, pos, FS_BUF, "\n(truncated: remaining identifiers omitted)\n");
+            break;
+         }
+         int next = fs_append_one(it->valuestring, project, all_projects, buf, pos, FS_BUF);
+         if (next < 0)
+         {
+            /* One lookup failing must not discard the ones that worked -- say so
+             * against that identifier and keep going. */
+            failed++;
+            next = mcp_appendf(buf, pos, FS_BUF, "Lookup failed for '%s' (see server log)\n",
+                               it->valuestring);
+         }
+         pos = next;
+         pos = mcp_appendf(buf, pos, FS_BUF, "\n");
+      }
+      if (pos == 0)
+         pos = mcp_appendf(buf, pos, FS_BUF, "No usable identifiers in 'identifiers'");
+      (void)failed;
+   }
+
+   cJSON *out = text_content(buf);
+   free(buf);
+   return out;
 }
 
 cJSON *smcp_tool_search_docs(cJSON *args)
@@ -1485,14 +1546,13 @@ cJSON *tool_job_status(cJSON *args)
        "| Invalid handoffs | %d |\n| Manual integration events | %d |\n"
        "| Reviewer blocking findings | %d |\n| Supervisor work remaining | %d decisions |\n"
        "| Verdict | %s |\n| Recommendation | %s |\n",
-       delegate_economics_cost_model_label(), econ.delegate_count, econ.tier_counts[0],
-       econ.tier_counts[1], econ.tier_counts[2], econ.tier_counts[3], econ.unknown_tier_count,
+       econ.cost_model_label, econ.delegate_count, econ.tier_counts[0], econ.tier_counts[1],
+       econ.tier_counts[2], econ.tier_counts[3], econ.unknown_tier_count,
        econ.delegate_tokens_estimated, econ.tokenized_delegate_results == 0 ? " (unavailable)" : "",
        econ.supervisor_prompt_tokens_estimated, econ.delegates_with_focused_tests,
        econ.delegate_count, econ.valid_handoffs, econ.handoff_count, econ.invalid_handoffs,
        econ.manual_integration_events, econ.reviewer_findings_blocking,
-       econ.supervisor_actions_required, delegate_economics_verdict_text(econ.verdict),
-       econ.recommendation);
+       econ.supervisor_actions_required, econ.verdict_label, econ.recommendation);
    char patch_brief[1024];
    pos = mcp_appendf(buf, pos, (int)sizeof(buf), "\n### Patch coordinator\n\n```text\n%s\n```\n",
                      delegate_patch_coordinator_brief(&patches, patch_brief, sizeof(patch_brief)));
@@ -1539,14 +1599,30 @@ static const struct
    git_tool_fn fn;
    int mutating;
 } git_tool_table[] = {
-    {"git_status", handle_git_status, 0}, {"git_commit", handle_git_commit, 1},
-    {"git_push", handle_git_push, 1},     {"git_branch", handle_git_branch, 0},
-    {"git_log", handle_git_log, 0},       {"git_diff_summary", handle_git_diff_summary, 0},
-    {"git_pr", handle_git_pr, 1},         {"git_pull", handle_git_pull, 1},
-    {"git_clone", handle_git_clone, 0},   {"git_stash", handle_git_stash, 0},
-    {"git_tag", handle_git_tag, 0},       {"git_fetch", handle_git_fetch, 0},
-    {"git_reset", handle_git_reset, 1},   {"git_restore", handle_git_restore, 1},
+    {"git_status", handle_git_status, 0},
+    {"git_commit", handle_git_commit, 1},
+    {"git_push", handle_git_push, 1},
+    {"git_branch", handle_git_branch, 0},
+    {"git_log", handle_git_log, 0},
+    {"git_diff_summary", handle_git_diff_summary, 0},
+    {"git_pr", handle_git_pr, 1},
+    {"git_pull", handle_git_pull, 1},
+    {"git_clone", handle_git_clone, 0},
+    {"git_stash", handle_git_stash, 0},
+    {"git_tag", handle_git_tag, 0},
+    {"git_fetch", handle_git_fetch, 0},
+    {"git_reset", handle_git_reset, 1},
+    {"git_restore", handle_git_restore, 1},
     {"git_issue", handle_git_issue, 0},
+    {"git_merge", handle_git_merge, 1},
+    {"git_rebase", handle_git_rebase, 1},
+    {"git_cherry_pick", handle_git_cherry_pick, 1},
+    {"git_revert", handle_git_revert, 1},
+    {"git_sync", handle_git_sync, 1},
+    {"git_add", handle_git_add, 1},
+    {"git_switch", handle_git_switch, 0},
+    {"git_checkout", handle_git_checkout, 1},
+    {"git_fork", handle_git_fork, 1},
 };
 
 static cJSON *dispatch_git_tool(server_ctx_t *ctx, server_conn_t *conn, const char *tool,
@@ -1565,35 +1641,49 @@ static cJSON *dispatch_git_tool(server_ctx_t *ctx, server_conn_t *conn, const ch
    if (sid && sid[0])
       session_id_set_override(sid);
 
-   /* A `mirror`-workspace cwd points at the CLIENT's path, which does not exist
+   /* A `mirror`-workspace target points at the CLIENT's path, which does not exist
     * server-side; remap it to the reconstructed server-side worktree (driving the
     * mirror lifecycle: ensure + reconstruct) so the git tool — e.g. `/pr` from the
-    * gateway — operates on the real tree. No-op for shared/detached workspaces. */
+    * gateway — operates on the real tree. `path` is authoritative for every git
+    * operation except clone, whose path is a destination. No-op for
+    * shared/detached workspaces. */
+   cJSON *jpath = cJSON_GetObjectItemCaseSensitive(args, "path");
+   cJSON *jcwd = cJSON_GetObjectItemCaseSensitive(args, "cwd");
+   const char *path_arg = cJSON_IsString(jpath) ? jpath->valuestring : NULL;
+   const char *cwd_arg = cJSON_IsString(jcwd) ? jcwd->valuestring : NULL;
+   const char *git_target = workspace_turn_git_target(tool, path_arg, cwd_arg);
+   int target_is_path = git_target && path_arg && git_target == path_arg;
+   int clone_has_destination = strcmp(tool, "git_clone") == 0 && path_arg && path_arg[0];
+   const char *git_target_key = target_is_path ? "path" : "cwd";
+   char mirror_target[MAX_PATH_LEN] = "";
+   if (git_target &&
+       workspace_turn_resolve_mirror_cwd(git_target, mirror_target, sizeof(mirror_target)))
    {
-      cJSON *jcwd = cJSON_GetObjectItemCaseSensitive(args, "cwd");
-      if (cJSON_IsString(jcwd) && jcwd->valuestring[0])
-      {
-         char work_cwd[MAX_PATH_LEN];
-         if (workspace_turn_resolve_mirror_cwd(jcwd->valuestring, work_cwd, sizeof(work_cwd)))
-            cJSON_ReplaceItemInObject(args, "cwd", cJSON_CreateString(work_cwd));
-      }
+      cJSON_ReplaceItemInObject(args, git_target_key, cJSON_CreateString(mirror_target));
+      git_target = mirror_target;
    }
 
-   /* A `detached`-workspace cwd ALSO points at the CLIENT's path (the workspace
+   /* A `detached`-workspace target ALSO points at the CLIENT's path (the workspace
     * lives on the serving client), so there is nothing to chdir into locally.
-    * Bind the detached provider for this cwd's workspace — exactly as the
+    * Bind the detached provider for this target's workspace — exactly as the
     * chat-turn boundary does — so the git tool's rev-parse / exec marshal over
     * the runner channel to the serving client, which holds the real tree (and
-    * its own creds). No-op for shared/mirror/unregistered cwds (returns 0). */
-   int detached_bound = 0;
-   {
-      cJSON *jcwd = cJSON_GetObjectItemCaseSensitive(args, "cwd");
-      if (cJSON_IsString(jcwd) && jcwd->valuestring[0])
-         detached_bound = workspace_turn_bind_active(jcwd->valuestring);
-   }
+    * its own creds). No-op for shared/mirror/unregistered targets (returns 0). */
+   int detached_bound = git_target ? workspace_turn_bind_active(git_target) : 0;
 
    char *mismatch_err = NULL;
-   int resolved = mcp_chdir_git_root(NULL, 0, args, &mismatch_err);
+   cJSON *resolve_args = args;
+   if (clone_has_destination)
+   {
+      resolve_args = cJSON_Duplicate(args, 1);
+      if (resolve_args)
+         cJSON_DeleteItemFromObjectCaseSensitive(resolve_args, "path");
+      else
+         resolve_args = args;
+   }
+   int resolved = mcp_chdir_git_root(NULL, 0, resolve_args, &mismatch_err);
+   if (resolve_args != args)
+      cJSON_Delete(resolve_args);
 
    if (resolved < 0)
    {
@@ -1604,6 +1694,12 @@ static cJSON *dispatch_git_tool(server_ctx_t *ctx, server_conn_t *conn, const ch
          session_id_clear_override();
       if (is_verify)
          conn_active_verify(conn, verify_sid, 0);
+      if (resolved == -2)
+         return text_content(
+             "error: requested git path is outside the session checkout or unavailable through "
+             "the registered workspace runner. The explicit path was not ignored; refusing to "
+             "fall back to another checkout. Rebind/adopt that workspace, mount it into the "
+             "Aimee session, or serve it as a detached workspace.");
       return text_content("error: session worktree is unavailable (chdir failed). Refusing to run "
                           "git operation on the main repository.");
    }
@@ -1618,7 +1714,6 @@ static cJSON *dispatch_git_tool(server_ctx_t *ctx, server_conn_t *conn, const ch
          is_mutating = git_tool_table[i].mutating;
          break;
       }
-
    if (mismatch_err && is_mutating)
    {
       run_cmd_set_cwd(NULL);
@@ -1996,14 +2091,6 @@ static int handle_mcp_call_inner(server_ctx_t *ctx, server_conn_t *conn, cJSON *
    if (strcmp(tool, "roundtable_review") == 0)
    {
       int rc = handle_mcp_roundtable_review(conn, jargs);
-      if (owns_jargs)
-         cJSON_Delete(jargs);
-      return rc;
-   }
-
-   if (strcmp(tool, "roundtable_status") == 0)
-   {
-      int rc = handle_mcp_roundtable_status(conn, jargs);
       if (owns_jargs)
          cJSON_Delete(jargs);
       return rc;

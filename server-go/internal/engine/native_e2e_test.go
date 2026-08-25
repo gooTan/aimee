@@ -28,8 +28,11 @@ func (a *e2eAgents) Delegate(_ context.Context, request DelegateRequest) (Delega
 		return DelegateResult{Response: fmt.Sprintf(`{"run_id":%q,"artifact_hash":%q,"artifact_stage":%q,"original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`,
 			request.WorkItemID, request.ArtifactHash, request.ArtifactStage)}, nil
 	case "draft":
+		if strings.Contains(request.Prompt, "Prepare a concise ContextBrief") {
+			return DelegateResult{Response: `{"schema_version":1,"summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
+		}
 		if strings.Contains(request.Prompt, "PACKET PLAN") || strings.Contains(request.Prompt, "Decompose the complete approved plan") {
-			return DelegateResult{Response: `{"schema_version":1,"packets":[{"packet_id":"p1","summary":"implement feature","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature exists"]}]}`}, nil
+			return DelegateResult{Response: `{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"implement feature","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature exists"],"implementation_kind":"general"}]}`}, nil
 		}
 		if strings.Contains(request.Prompt, "Scope the engineering task") {
 			return DelegateResult{Response: `{"schema_version":1,"status":"unconfirmed","summary":"implement feature","rationale":"proposal","acceptance_criteria":["feature exists"]}`}, nil
@@ -84,8 +87,16 @@ func (r *transientGateRunner) Run(ctx context.Context, request StepRequest) (Ste
 }
 
 type e2eForge struct {
-	mu    sync.Mutex
-	opens []PullRequestSpec
+	mu       sync.Mutex
+	opens    []PullRequestSpec
+	comments []ReviewComment
+}
+
+func (f *e2eForge) ReviewComments(_ context.Context, _ string, _ string, comments []ReviewComment) error {
+	f.mu.Lock()
+	f.comments = append(f.comments, comments...)
+	f.mu.Unlock()
+	return nil
 }
 
 func (*e2eForge) Push(ctx context.Context, _, workdir, branch string) error {
@@ -279,7 +290,7 @@ nodes:
 	}
 	// Every gate in this workflow names "default", and a named roundtable must
 	// resolve to a saved preset, so the end-to-end run needs a real one.
-	runner.SetRoundtableStore(unpinnedTestRoundtable(t, "architect"))
+	withPanel(runner, unpinnedTestRoundtable(t, "architect"))
 	recoveringRunner := &transientGateRunner{next: runner, failures: []string{"roundtable_discussion", "roundtable_chairman"}}
 	eng, err := New(store, artifacts, workflowDir, recoveringRunner)
 	if err != nil {

@@ -22,7 +22,7 @@
 #include "anthropic_ingress.h"
 #include "cJSON.h"
 #include <aimee/delegates/delegate_driver.h>
-#include "economizer_wire_snapshot.h"
+#include "wire_fence.h"
 #include "gateway_mutate_wire.h"
 #include "server_http_identity.h"
 #include <aimee/gateway/gateway_policy.h>
@@ -48,14 +48,17 @@
 
 /* Resolve aimee's primary agent (the configured default, else the first enabled
  * agent — see agent_default_primary). Claude Code's requested model is
- * intentionally ignored — switching models is `aimee primary`. acfg is
- * caller-owned and must outlive the returned pointer (it indexes into acfg).
- * Returns NULL when no usable agent exists → caller reports 503. */
-static agent_t *resolve_primary(agent_config_t *acfg)
+ * intentionally ignored — switching models is `aimee primary`. Non-zero when no
+ * usable agent exists → caller reports 503.
+ *
+ * Fills `out` with the primary agent; returns 0 on success.
+ *
+ * Took an agent_config_t* purely so it could hand back a pointer into it, which
+ * put 350,968 bytes on the stack of every /v1/messages request to obtain one
+ * 16,720-byte agent. */
+static int resolve_primary(agent_t *out)
 {
-   if (agent_load_config(acfg) != 0)
-      return NULL;
-   return agent_default_primary(acfg);
+   return agent_registry_default_primary(out);
 }
 
 /* Mint a "msg_<epoch>" id for the response/stream. */
@@ -432,7 +435,7 @@ static char *anthropic_build_prov_body(cJSON *req, const delegate_driver_t *driv
 static int messages_buffered(const char *body, char *resp, int cap)
 {
    cJSON *req = cJSON_Parse((body && body[0]) ? body : "{}");
-   agent_config_t acfg;
+   agent_t agbuf;
    agent_t *ag;
    cJSON *messages = NULL, *tools = NULL, *provider_resp = NULL, *out = NULL;
    char *system_text = NULL, *prov_body = NULL, *response = NULL;
@@ -442,7 +445,7 @@ static int messages_buffered(const char *body, char *resp, int cap)
    char msg_id[48];
    const delegate_driver_t *driver;
    parsed_response_t parsed = {0}; /* freed only on the success path, but init defensively */
-   econ_wire_snapshot_t *wire_snapshot = NULL;
+   wire_fence_t *wire_snapshot = NULL;
    gw_mutate_ctx_t gwmc;
    int status, http_status, rc;
    const char *model;
@@ -484,7 +487,7 @@ static int messages_buffered(const char *body, char *resp, int cap)
     * AIMEE_IR_SHADOW is set; never affects the response. */
    aimee_ir_shadow_observe_request(req, AIMEE_WIRE_ANTHROPIC);
 
-   ag = resolve_primary(&acfg);
+   ag = resolve_primary(&agbuf) == 0 ? &agbuf : NULL;
    if (!ag)
    {
       cJSON_Delete(req);
@@ -511,8 +514,9 @@ static int messages_buffered(const char *body, char *resp, int cap)
     * the pointer cached above (line ~397) could now dangle. */
    model = jo_cstr(req, "model");
 
-   /* Only AGGRESSIVE and only an OpenAI-family upstream. Native Anthropic
-    * requests keep the client's exact cache prefix and cache_control layout. */
+   /* Only AGGRESSIVE. Native Anthropic requests are mutated too now: the gateway
+    * holds a per-session freeze, so a folded prefix stays byte-identical after the
+    * turn it first engages, which is what the client's cache prefix needs. */
    if (gw_mutate_upstream_ok(parity))
    {
       char *mut_sys = anthropic_system_to_text(req);
@@ -551,12 +555,12 @@ static int messages_buffered(const char *body, char *resp, int cap)
                                          responses_wire);
    const char *pristine_body = prov_body ? prov_body : "{}";
    int economizer_active = econ_mode_current() != ECON_MODE_OFF;
-   econ_wire_route_t wire_route = parity           ? ECON_WIRE_ANTHROPIC_MESSAGES
-                                  : responses_wire ? ECON_WIRE_OPENAI_RESPONSES
-                                                   : ECON_WIRE_OPENAI_CHAT;
-   econ_wire_bytes_t wire_body;
-   if (econ_wire_select(economizer_active, wire_route, pristine_body, strlen(pristine_body),
-                        &wire_snapshot, &wire_body) != 0)
+   wire_fence_route_t wire_route = parity           ? WIRE_FENCE_ANTHROPIC_MESSAGES
+                                   : responses_wire ? WIRE_FENCE_OPENAI_RESPONSES
+                                                    : WIRE_FENCE_OPENAI_CHAT;
+   wire_fence_bytes_t wire_body;
+   if (wire_fence_select(economizer_active, wire_route, pristine_body, strlen(pristine_body),
+                         &wire_snapshot, &wire_body) != 0)
    {
       status = write_error(resp, cap, 503, "api_error", "economizer wire fence unavailable",
                            AIMEE_ERR_REQUEST_PIPELINE);
@@ -616,12 +620,13 @@ static int messages_buffered(const char *body, char *resp, int cap)
       /* P2c (response-side tool policing, buffered). Drops any `tool_use` block
        * the model emitted despite the request-side strip, before the audit row
        * reads parsed.stop_reason (so the audit log matches the wire) and before
-       * anthropic_response_from_parsed renders the reply. Gated internally on
-       * gateway_prevent_subagents (the predicate + the police function are both
-       * no-ops at the default config). Drop count is plumbed through to the
+       * anthropic_response_from_parsed renders the reply. The already-resolved
+       * gateway policy gate is sent to the event-bus governance module; no
+       * in-process decision fallback remains. Drop count is plumbed through to the
        * same pipeline-runner total the request-side strip already emits; a
        * future P2b audit pass surfaces both at once. */
-      gw_response_run_governance(&parsed, anthropic_governance_enabled());
+      gw_response_run_governance(&parsed, anthropic_governance_enabled(),
+                                 gateway_prevent_subagents_enabled());
 
       /* Cost accounting: the Anthropic /v1/messages ingress is a raw provider
        * proxy (no agent_log_call), so record this turn's spend, billed against
@@ -641,7 +646,7 @@ static int messages_buffered(const char *body, char *resp, int cap)
    agent_free_parsed_response(&parsed);
 
 cleanup:
-   econ_wire_snapshot_destroy(wire_snapshot);
+   wire_fence_destroy(wire_snapshot);
    gw_mutate_ctx_free(&gwmc);
    cJSON_Delete(out);
    cJSON_Delete(provider_resp);
@@ -692,6 +697,13 @@ typedef struct
    int output_tokens;
    int cache_write_tokens;
    int cache_read_tokens;
+   /* Observation-only reasoning tap (see relay_observe_reasoning). Parsing the
+    * relayed SSE does not mutate it, so exact-parity passthrough is unaffected. */
+   anthropic_backend_stream_state_t ir_bst;
+   char *reasoning;         /* accumulated thinking text, NULL until any arrives */
+   size_t reasoning_len;    /* bytes used (excluding the NUL) */
+   int reasoning_truncated; /* hit RELAY_REASONING_MAX: present but incomplete */
+   int reasoning_giveup;    /* parser rejected the stream: nothing trustworthy */
 } anthropic_relay_ctx_t;
 
 static int prov_line_cb(const char *line, size_t len, void *ud)
@@ -712,12 +724,14 @@ static int prov_line_cb(const char *line, size_t len, void *ud)
          cJSON *chunk = cJSON_Parse(p);
          if (chunk)
          {
-            /* A finish chunk closes EVERY open block (text + up to
+            /* A finish chunk closes EVERY open block (reasoning + text + up to
              * AIMEE_STREAM_MAX_TOOLS tool blocks) then TURN_STOP in one call, and
              * a chunk carrying many tool_calls opens as many; size the buffer to
              * hold the worst case so the terminal TURN_STOP is never truncated
-             * (which would hang the client's SSE reader). */
-            aimee_delta_t deltas[2 * AIMEE_STREAM_MAX_TOOLS + 4];
+             * (which would hang the client's SSE reader). The +8 headroom covers a
+             * reasoning block's START/DELTA/STOP on top of the text + tool worst
+             * case, since one chunk may carry reasoning and content together. */
+            aimee_delta_t deltas[2 * AIMEE_STREAM_MAX_TOOLS + 8];
             int n = openai_chunk_to_deltas(chunk, &c->ir_ost, deltas,
                                            (int)(sizeof deltas / sizeof deltas[0]));
             for (int i = 0; i < n; i++)
@@ -771,6 +785,78 @@ static int relay_append_data(anthropic_relay_ctx_t *c, const char *data)
    return 0;
 }
 
+/* The model's reasoning is accumulated only to be MATCHED against, never replayed,
+ * so it is bounded: the cap costs recall of late thought, where an unbounded buffer
+ * would let a long chain grow the proxy's per-stream memory without limit. A capped
+ * buffer is FLAGGED, never silently short. */
+#define RELAY_REASONING_MAX 16384
+
+static void relay_append_reasoning(anthropic_relay_ctx_t *c, const char *s)
+{
+   size_t add = strlen(s);
+   if (!add)
+      return;
+   if (c->reasoning_len >= RELAY_REASONING_MAX)
+   {
+      c->reasoning_truncated = 1;
+      return;
+   }
+   if (add > RELAY_REASONING_MAX - c->reasoning_len)
+   {
+      add = RELAY_REASONING_MAX - c->reasoning_len;
+      c->reasoning_truncated = 1;
+   }
+   if (!c->reasoning)
+   {
+      /* allocated lazily: a turn with no thinking pays nothing */
+      c->reasoning = malloc(RELAY_REASONING_MAX + 1);
+      if (!c->reasoning)
+         return;
+      c->reasoning[0] = '\0';
+   }
+   memcpy(c->reasoning + c->reasoning_len, s, add);
+   c->reasoning_len += add;
+   c->reasoning[c->reasoning_len] = '\0';
+}
+
+/* Observation-only tap: feed the reassembled Anthropic SSE through the IR backend
+ * parser and accumulate the model's reasoning. PARSING IS NOT MUTATING -- the caller
+ * still emits the provider's bytes verbatim, so the exact-parity passthrough this
+ * relay exists to provide is untouched.
+ *
+ * On ANY parser rejection the accumulated text is discarded and the tap gives up for
+ * the rest of the stream. Half-parsed reasoning is worse than none: a consumer that
+ * acts on a fragment it cannot trust is exactly the failure this feature must avoid,
+ * so the tap abstains rather than hand on something questionable. */
+static void relay_observe_reasoning(anthropic_relay_ctx_t *c, const char *event, const char *data)
+{
+   if (c->reasoning_giveup || !data || !data[0])
+      return;
+   /* Hot path: a text content_block_delta arrives once per token chunk, and parsing
+    * every one would put a JSON parse in front of every streamed token. A real
+    * thinking event always contains the substring, so this pre-filter is
+    * conservative -- it can cost a needless parse, never a missed delta. */
+   if (strcmp(event, "content_block_delta") == 0 && !strstr(data, "thinking"))
+      return;
+   cJSON *payload = cJSON_Parse(data);
+   if (!payload)
+      return; /* unparseable: still relayed verbatim, just nothing to observe */
+   aimee_delta_t d[2];
+   int n = anthropic_stream_to_deltas(event, payload, &c->ir_bst, d, 2);
+   if (n < 0)
+   {
+      c->reasoning_giveup = 1;
+      free(c->reasoning);
+      c->reasoning = NULL;
+      c->reasoning_len = 0;
+   }
+   for (int i = 0; i < n; i++)
+      if (d[i].type == AIMEE_DELTA_BLOCK_DELTA && d[i].kind == AIMEE_BLK_THINKING &&
+          d[i].text_delta)
+         relay_append_reasoning(c, d[i].text_delta);
+   cJSON_Delete(payload);
+}
+
 /* Observe usage on the relayed Anthropic SSE without altering it. message_start
  * carries input + cache tokens under message.usage; message_delta carries the
  * final cumulative output_tokens under usage. */
@@ -807,7 +893,8 @@ static void relay_flush(anthropic_relay_ctx_t *c)
    if (c->data_len > 0 && strcmp(c->data, "[DONE]") != 0)
    {
       relay_capture_usage(c, event, c->data);
-      c->emit(c->emit_ctx, event, c->data);
+      relay_observe_reasoning(c, event, c->data);
+      c->emit(c->emit_ctx, event, c->data); /* provider bytes, unchanged */
       c->emitted++;
    }
    c->event[0] = '\0';
@@ -897,7 +984,8 @@ static void messages_stream_buffered_replay(const char *url, const char *auth,
             free(buf_resp);
             return;
          }
-         gw_response_run_governance(&parsed, anthropic_governance_enabled());
+         gw_response_run_governance(&parsed, anthropic_governance_enabled(),
+                                    gateway_prevent_subagents_enabled());
          emit_message_as_sse(&parsed, msg_id, model, emit, ctx);
          /* Cost accounting (mirror the buffered path). */
          if ((parsed.prompt_tokens > 0 || parsed.completion_tokens > 0) &&
@@ -918,7 +1006,8 @@ static void messages_stream_buffered_replay(const char *url, const char *auth,
             /* Slice 2 (canonical-IR): shadow-compare legacy vs IR response parse
              * (RESP_MATCH / RESP_MISMATCH). No-op unless AIMEE_IR_SHADOW. */
             aimee_ir_shadow_compare_response(&parsed, provider_resp, shadow_provider_wire(driver));
-            gw_response_run_governance(&parsed, anthropic_governance_enabled());
+            gw_response_run_governance(&parsed, anthropic_governance_enabled(),
+                                       gateway_prevent_subagents_enabled());
             emit_message_as_sse(&parsed, msg_id, model, emit, ctx);
             /* Cost accounting (mirror the buffered path). */
             if ((parsed.prompt_tokens > 0 || parsed.completion_tokens > 0) &&
@@ -967,6 +1056,7 @@ static void messages_stream_native_relay(const char *url, const char *auth, cons
    int stream_status;
    memset(&relay, 0, sizeof(relay));
    sse_parser_init(&relay.parser);
+   anthropic_backend_stream_state_init(&relay.ir_bst);
    relay.emit = emit;
    relay.emit_ctx = ctx;
    stream_status =
@@ -986,8 +1076,17 @@ static void messages_stream_native_relay(const char *url, const char *auth, cons
                                 relay.output_tokens, relay.cache_write_tokens,
                                 relay.cache_read_tokens, "anthropic-ingress",
                                 stream_status == 200 ? "realized" : "partial");
+   /* Record what the reasoning tap saw. Nothing consumes the text yet -- these two
+    * counters ARE the deliverable of this step: they measure how often a relayed
+    * turn carries readable reasoning at all, which is what decides whether
+    * thought-triggered recall is worth building on this path. */
+   if (relay.reasoning_len > 0)
+      aimee_ir_metric_inc(AIMEE_IR_M_REASONING_OBSERVED, AIMEE_WIRE_ANTHROPIC);
+   if (relay.reasoning_truncated || relay.reasoning_giveup)
+      aimee_ir_metric_inc(AIMEE_IR_M_REASONING_INCOMPLETE, AIMEE_WIRE_ANTHROPIC);
    sse_parser_free(&relay.parser);
    free(relay.data);
+   free(relay.reasoning);
    return;
 }
 
@@ -1096,8 +1195,8 @@ static int messages_stream(const char *body, server_http_sse_event_emit emit, vo
 {
    cJSON *req = cJSON_Parse((body && body[0]) ? body : "{}");
    aimee_ir_shadow_observe_request(req, AIMEE_WIRE_ANTHROPIC); /* shadow (Slice 3), gated no-op */
-   agent_config_t acfg;
-   agent_t *ag = req ? resolve_primary(&acfg) : NULL;
+   agent_t agbuf;
+   agent_t *ag = (req && resolve_primary(&agbuf) == 0) ? &agbuf : NULL;
    cJSON *messages = NULL, *tools = NULL;
    char *system_text = NULL, *prov_body = NULL;
    char url[MAX_ENDPOINT_LEN + 64];
@@ -1109,7 +1208,7 @@ static int messages_stream(const char *body, server_http_sse_event_emit emit, vo
    anthropic_stream_xlate_t *xl;
    int input_est;
    int responses_wire = 0;
-   econ_wire_snapshot_t *wire_snapshot = NULL;
+   wire_fence_t *wire_snapshot = NULL;
    gw_mutate_ctx_t gwmc;
    const void *wire_prov_body = NULL;
    size_t wire_prov_body_len = 0;
@@ -1227,12 +1326,12 @@ static int messages_stream(const char *body, server_http_sse_event_emit emit, vo
 
    const char *pristine_body = prov_body ? prov_body : "{}";
    int economizer_active = econ_mode_current() != ECON_MODE_OFF;
-   econ_wire_route_t wire_route = parity           ? ECON_WIRE_ANTHROPIC_MESSAGES
-                                  : responses_wire ? ECON_WIRE_OPENAI_RESPONSES
-                                                   : ECON_WIRE_OPENAI_CHAT;
-   econ_wire_bytes_t wire_body;
-   if (econ_wire_select(economizer_active, wire_route, pristine_body, strlen(pristine_body),
-                        &wire_snapshot, &wire_body) != 0)
+   wire_fence_route_t wire_route = parity           ? WIRE_FENCE_ANTHROPIC_MESSAGES
+                                   : responses_wire ? WIRE_FENCE_OPENAI_RESPONSES
+                                                    : WIRE_FENCE_OPENAI_CHAT;
+   wire_fence_bytes_t wire_body;
+   if (wire_fence_select(economizer_active, wire_route, pristine_body, strlen(pristine_body),
+                         &wire_snapshot, &wire_body) != 0)
    {
       xl = anthropic_stream_begin(msg_id, model, 0, emit, ctx);
       if (xl)
@@ -1281,7 +1380,7 @@ static int messages_stream(const char *body, server_http_sse_event_emit emit, vo
    messages_stream_xlate(url, auth, wire_prov_body, wire_prov_body_len, extra, ag, model, msg_id,
                          input_est, emit, ctx);
 cleanup:
-   econ_wire_snapshot_destroy(wire_snapshot);
+   wire_fence_destroy(wire_snapshot);
    gw_mutate_ctx_free(&gwmc);
    free(prov_body);
    free(system_text);
@@ -1302,8 +1401,8 @@ static int count_tokens(const char *body, char *resp, int cap)
     * when the primary speaks the Anthropic API; otherwise fall through to the
     * estimate. */
    {
-      agent_config_t acfg;
-      agent_t *ag = resolve_primary(&acfg);
+      agent_t agbuf;
+      agent_t *ag = resolve_primary(&agbuf) == 0 ? &agbuf : NULL;
       const delegate_driver_t *driver;
       delegate_drivers_init();
       driver = ag ? delegate_driver_get(ag->provider) : NULL;

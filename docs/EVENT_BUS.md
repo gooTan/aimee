@@ -3,8 +3,9 @@
 The event bus is the new spine inside `aimee-server` and `aimee-kb`. It replaces scattered
 in-process side channels with one typed, ordered, bounded transport.
 
-Today it carries observability and audit traffic. It is also the contract that lets C and Go
-modules attach without sharing implementation details.
+Today it carries observability and audit traffic as well as production module request/reply
+decisions. It is also the contract that lets C and Go modules attach without sharing
+implementation details.
 
 ## Why it exists
 
@@ -31,6 +32,46 @@ That buys us:
 
 The last item is an extension surface, not a claim that every subsystem has moved already.
 
+Sixteen production C-to-Go process batches now cover every supervised process:
+`memory`, `learning`,
+`routing`, `delegates`, `tools`, `workspace`, `git`, `skills`,
+`response-composition`, `governance`, `workflows`, `roundtable`, `kb-synthesis`,
+`runtime-web`, `control-web`, and `benchmarks`.
+Each keeps its existing event kind and AMOD body contract, but the supervisor now
+starts an authenticated Go process for that identity. C adapters serve as parity
+fixtures; the bounded memory rerank, response-composition key, roundtable
+verification-rubric, and benchmark IR-scoring stages do not mean those modules'
+storage-heavy or daemon orchestration code has all moved to Go. Governance moves
+the bounded response tool-policy decision; parsed-response mutation and its
+broader identity/OIDC plane remain in their current C owners. Workflows moves
+only the pure advance admission classification; the Go WFE remains the sole
+lifecycle, persistence, scheduling, and transition owner. KB synthesis moves
+only the deterministic code-unit grounding gate; curator queues, model calls,
+storage, linking, promotion, and scheduling remain in their current owners.
+Runtime web moves the bounded RPC-fault-to-HTTP-status decision. The server asks
+that process over the event bus and places the returned status in its error
+envelope; the physical Go HTTPS provider consumes the result without importing
+or reimplementing the policy. Listener, authentication, sessions, proxying, and
+assets remain provider-owned.
+Control web moves bounded console-admin and fleet proxy-route authorization; its
+physical Go provider and isolated process consume the same policy package. The
+KB requests console-admin decisions from that process over its local event bus
+and keeps no duplicate C allowlist. The production `memory.benchmark` RPC also
+requests its MRR/NDCG/recall scoring from the benchmarks process; missing or
+invalid module responses fail the benchmark instead of falling back locally.
+Skills trigger-frontmatter matching is also process-owned: the filesystem resolver
+loads the bounded skill body, then guardrails requests the match over event `7682`.
+There is no local trigger parser on the production path; a missing or malformed
+reply emits the conservative advisory rather than silently skipping it.
+Learning signal sink selection is likewise event-bus-only. Before a signal is
+persisted or any reranker, supersede, rule, or workflow proposal is queued, the
+router requests the sink mask from the supervised learning process over event
+`6145`. A missing or invalid response aborts ingestion; the C router keeps no
+local signal-to-sink table.
+Memory pre-injection confidence comes only from event `5893`. The server does
+not replace an unavailable or malformed response with a locally selected tier;
+it omits the context envelope, and the formatter rejects missing confidence.
+
 ## What is on it now
 
 The server and KB publish these through the observability bridge:
@@ -42,6 +83,15 @@ The server and KB publish these through the observability bridge:
 - sandbox isolation degradation;
 - MCP and tool-call activity;
 - tool completion outcomes.
+
+Separately, production request/reply traffic uses the module bridge. This includes governance's
+response tool-policy decision: the server sends the policy gate, tool names, and upstream stop
+reason to the supervised governance process and applies only the returned decision. A missing,
+failed, or malformed governance reply fails closed; the response path does not evaluate that
+policy locally. Workflow advance admission follows the same rule: the server supplies the
+authoritative binding, current stage/state, and replay nonce to the supervised workflows process.
+Only an explicit successful module decision can reach the workflow engine; bus failure returns an
+error without advancing the work item.
 
 Those bridges use two wire kinds: governed actions and semantic guardrail events. The action row is
 PII-bounded; memory identities are fingerprinted before publication. The consumer drains accepted
@@ -133,5 +183,7 @@ Use `bus_client_publish` for ordinary inline events. Use the arena for a trusted
 publisher that needs a lease. Use the module request API for module calls; it selects ordered inline
 fragmentation when a request or reply exceeds the inline budget.
 
-Code lives under `src/core/event_bus/`. The public C client is `bus_client.h`; the pure-Go client is
-under `server-go/bus/`. The source headers hold the wire and arena invariants.
+Code lives under `src/core/event_bus/`. The public C client is `bus_client.h`; the pure-Go client and
+module process runtime are under `server-go/bus/`. Both runtimes implement the same AMOD envelope,
+fragmentation, deadline, cancellation, heartbeat, and host-epoch behavior. The source headers hold
+the wire and arena invariants.

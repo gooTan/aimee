@@ -72,9 +72,9 @@ interface PersonaInfo {
   description?: string;
   builtin?: boolean;
 }
-// A registered/known delegate (GET /api/agents). Used only to populate the
+// A registered/known model (GET /api/models). Used only to populate the
 // delegate picker's suggestions; the field also accepts free text.
-interface AgentInfo {
+interface ModelInfo {
   name: string;
 }
 
@@ -343,6 +343,7 @@ interface BlockForm {
 export default function EditWorkflows() {
   const [defs, setDefs] = useState<DefRow[]>([]);
   const [blocks, setBlocks] = useState<BlockDef[]>([]);
+  const [editable, setEditable] = useState(false);
   const [graph, setGraph] = useState<GraphDef | null>(null);
   const [version, setVersion] = useState("");
   const [pos, setPos] = useState<Record<string, { x: number; y: number }>>({});
@@ -355,7 +356,7 @@ export default function EditWorkflows() {
   const [personas, setPersonas] = useState<PersonaInfo[]>([]);
   const [editBlock, setEditBlock] = useState<BlockForm | null>(null);
   const [blockStatus, setBlockStatus] = useState<string>("");
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [agents, setAgents] = useState<ModelInfo[]>([]);
   // This tab's selected project (per-tab project space). Held so the workflow
   // context can scope to it; execution-in-project flows through a chat session's
   // cwd today, so this primarily persists the selection + offers clone here.
@@ -368,6 +369,18 @@ export default function EditWorkflows() {
       .catch(() => {});
   }, []);
 
+  const refreshBlocks = useCallback(() => {
+    getJSON<{ blocks: BlockDef[]; editable?: boolean }>("/api/workflow/blocks")
+      .then((d) => {
+        setBlocks(d.blocks || []);
+        setEditable(d.editable === true);
+      })
+      .catch(() => {
+        setBlocks([]);
+        setEditable(false);
+      });
+  }, []);
+
   // The persona list feeds both the per-step persona pickers and the manager;
   // refreshed after any persona create/edit/delete.
   const refreshPersonas = useCallback(() => {
@@ -377,17 +390,15 @@ export default function EditWorkflows() {
   }, []);
 
   useEffect(() => {
-    getJSON<{ blocks: BlockDef[] }>("/api/workflow/blocks")
-      .then((d) => setBlocks(d.blocks || []))
-      .catch(() => {});
-    // Delegate suggestions: registered agents. Free text is also accepted, so an
-    // empty list (no agents connected) never blocks assigning a delegate.
-    getJSON<{ agents: AgentInfo[] }>("/api/agents")
-      .then((d) => setAgents(d.agents || []))
+    refreshBlocks();
+    // Delegate suggestions: configured models. Free text is also accepted, so an
+    // empty list (no models configured) never blocks assigning a delegate.
+    getJSON<{ models?: ModelInfo[]; agents?: ModelInfo[] }>("/api/models")
+      .then((d) => setAgents(d.models || d.agents || []))
       .catch(() => {});
     refreshPersonas();
     refreshLists();
-  }, [refreshLists, refreshPersonas]);
+  }, [refreshBlocks, refreshLists, refreshPersonas]);
 
   const openDef = useCallback((name: string) => {
     setLoading(true);
@@ -485,6 +496,10 @@ export default function EditWorkflows() {
 
   const saveBlock = useCallback(async () => {
     if (!editBlock) return;
+    if (!editable) {
+      setBlockStatus("administrator access is required to save custom blocks");
+      return;
+    }
     const name = editBlock.name.trim();
     if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(name)) {
       setBlockStatus("name must be alphanumeric, - _ or .");
@@ -507,15 +522,20 @@ export default function EditWorkflows() {
     if (st >= 200 && st < 300) {
       setBlockStatus("");
       setEditBlock(null);
+      refreshBlocks();
       refreshLists();
     } else {
       setBlockStatus(`save failed (${st})`);
     }
-  }, [editBlock, refreshLists]);
+  }, [editBlock, editable, refreshBlocks, refreshLists]);
 
   const deleteBlock = useCallback(async () => {
     if (!editBlock || editBlock.isNew) {
       setEditBlock(null);
+      return;
+    }
+    if (!editable) {
+      setBlockStatus("administrator access is required to delete custom blocks");
       return;
     }
     if (!window.confirm(`Delete custom block “${editBlock.name}”?`)) return;
@@ -525,11 +545,12 @@ export default function EditWorkflows() {
     );
     if (st >= 200 && st < 300) {
       setEditBlock(null);
+      refreshBlocks();
       refreshLists();
     } else {
       setBlockStatus(`delete failed (${st})`);
     }
-  }, [editBlock, refreshLists]);
+  }, [editBlock, editable, refreshBlocks, refreshLists]);
 
   const deleteNode = useCallback(
     (id: string) => {
@@ -564,6 +585,10 @@ export default function EditWorkflows() {
 
   const save = useCallback(async () => {
     if (!graph) return;
+    if (!editable) {
+      setStatus({ kind: "err", msg: "administrator access is required to save workflows" });
+      return;
+    }
     const res = await postJSON<{
       name?: string;
       version?: string;
@@ -592,7 +617,7 @@ export default function EditWorkflows() {
         msg: res.data.error || `save failed (${res.status})`,
       });
     }
-  }, [graph, version, refreshLists]);
+  }, [editable, graph, version, refreshLists]);
 
   /* node dragging */
   const onNodeDown = (id: string, e: React.MouseEvent) => {
@@ -680,7 +705,12 @@ export default function EditWorkflows() {
         }}
       >
         <Panel title="Workflows" count={defs.length}>
-          <Button onClick={newDef} size="md" title="Create a new workflow definition and open it in the editor.">
+          <Button
+            onClick={newDef}
+            disabled={!editable}
+            size="md"
+            title={editable ? "Create a new workflow definition and open it in the editor." : "Administrator access is required to create workflows."}
+          >
             + New
           </Button>
           <div style={{ marginTop: 6 }}>
@@ -704,9 +734,19 @@ export default function EditWorkflows() {
           </div>
         </Panel>
         <Panel title="Blocks" count={blocks.length}>
-          <Button onClick={newBlock} size="md" title="Create a new custom delegate block.">
+          <Button
+            onClick={newBlock}
+            disabled={!editable}
+            size="md"
+            title={editable ? "Create a new custom delegate block." : "Administrator access is required to create custom blocks."}
+          >
             + New
           </Button>
+          {!editable && (
+            <div style={{ fontSize: 11, color: "#777", lineHeight: 1.4, marginTop: 6 }}>
+              Administrator access is required to save workflows or custom blocks. You can still inspect and validate definitions.
+            </div>
+          )}
           <div style={{ marginTop: 6 }}>
             {blocks.map((b) => (
               <div
@@ -717,7 +757,7 @@ export default function EditWorkflows() {
               >
                 <span>{b.name}</span>
                 <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                  {b.custom && b.executor === "delegate" && (
+                  {editable && b.custom && b.executor === "delegate" && (
                     <Button
                       size="sm"
                       onClick={(e) => {
@@ -794,13 +834,14 @@ export default function EditWorkflows() {
                 />
               </label>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <Button onClick={saveBlock} size="md" title="Save this custom block definition.">
+                <Button onClick={saveBlock} disabled={!editable} size="md" title="Save this custom block definition.">
                   Save
                 </Button>
                 <Button
                   variant="danger"
                   size="md"
                   onClick={deleteBlock}
+                  disabled={!editable && !editBlock.isNew}
                   title={editBlock.isNew ? "Discard this new block." : "Delete this custom block."}
                 >
                   {editBlock.isNew ? "Cancel" : "Delete"}
@@ -836,8 +877,8 @@ export default function EditWorkflows() {
             variant="primary"
             size="md"
             onClick={save}
-            disabled={!graph}
-            title="Save the workflow definition (fails if the on-disk version changed)."
+            disabled={!graph || !editable}
+            title={editable ? "Save the workflow definition (fails if the on-disk version changed)." : "Administrator access is required to save workflows."}
           >
             Save
           </Button>
@@ -1028,7 +1069,7 @@ function NodeInspector({
   mutate: (fn: (g: GraphDef) => GraphDef) => void;
   onDelete: () => void;
   personas: PersonaInfo[];
-  agents: AgentInfo[];
+  agents: ModelInfo[];
   workflows: string[];
   onOpenWorkflow: (name: string) => void;
 }) {

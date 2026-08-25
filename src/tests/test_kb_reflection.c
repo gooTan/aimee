@@ -33,6 +33,7 @@ void reflection_test_release_idle(void);
 
 /* The unit under test (pulls its own headers). */
 #include "../kb/kb_reflection.c"
+#include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
 #undef db2_lease_release_idle
 
 void reflection_test_release_idle(void)
@@ -130,7 +131,7 @@ static void write_cfg(void)
 
 static void isolate_home(void)
 {
-   snprintf(g_home, sizeof(g_home), "/tmp/aimee-test-kb-reflection-XXXXXX");
+   snprintf(g_home, sizeof(g_home), "%s/aimee-test-kb-reflection-XXXXXX", platform_tmpdir());
    assert(mkdtemp(g_home) != NULL);
    /* AIMEE_HOME rather than HOME: it IS the config dir, where the default is
     * $HOME/.config/aimee -- two levels that would need creating. */
@@ -242,6 +243,16 @@ static void test_empty_pass_releases_before_backoff(void)
    printf("  empty pass releases its DB lease before scheduler backoff OK\n");
 }
 
+static void test_backoff_is_interruptible(void)
+{
+   kb_reflection_ctx_t ctx = {0};
+   ctx.stop = 1;
+   time_t started = time(NULL);
+   reflection_sleep_interruptible(&ctx, 900);
+   assert(time(NULL) - started < 1);
+   printf("  scheduler backoff observes shutdown without a long sleep OK\n");
+}
+
 int main(void)
 {
    printf("test_kb_reflection: reflection synthesis write-gate\n");
@@ -251,6 +262,7 @@ int main(void)
    test_garbage_writes_none();
    test_command_failure_writes_none();
    test_empty_pass_releases_before_backoff();
+   test_backoff_is_interruptible();
    printf("test_kb_reflection: all passed\n");
    return 0;
 }

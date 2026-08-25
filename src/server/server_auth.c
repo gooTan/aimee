@@ -28,7 +28,7 @@ const method_policy_t method_registry[] = {
     {"init.run", CAP_TOOL_EXECUTE, "initialize local stores"},
     {"launch.run", CAP_TOOL_EXECUTE, "launch session"},
     {"hud.status", CAP_SESSION_READ, "HUD status"},
-    {"agent.*", CAP_DELEGATE, "agent configuration"},
+    {"model.*", CAP_DELEGATE, "model roster configuration"},
     {"webchat.*", CAP_DASHBOARD_READ, "webchat client operation"},
     {"auth", 0, "authenticate"},
     /* Hooks */
@@ -97,6 +97,8 @@ const method_policy_t method_registry[] = {
     {"roundtable.review", CAP_DELEGATE, "Go roundtable review transport"},
     {"dev.sweep", CAP_DELEGATE, "deepening sweep (spawns proposer delegates; analysis-only)"},
     {"delegate.status", CAP_DELEGATE, "delegate status"},
+    {"delegate.reservation.forget", CAP_DELEGATE, "release a delegate replay reservation"},
+    {"delegate.cancel_unassigned", CAP_DELEGATE, "cancel an unassigned delegate job"},
     /* Credential vault (WP-C.1): UDS-only in practice — the service layer refuses
      * any non-ATTEST_UDS_PEERCRED principal — but gated here as CAP_DELEGATE so a
      * scoped/read-only TCP bearer cannot even reach the route. */
@@ -119,6 +121,7 @@ const method_policy_t method_registry[] = {
     {"aux.config_show", CAP_SESSION_READ, "auxiliary model config"},
     {"config.show", CAP_SESSION_READ, "show configuration"},
     {"config.get", CAP_SESSION_READ, "read configuration value"},
+    {"config.deploy_env", CAP_SESSION_READ, "emit compose env for the backend record"},
     {"config.set", CAP_SESSION_ADMIN, "set configuration value"},
     {"pipeline.status", CAP_SESSION_READ, "roundtable authoring pipeline status"},
     {"pipeline.list", CAP_SESSION_READ, "list roundtable authoring pipelines"},
@@ -131,7 +134,7 @@ const method_policy_t method_registry[] = {
     {"delegate.sandbox_list", CAP_DELEGATE, "list delegate sandbox images"},
     {"delegate.sandbox_gc", CAP_DELEGATE, "prune delegate sandbox images"},
     {"episode.list", CAP_DELEGATE, "list delegation episodes"},
-    {"agent.episodes", CAP_DELEGATE, "agent episode history"},
+    {"model.episodes", CAP_DELEGATE, "agent episode history"},
     {"eval.*", CAP_DELEGATE, "eval harness"},
     {"chat.send_stream", CAP_CHAT, "chat stream"},
     {"chat.graceful_cancel", CAP_CHAT, "cancel an in-flight chat turn (owner-authz)"},
@@ -197,9 +200,9 @@ const method_policy_t method_registry[] = {
     {"provider.models", CAP_SESSION_READ, "provider models"},
     {"provider.quota", CAP_SESSION_READ, "provider quota"},
     {"provider.*", CAP_SESSION_ADMIN, "provider configuration"},
-    {"model.list", CAP_SESSION_READ, "list models"},
-    {"model.show", CAP_SESSION_READ, "show model"},
-    {"model.refresh", CAP_SESSION_ADMIN, "refresh model catalog"},
+    {"catalog.list", CAP_SESSION_READ, "list catalogued models"},
+    {"catalog.show", CAP_SESSION_READ, "show a catalogued model"},
+    {"catalog.refresh", CAP_SESSION_ADMIN, "refresh model catalog"},
     /* Identity: show/diff read; snapshot mutates. */
     {"identity.snapshot", CAP_SESSION_ADMIN, "snapshot identity"},
     {"identity.*", CAP_SESSION_READ, "identity query"},

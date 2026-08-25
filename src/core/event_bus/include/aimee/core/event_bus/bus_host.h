@@ -36,7 +36,7 @@
 /* Outbound patterns authorized for an externally admitted slot. Replies and
  * cancellation are authorized from the host's pending-correlation table; only
  * fresh notifications and requests need manifest grants. */
-#define BUS_GRANT_NOTIFY 0x01u
+#define BUS_GRANT_NOTIFY  0x01u
 #define BUS_GRANT_REQUEST 0x02u
 
 typedef struct
@@ -54,6 +54,7 @@ typedef void (*bus_tap_fn)(void *ctx, const bus_frame_t *frame, const uint8_t *p
 typedef struct
 {
    int in_use;
+   uint32_t principal_class;
    uint32_t principal_ref;
    int qpair_fd;
    bus_region_t qpair_region; /* host RW mapping of this client's queue pair */
@@ -112,12 +113,21 @@ typedef struct
    uint32_t dst_slot;
 } bus_overflow_t;
 
-/* An outstanding request, so a reply can be routed back to its requester. */
+/* An outstanding request, so a reply can be routed back to its requester.
+ *
+ * Correlation ids are chosen by each client for itself, so they are unique only
+ * within one client: two clients calling the same server will eventually pick
+ * the same number. The host therefore keeps both -- the requester's id, and a
+ * host-assigned id that is unique across the bus and is the only one the server
+ * ever sees. Requests are rewritten to server_correlation_id on the way out and
+ * replies back to correlation_id on the way in, so each caller sees its own
+ * numbering and the server can key its work on something unambiguous. */
 typedef struct
 {
    int in_use;
    int request_open;
    uint64_t correlation_id;
+   uint64_t server_correlation_id;
    uint32_t requester;
    uint32_t server;
 } bus_pending_t;
@@ -153,7 +163,8 @@ typedef struct bus_host
 
    bus_kind_t kinds[BUS_HOST_MAX_KINDS];
    bus_pending_t pending[BUS_HOST_MAX_PENDING];
-   uint64_t seq; /* host-assigned monotonic dispatch order */
+   uint64_t seq;                     /* host-assigned monotonic dispatch order */
+   uint64_t next_server_correlation; /* host-unique ids handed to servers */
 
    bus_tap_fn tap;
    void *tap_ctx;
@@ -190,6 +201,12 @@ void bus_host_destroy(bus_host_t *h);
  * error if the handshake itself failed. */
 bus_host_result_t bus_host_serve_attach(bus_host_t *h, int conn_fd);
 bus_host_result_t bus_host_serve_attach_ex(bus_host_t *h, int conn_fd, uint32_t *slot_out);
+
+/* Release one admitted slot immediately. Runtime owners use this only after an
+ * OS-backed process handle proves the client has exited; ordinary liveness
+ * remains heartbeat-reaped. The caller must hold the same host lock used for
+ * attach, pump, and reap. */
+bus_host_result_t bus_host_release_slot(bus_host_t *h, uint32_t slot);
 
 /* Install the daemon-owned capability binder. Admission authenticates the
  * request before allocation; this hook runs after a slot exists but before its

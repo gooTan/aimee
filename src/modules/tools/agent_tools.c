@@ -777,7 +777,10 @@ char *tool_bash(const char *command, int timeout_ms)
          dstr_free(&w);
       }
       int exit_code = -1;
-      char *out = ws->exec_shell(ws, wrapped ? wrapped : command, &exit_code);
+      char *out =
+          ws->exec_shell_timeout
+              ? ws->exec_shell_timeout(ws, wrapped ? wrapped : command, timeout_ms, &exit_code)
+              : ws->exec_shell(ws, wrapped ? wrapped : command, &exit_code);
       free(wrapped);
       /* Learned toolchain: capture apt-install intent ONLY after a successful run, so a
        * failed/typo'd/nonexistent install is never recorded (and can't poison later
@@ -822,7 +825,7 @@ char *tool_bash(const char *command, int timeout_ms)
     * delegate — the trusted primary (operator) session, which has no active
     * delegation, is unaffected and still runs on the host. */
 #ifdef __linux__
-   const int host_unsandboxed = (sbox_cfg.mode == SANDBOX_MODE_OFF);
+   const int host_unsandboxed = (sandbox_effective_mode(&sbox_cfg) == SANDBOX_MODE_OFF);
 #else
    const int host_unsandboxed = !guarded_parent; /* guarded_parent already refused below */
 #endif
@@ -832,10 +835,15 @@ char *tool_bash(const char *command, int timeout_ms)
       close(stdout_pipe[1]);
       close(stderr_pipe[0]);
       close(stderr_pipe[1]);
+      /* Say DISABLED, not "unavailable": on Linux this branch tests the configured
+       * mode only — sandbox_available() is never consulted here (it is probed inside
+       * sandbox_exec_internal, which this refusal precedes). The old "off/unavailable"
+       * wording sent readers hunting for a broken kernel/namespace setup when the
+       * actual state is a config value. Name the setting so the fix is obvious. */
       return safe_strdup(
           "{\"stdout\":\"\",\"stderr\":\"refused: a delegated shell requires sandbox isolation, "
-          "but the sandbox is off/unavailable; running unsandboxed on the aimee-server host is "
-          "not permitted\",\"exit_code\":-1}");
+          "but the sandbox is disabled (sandbox.mode=off); running unsandboxed on the "
+          "aimee-server host is not permitted\",\"exit_code\":-1}");
    }
 #ifndef __linux__
    if (guarded_parent)
@@ -1324,6 +1332,8 @@ char *tool_write_file(const char *path, const char *content)
       return safe_strdup("error: write blocked: read-only delegate (not write-capable)");
    if (agent_tools_parent_write_guard_blocks(actual_path, NULL))
       return safe_strdup("error: write blocked: parent worktree is read-only for delegates");
+   if (!text_is_valid_utf8(content))
+      return safe_strdup("error: content is not valid UTF-8; refusing text-file write");
 
    /* Route raw I/O through the workspace provider (shared = direct fs, the
     * same calls as before). Policy above this point — cwd resolution, path

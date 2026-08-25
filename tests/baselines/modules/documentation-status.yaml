@@ -25,7 +25,9 @@
     "benchmarks",
     "control-web",
     "governance",
-    "runtime-web"
+    "runtime-web",
+    "sandbox",
+    "economizer"
   ],
   "debt": []
 }

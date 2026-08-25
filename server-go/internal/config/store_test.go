@@ -104,3 +104,102 @@ func TestTriggerRulesUseOptimisticVersion(t *testing.T) {
 		t.Fatal("stale trigger edit accepted")
 	}
 }
+
+func TestTriggerRulesRejectOversizedRegistry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aimee.yaml")
+	store, _ := NewStore(path)
+	version, err := store.Version("trigger_rules")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := make([]map[string]any, MaxTriggerRules+1)
+	for i := range rules {
+		rules[i] = map[string]any{
+			"source":   "watch-dir",
+			"pipeline": map[string]any{"template": "build", "workspace": "/repo"},
+		}
+	}
+	if err := store.SetVersioned("trigger_rules", rules, version); err == nil || !strings.Contains(err.Error(), "maximum is 32") {
+		t.Fatalf("oversized registry error = %v", err)
+	}
+}
+
+func TestTriggerRulesRejectUnsafeHumanInputs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aimee.yaml")
+	store, _ := NewStore(path)
+	version, _ := store.Version("trigger_rules")
+	base := map[string]any{
+		"source": "watch-dir", "event": "docs/proposals/pending",
+		"pipeline": map[string]any{"template": "build", "workspace": "/repo"},
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"traversal":          func(rule map[string]any) { rule["event"] = "../outside" },
+		"relative-workspace": func(rule map[string]any) { rule["pipeline"].(map[string]any)["workspace"] = "repo" },
+		"git-option":         func(rule map[string]any) { rule["schedule"] = "--all" },
+		"negative-cap":       func(rule map[string]any) { rule["pipeline"].(map[string]any)["max_spend_usd"] = -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rule := map[string]any{
+				"source": base["source"], "event": base["event"],
+				"pipeline": map[string]any{"template": "build", "workspace": "/repo"},
+			}
+			mutate(rule)
+			if err := store.SetVersioned("trigger_rules", []map[string]any{rule}, version); err == nil {
+				t.Fatal("unsafe trigger rule was accepted")
+			}
+		})
+	}
+}
+
+// A wall cap below the write-role floor makes every implement stage refuse
+// before it starts, so the stage can never finish however often it retries.
+// Rejecting the value when it is set reports that as the configuration error it
+// is, instead of leaving it to be inferred from dying attempts.
+func TestWallCapBelowWriteRoleFloorIsRejectedNamingBothValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aimee.yaml")
+	if err := os.WriteFile(path, []byte("provider: codex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.Set("autonomy.max_wall_secs", float64(MinAutonomyMaxWallSecs-1))
+	if err == nil {
+		t.Fatal("a wall cap under which no write stage can ever finish was accepted")
+	}
+	if !strings.Contains(err.Error(), "359") || !strings.Contains(err.Error(), "360") {
+		t.Fatalf("error %q must name both the configured value and the required floor", err)
+	}
+	// And where the floor comes from, so it reads as derived rather than chosen.
+	if !strings.Contains(err.Error(), "300s verifier reserve") ||
+		!strings.Contains(err.Error(), "60s minimum run") {
+		t.Fatalf("error %q must name the two components the floor is derived from", err)
+	}
+}
+
+// The shipped default must keep loading. A floor that rejected the default would
+// be a worse failure than the misconfiguration it exists to catch.
+func TestDefaultWallCapRemainsAcceptable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aimee.yaml")
+	if err := os.WriteFile(path, []byte("provider: codex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shipped, ok := number(policyDefaults["autonomy.max_wall_secs"])
+	if !ok {
+		t.Fatalf("shipped default missing: %#v", policyDefaults["autonomy.max_wall_secs"])
+	}
+	if shipped < MinAutonomyMaxWallSecs {
+		t.Fatalf("shipped default %d is below the enforced floor %d", shipped, MinAutonomyMaxWallSecs)
+	}
+	if err := store.Set("autonomy.max_wall_secs", float64(shipped)); err != nil {
+		t.Fatalf("shipped default rejected: %v", err)
+	}
+	if err := store.Set("autonomy.max_wall_secs", float64(MinAutonomyMaxWallSecs)); err != nil {
+		t.Fatalf("exact floor rejected: %v", err)
+	}
+}

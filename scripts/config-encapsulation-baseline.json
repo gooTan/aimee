@@ -142,7 +142,7 @@
       "loads": 1
     },
     "src/tests/test_kb_http_routes.c": {
-      "decls": 8,
+      "decls": 7,
       "loads": 1
     },
     "src/tests/test_kb_maintenance.c": {
@@ -201,10 +201,6 @@
       "decls": 1,
       "loads": 1
     },
-    "src/tests/test_tool_condense.c": {
-      "decls": 2,
-      "loads": 0
-    },
     "src/tests/test_trigger.c": {
       "decls": 2,
       "loads": 1
@@ -218,13 +214,13 @@
       "loads": 1
     },
     "src/tests/test_workspace_turn.c": {
-      "decls": 4,
-      "loads": 5
+      "decls": 2,
+      "loads": 3
     }
   },
   "totals": {
-    "decls": 242,
+    "decls": 239,
     "files": 55,
-    "loads": 149
+    "loads": 147
   }
 }

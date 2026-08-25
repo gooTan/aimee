@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/JBailes/aimee/server-go/internal/db1"
-	roundtablecfg "github.com/JBailes/aimee/server-go/internal/roundtable"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
+	roundtablecfg "github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
 // TestShippedWorkflowDefinitionsRunWithNativeEngine loads the exact workflow
@@ -53,6 +53,24 @@ func TestShippedAutonomousWorkflowRetriesAreBounded(t *testing.T) {
 		{workflow: "build-triggered", node: "plan_gate", max: 6},
 		{workflow: "build-triggered", node: "slices", max: 3},
 		{workflow: "slice", node: "impl", max: 3},
+		{workflow: "quick-change", node: "prep", max: 2},
+		{workflow: "quick-change", node: "implement", max: 2},
+		{workflow: "quick-change", node: "review", max: 2},
+		{workflow: "orchestrated-change", node: "prep", max: 2},
+		{workflow: "orchestrated-change", node: "plan", max: 2},
+		{workflow: "orchestrated-change", node: "implement", max: 2},
+		{workflow: "orchestrated-change", node: "review", max: 3},
+		{workflow: "orchestrated-change", node: "second_opinion", max: 2},
+		{workflow: "orchestrated-change-pro", node: "prep", max: 2},
+		{workflow: "orchestrated-change-pro", node: "plan", max: 2},
+		{workflow: "orchestrated-change-pro", node: "implement", max: 2},
+		{workflow: "orchestrated-change-pro", node: "gemini_review", max: 4},
+		{workflow: "orchestrated-change-pro", node: "sol_review", max: 4},
+		{workflow: "quick-change-ui", node: "implement", max: 2},
+		{workflow: "quick-change-ui", node: "review", max: 2},
+		{workflow: "orchestrated-change-pro-ui", node: "implement", max: 2},
+		{workflow: "orchestrated-change-pro-ui", node: "gemini_review", max: 4},
+		{workflow: "orchestrated-change-pro-ui", node: "sol_review", max: 4},
 	}
 	for _, check := range checks {
 		definition, err := registry.Pin(check.workflow)
@@ -121,7 +139,7 @@ func runExactShippedWorkflow(t *testing.T, workflowName, wantState, wantPause st
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.SetRoundtableStore(shippedRoundtableStore(t))
+	withPanel(runner, shippedRoundtableStore(t))
 	engine, err := New(store, artifacts, workflowDir, runner)
 	if err != nil {
 		t.Fatal(err)

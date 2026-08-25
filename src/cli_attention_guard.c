@@ -602,6 +602,7 @@ static void attn_lexical_normalize(const char *path, char *out, size_t out_n)
  *   "/.aimee/worktrees/"  — aimee's own launcher + delegate worktrees
  *   "/.claude/worktrees/" — Claude Code's native worktrees (EnterWorktree)
  *   "/.codex/worktrees/"  — Codex's native worktrees
+ *   "$AIMEE_HOME/wfe-worktrees/" — workflow-owned slice worktrees
  * All are isolated worktrees on a branch off the default branch — the exact
  * isolation this guard requires — so a Claude Code / Codex session working in its
  * own worktree is honoured, not blocked. Deliberately the full "/worktrees/" path,
@@ -609,9 +610,19 @@ static void attn_lexical_normalize(const char *path, char *out, size_t out_n)
  * unrelated dirs like "/home/u/.aimee-notes/..." or "~/.claude/". */
 static int attn_path_in_managed_worktree(const char *norm)
 {
-   return norm && (strstr(norm, "/.aimee/worktrees/") != NULL ||
-                   strstr(norm, "/.claude/worktrees/") != NULL ||
-                   strstr(norm, "/.codex/worktrees/") != NULL);
+   if (!norm)
+      return 0;
+   if (strstr(norm, "/.aimee/worktrees/") != NULL || strstr(norm, "/.claude/worktrees/") != NULL ||
+       strstr(norm, "/.codex/worktrees/") != NULL)
+      return 1;
+
+   const char *home = aimee_home();
+   char normalized_home[PATH_MAX], wfe_root[PATH_MAX];
+   if (!home || !home[0])
+      return 0;
+   attn_lexical_normalize(home, normalized_home, sizeof normalized_home);
+   int n = snprintf(wfe_root, sizeof wfe_root, "%s/wfe-worktrees/", normalized_home);
+   return n > 0 && (size_t)n < sizeof wfe_root && strncmp(norm, wfe_root, (size_t)n) == 0;
 }
 
 /* Returns 1 iff `norm` is harness-owned session state rather than repo content:
@@ -1448,7 +1459,7 @@ static int attn_git_shares_foreign_session_history(const char *dir, const char *
  * then silently fell back to "main" -- so on a repo whose default is anything else, the
  * refusal named the wrong branch AND compared the base against it. Observed on one repo
  * in one minute: "('testing')" for a Bash op, "('main')" for an Edit. */
-static void attn_git_dir_for(const char *target, char *out, size_t outlen)
+void attn_git_dir_for(const char *target, char *out, size_t outlen)
 {
    if (!out || !outlen)
       return;
@@ -1456,9 +1467,23 @@ static void attn_git_dir_for(const char *target, char *out, size_t outlen)
    struct stat st;
    if (out[0] && stat(out, &st) == 0 && S_ISDIR(st.st_mode))
       return;
-   char *slash = strrchr(out, '/');
-   if (slash && slash != out)
+   /* Walk UP to the nearest EXISTING directory. Stripping a single component is not
+    * enough when the target is a new file in a not-yet-created directory: the result
+    * is another missing path, so `git -C` cannot run there and BOTH lineage probes
+    * (current branch, default ref) fail. The caller reads default_resolved == 0 as an
+    * unverifiable lineage and fails closed — so creating a file in a new subdirectory
+    * was refused with a branch-lineage error that had nothing to do with the branch,
+    * for every session without a registry row (which is every Claude Code session,
+    * since EnterWorktree writes none). Failing closed on a genuinely unresolvable
+    * default branch is deliberate and is preserved; this only stops a MISSING
+    * DIRECTORY from being mistaken for one. */
+   char *slash;
+   while ((slash = strrchr(out, '/')) != NULL && slash != out)
+   {
       *slash = '\0';
+      if (stat(out, &st) == 0 && S_ISDIR(st.st_mode))
+         return;
+   }
 }
 
 /* Pure decision for the session-isolation guard (testable in isolation).

@@ -235,6 +235,11 @@ int main(void)
                         "  - id: a\n    block: author.proposal\n    next: bad\n"
                         "  - id: bad\n    block: author.plan\n    in:\n      p: pr.out\n",
                         e, sizeof e));
+      /* author.plan accepts intent: understand brief:true emits validated ContextBrief */
+      assert(validates("name: x\nstart: u\nnodes:\n"
+                       "  - id: u\n    block: understand\n    next: p\n"
+                       "  - id: p\n    block: author.plan\n    in:\n      proposal: u.out\n",
+                       e, sizeof e));
       /* single-lens gate (required < 2) */
       assert(!validates("name: x\nstart: a\nnodes:\n"
                         "  - id: a\n    block: author.proposal\n    next: g\n"

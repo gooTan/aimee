@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/JBailes/aimee/server-go/internal/db1"
+	"github.com/JBailes/aimee/server-go/internal/wfe"
 )
 
 const (
@@ -484,6 +485,65 @@ func parseDiffHighlights(diff string) []string {
 	return highlights
 }
 
+// reviewHistorySection summarizes the run's review ladder for the human
+// reviewer: how many change rounds each review stage fought, and any
+// non-blocking findings that survived the final approval. Reviewer commentary
+// that held nothing back used to vanish once the run advanced; the PR is
+// where the human reads it. Best-effort: a run with no events or feedback
+// simply contributes nothing.
+func (r *NativeRunner) reviewHistorySection(ctx context.Context, item db1.WorkItem) string {
+	var section strings.Builder
+	events, err := r.db.Events(ctx, item.ID, 0, 1000)
+	if err == nil {
+		rounds := map[string]int{}
+		var order []string
+		for _, event := range events {
+			if event.Kind == "loop" && strings.HasPrefix(event.Detail, "requested_changes") {
+				if rounds[event.Stage] == 0 {
+					order = append(order, event.Stage)
+				}
+				rounds[event.Stage]++
+			}
+		}
+		if len(order) > 0 {
+			section.WriteString("\n## Review history\n\n")
+			for _, stage := range order {
+				fmt.Fprintf(&section, "- `%s` requested changes %d time(s); every finding was resolved before approval.\n", stage, rounds[stage])
+			}
+		}
+	}
+	if feedback, err := r.artifacts.Feedback(item.ID); err == nil {
+		var nits []wfe.Finding
+		for _, finding := range feedback.Findings {
+			switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+			case "suggestion", "nit":
+				nits = append(nits, finding)
+			}
+		}
+		if len(nits) > 0 {
+			if section.Len() == 0 {
+				section.WriteString("\n## Review history\n\n")
+			}
+			section.WriteString("\nNon-blocking reviewer suggestions (did not hold the gate):\n\n")
+			for _, finding := range nits {
+				line := "- "
+				if persona := strings.TrimSpace(finding.Persona); persona != "" {
+					line += "[" + persona + "] "
+				}
+				if location := strings.TrimSpace(finding.Location); location != "" {
+					line += "`" + location + "` - "
+				}
+				line += strings.TrimSpace(finding.Summary)
+				if recommendation := strings.TrimSpace(finding.Recommendation); recommendation != "" {
+					line += " (" + recommendation + ")"
+				}
+				section.WriteString(boundedMarkdown(redactPullRequestMarkdown(line), 600) + "\n")
+			}
+		}
+	}
+	return section.String()
+}
+
 func (r *NativeRunner) pullRequestSpec(ctx context.Context, req StepRequest, item db1.WorkItem,
 	workdir, head, base string) (PullRequestSpec, error) {
 	title := strings.TrimSpace(paramString(req.Node, "title", ""))
@@ -586,6 +646,8 @@ func (r *NativeRunner) pullRequestSpec(ctx context.Context, req StepRequest, ite
 			}
 		}
 		body.WriteString("- The assembled diff passed the acceptance roundtable.\n- The documentation diff passed the documentation roundtable.\n- Final-branch CI runs on this PR and must be checked by the human reviewer.\n")
+
+		body.WriteString(r.reviewHistorySection(ctx, item))
 
 		body.WriteString("\n## Human review boundary\n\n")
 		body.WriteString("This PR is intentionally a draft. The autonomous workflow stops here and must not mark it ready, approve it, or merge it. A human must review the request, diff, and final CI, then explicitly mark the PR ready and decide whether to merge.\n")

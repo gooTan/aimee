@@ -71,18 +71,6 @@
       "ctest": false,
       "make": true,
       "module": "delegates",
-      "test": "src/tests/test_delegate_backend_local.c"
-    },
-    {
-      "ctest": false,
-      "make": true,
-      "module": "delegates",
-      "test": "src/tests/test_delegate_backend_ssh.c"
-    },
-    {
-      "ctest": false,
-      "make": true,
-      "module": "delegates",
       "test": "src/tests/test_delegate_context_shed.c"
     },
     {
@@ -149,12 +137,6 @@
       "ctest": false,
       "make": true,
       "module": "delegates",
-      "test": "src/tests/test_delegate_xml_fallback.c"
-    },
-    {
-      "ctest": false,
-      "make": true,
-      "module": "delegates",
       "test": "src/tests/test_gw_orch_delegates.c"
     },
     {
@@ -162,6 +144,12 @@
       "make": true,
       "module": "delegates",
       "test": "src/tests/test_panel_provider.c"
+    },
+    {
+      "ctest": false,
+      "make": true,
+      "module": "economizer",
+      "test": "src/tests/test_economizer_module_client.c"
     },
     {
       "ctest": false,
@@ -634,14 +622,20 @@
     {
       "ctest": false,
       "make": true,
-      "module": "skills",
-      "test": "src/tests/test_skill.c"
+      "module": "runtime-web",
+      "test": "src/tests/test_server_error_kind.c"
+    },
+    {
+      "ctest": false,
+      "make": true,
+      "module": "sandbox",
+      "test": "src/tests/test_sandbox_pkg_proxy_adapter.c"
     },
     {
       "ctest": false,
       "make": true,
       "module": "skills",
-      "test": "src/tests/test_skill_review.c"
+      "test": "src/tests/test_skill.c"
     },
     {
       "ctest": false,
@@ -984,18 +978,6 @@
       "make": true,
       "module": "workspace",
       "test": "src/tests/test_workspace_provider_detached.c"
-    },
-    {
-      "ctest": false,
-      "make": true,
-      "module": "workspace",
-      "test": "src/tests/test_workspace_runner_queue.c"
-    },
-    {
-      "ctest": false,
-      "make": true,
-      "module": "workspace",
-      "test": "src/tests/test_workspace_runner_registry.c"
     },
     {
       "ctest": false,

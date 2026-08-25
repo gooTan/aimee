@@ -349,6 +349,15 @@ func canDisableTools(a agentEntry, tools bool) bool {
 	return kind == "claude" || kind == "claude-code"
 }
 
+func commandAvailable(a agentEntry) bool {
+	argv, err := splitCommand(a.CLICmd)
+	if err != nil || len(argv) == 0 || !filepath.IsAbs(argv[0]) {
+		return err == nil && len(argv) > 0
+	}
+	info, err := os.Stat(argv[0])
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
 func selectAgent(registry agentRegistry, model, role, persona string, tools bool) (agentEntry, error) {
 	name := strings.TrimSpace(model)
 	explicit := name != "" && name != "$random"
@@ -358,7 +367,7 @@ func selectAgent(registry agentRegistry, model, role, persona string, tools bool
 	}
 	if name != "" {
 		for _, a := range registry.Agents {
-			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && eligible(a, role, persona) &&
+			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && commandAvailable(a) && eligible(a, role, persona) &&
 				(a.Name == name || a.Model == name) {
 				if canDisableTools(a, tools) {
 					return a, nil
@@ -371,7 +380,7 @@ func selectAgent(registry agentRegistry, model, role, persona string, tools bool
 		}
 	}
 	for _, a := range registry.Agents {
-		if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" &&
+		if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && commandAvailable(a) &&
 			eligible(a, role, persona) && canDisableTools(a, tools) {
 			return a, nil
 		}

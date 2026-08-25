@@ -440,6 +440,17 @@ func TestSelectAgentUsesCompatibleRunnerWhenToolsAreDisabled(t *testing.T) {
 	}
 }
 
+func TestSelectAgentSkipsMissingAbsoluteRunner(t *testing.T) {
+	registry := agentRegistry{DefaultAgent: "missing", Agents: []agentEntry{
+		{Name: "missing", CLIKind: "claude", CLICmd: filepath.Join(t.TempDir(), "claude"), Roles: []string{"draft"}},
+		{Name: "available", CLIKind: "claude", CLICmd: "/bin/sh", Roles: []string{"draft"}},
+	}}
+	selected, err := selectAgent(registry, "", "draft", "engineer", false)
+	if err != nil || selected.Name != "available" {
+		t.Fatalf("selection = %+v, %v", selected, err)
+	}
+}
+
 func TestSelectAgentExcludesUnavailableAgents(t *testing.T) {
 	unavailable, available := false, true
 	registry := agentRegistry{DefaultAgent: "offline", Agents: []agentEntry{

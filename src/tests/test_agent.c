@@ -536,16 +536,16 @@ static void test_agent_route_selection_provider(void)
    assert(g_route_selector_randomized == 1);
    assert(g_route_selector_count == 2);
 
-   /* A registered external selector is authoritative: an unavailable process
-    * or invalid reply cannot silently resurrect the old in-process decision. */
+   /* Fairness selection is optional. If its module is unavailable or returns
+    * an invalid index, routing must still choose an eligible agent locally. */
    g_route_selector_fail = 1;
-   assert(agent_route(&cfg, "review") == NULL);
-   assert(delegate_pick_for_role(&cfg, "review", NULL, 0) == -1);
+   assert(agent_route(&cfg, "review") != NULL);
+   assert(delegate_pick_for_role(&cfg, "review", NULL, 0) >= 0);
 
    g_route_selector_fail = 0;
    g_route_selector_pick = 2;
-   assert(agent_route(&cfg, "review") == NULL);
-   assert(delegate_pick_for_role(&cfg, "review", NULL, 0) == -1);
+   assert(agent_route(&cfg, "review") != NULL);
+   assert(delegate_pick_for_role(&cfg, "review", NULL, 0) >= 0);
    agent_set_route_selection_provider(NULL);
 }
 

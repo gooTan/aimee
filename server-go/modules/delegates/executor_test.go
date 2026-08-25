@@ -403,12 +403,30 @@ func TestSelectAgentFallsBackFromHTTPDefaultButHonoursExplicitModel(t *testing.T
 		{Name: "remote", Model: "remote-model", Backend: "openai", Roles: []string{"review"}},
 		{Name: "local", Model: "local-model", CLIKind: "codex", CLICmd: "codex", Roles: []string{"review"}},
 	}}
-	selected, err := selectAgent(registry, "", "review", "security")
+	selected, err := selectAgent(registry, "", "review", "security", true)
 	if err != nil || selected.Name != "local" {
 		t.Fatalf("default selection = %+v, %v", selected, err)
 	}
-	if _, err := selectAgent(registry, "remote-model", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "remote-model", "review", "security", true); err == nil {
 		t.Fatal("explicit HTTP-only model silently fell back to another agent")
+	}
+}
+
+func TestSelectAgentUsesCompatibleRunnerWhenToolsAreDisabled(t *testing.T) {
+	registry := agentRegistry{DefaultAgent: "codex", Agents: []agentEntry{
+		{Name: "codex", CLIKind: "codex", CLICmd: "codex", Roles: []string{"draft"}},
+		{Name: "claude", CLIKind: "claude", CLICmd: "claude", Roles: []string{"draft"}},
+	}}
+	selected, err := selectAgent(registry, "", "draft", "engineer", false)
+	if err != nil || selected.Name != "claude" {
+		t.Fatalf("tools-disabled selection = %+v, %v", selected, err)
+	}
+	selected, err = selectAgent(registry, "codex", "draft", "engineer", false)
+	if err != nil || selected.Name != "claude" {
+		t.Fatalf("explicit selection = %+v, %v", selected, err)
+	}
+	if _, err := executorArgv(selected, delegatecontract.Invocation{Role: "draft", Tools: false}); err != nil {
+		t.Fatalf("compatible fallback rejected tools-disabled invocation: %v", err)
 	}
 }
 
@@ -420,11 +438,11 @@ func TestSelectAgentExcludesUnavailableAgents(t *testing.T) {
 		{Name: "online", Model: "online-model", CLIKind: "codex", CLICmd: "codex",
 			Roles: []string{"review"}, Available: &available},
 	}}
-	selected, err := selectAgent(registry, "", "review", "security")
+	selected, err := selectAgent(registry, "", "review", "security", true)
 	if err != nil || selected.Name != "online" {
 		t.Fatalf("unbound selection = %+v, %v", selected, err)
 	}
-	if _, err := selectAgent(registry, "offline-model", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "offline-model", "review", "security", true); err == nil {
 		t.Fatal("explicit selector launched an unavailable agent")
 	}
 }
@@ -432,13 +450,13 @@ func TestSelectAgentExcludesUnavailableAgents(t *testing.T) {
 func TestSelectAgentEnforcesRoleAndPersona(t *testing.T) {
 	registry := agentRegistry{Agents: []agentEntry{{Name: "reviewer", CLIKind: "claude",
 		CLICmd: "claude", Roles: []string{"review"}, Personas: []string{"security"}}}}
-	if _, err := selectAgent(registry, "reviewer", "code", "security"); err == nil {
+	if _, err := selectAgent(registry, "reviewer", "code", "security", true); err == nil {
 		t.Fatal("agent accepted an undeclared role")
 	}
-	if _, err := selectAgent(registry, "reviewer", "review", "qa"); err == nil {
+	if _, err := selectAgent(registry, "reviewer", "review", "qa", true); err == nil {
 		t.Fatal("agent accepted an undeclared persona")
 	}
-	if _, err := selectAgent(registry, "reviewer", "review", "security"); err != nil {
+	if _, err := selectAgent(registry, "reviewer", "review", "security", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -446,10 +464,10 @@ func TestSelectAgentEnforcesRoleAndPersona(t *testing.T) {
 func TestSelectAgentAlwaysRejectsPrimaryOnly(t *testing.T) {
 	registry := agentRegistry{DefaultAgent: "primary", Agents: []agentEntry{{Name: "primary",
 		CLIKind: "codex", CLICmd: "codex", Roles: []string{"review"}, PrimaryOnly: true}}}
-	if _, err := selectAgent(registry, "", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "", "review", "security", true); err == nil {
 		t.Fatal("primary-only default was selected for delegation")
 	}
-	if _, err := selectAgent(registry, "primary", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "primary", "review", "security", true); err == nil {
 		t.Fatal("explicit primary-only agent was selected for delegation")
 	}
 }

@@ -337,9 +337,18 @@ func (r *RegistryExecutor) PlanGroup(ctx context.Context,
 	return models, nil
 }
 
-func selectAgent(registry agentRegistry, model, role, persona string) (agentEntry, error) {
+func canDisableTools(a agentEntry, tools bool) bool {
+	if tools {
+		return true
+	}
+	kind := strings.ToLower(strings.TrimSpace(a.CLIKind))
+	return kind == "claude" || kind == "claude-code"
+}
+
+func selectAgent(registry agentRegistry, model, role, persona string, tools bool) (agentEntry, error) {
 	name := strings.TrimSpace(model)
 	explicit := name != "" && name != "$random"
+	incompatible := false
 	if name == "" || name == "$random" {
 		name = strings.TrimSpace(registry.DefaultAgent)
 	}
@@ -347,18 +356,24 @@ func selectAgent(registry agentRegistry, model, role, persona string) (agentEntr
 		for _, a := range registry.Agents {
 			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && eligible(a, role, persona) &&
 				(a.Name == name || a.Model == name) {
-				return a, nil
+				if canDisableTools(a, tools) {
+					return a, nil
+				}
+				incompatible = true
 			}
 		}
-		if explicit {
+		if explicit && !incompatible {
 			return agentEntry{}, fmt.Errorf("delegate model %q is not an enabled CLI agent", name)
 		}
 	}
 	for _, a := range registry.Agents {
 		if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" &&
-			eligible(a, role, persona) {
+			eligible(a, role, persona) && canDisableTools(a, tools) {
 			return a, nil
 		}
+	}
+	if incompatible {
+		return agentEntry{}, errors.New("no enabled delegate CLI can disable tools")
 	}
 	return agentEntry{}, errors.New("no enabled delegate CLI is configured")
 }
@@ -720,7 +735,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		result.Error = err.Error()
 		return result
 	}
-	agent, err := selectAgent(registry, request.Model, request.Role, request.Persona)
+	agent, err := selectAgent(registry, request.Model, request.Role, request.Persona, request.Tools)
 	if err != nil {
 		result.Error = err.Error()
 		return result

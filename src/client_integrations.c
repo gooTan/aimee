@@ -474,9 +474,8 @@ static const char *codex_skill_markdown_effective(void)
  * whose schema we pay ~1,000 tokens for on every single call. The rule was written,
  * defaulted on, and left unwired.
  *
- * Codex does not honour updatedInput on PreToolUse, so the guard's codex path
- * denies with an instruction to retry through the tool. That costs one turn and
- * redirects the remaining ones. */
+ * Codex honours updatedInput on PreToolUse, so the guard can silently retarget
+ * tool calls to the session worktree. */
 static const char *codex_hooks_json(const char *aimee_bin)
 {
    static char buf[1024];

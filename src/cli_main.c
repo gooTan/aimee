@@ -674,8 +674,9 @@ static int cli_hook_client_supports_updated_input(void)
 {
    const char *client = getenv("AIMEE_HOOK_CLIENT");
    if (client)
-      return strcmp(client, "claude") == 0;
-   return getenv("CLAUDE_SESSION_ID") != NULL;
+      return strcmp(client, "claude") == 0 || strcmp(client, "codex") == 0;
+   return getenv("CLAUDE_SESSION_ID") || getenv("CODEX_THREAD_ID") || getenv("CODEX_SANDBOX") ||
+          getenv("CODEX_HOME") || getenv("CODEX_CWD");
 }
 
 static void emit_pretool_deny_json(const char *reason)

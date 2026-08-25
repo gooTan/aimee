@@ -27,7 +27,7 @@
 #define CLI_CODEX_DEFAULT_IDLE_TIMEOUT_MS        -1     /* no idle timeout */
 #define CLI_CODEX_QUIET_POLL_MS                  300000 /* 5 min */
 #define CLI_CODEX_LINE_MAX                       (8 * 1024 * 1024)
-#define CLI_CODEX_APPROVAL_POLICY_CONFIG         "approval_policy=\"untrusted\""
+#define CLI_CODEX_APPROVAL_POLICY_CONFIG         "approval_policy=\"never\""
 #define CLI_CODEX_SANDBOX_READ_ONLY_CONFIG       "sandbox_mode=\"read-only\""
 #define CLI_CODEX_SANDBOX_WORKSPACE_WRITE_CONFIG "sandbox_mode=\"workspace-write\""
 #define CLI_CODEX_SANDBOX_DANGER_CONFIG          "sandbox_mode=\"danger-full-access\""

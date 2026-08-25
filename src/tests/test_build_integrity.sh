@@ -729,6 +729,8 @@ if check_updated_input_gate ../src/cmd_hooks.c 'hook_client_supports_updated_inp
    grep -q 'cli_hook_client_supports_updated_input' ../src/cli_main.c &&
    grep -q 'strcmp(client, "claude") == 0' ../src/cmd_hooks.c &&
    grep -q 'strcmp(client, "claude") == 0' ../src/cli_main.c &&
+   grep -q 'strcmp(client, "codex") == 0' ../src/cmd_hooks.c &&
+   grep -q 'strcmp(client, "codex") == 0' ../src/cli_main.c &&
    grep -q 'emit_pretool_rewrite_unsupported_json' ../src/cmd_hooks.c &&
    grep -q 'emit_pretool_rewrite_unsupported_json' ../src/cli_main.c; then
     pass "PreToolUse updatedInput is gated to supported clients in all hook entry paths"

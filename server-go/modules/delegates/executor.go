@@ -61,6 +61,7 @@ type agentEntry struct {
 type agentRegistry struct {
 	DefaultAgent string       `json:"default_agent"`
 	Agents       []agentEntry `json:"agents"`
+	Models       []agentEntry `json:"models"`
 }
 
 // RegistryExecutor is the Go-owned delegate producer. It selects a configured
@@ -114,6 +115,9 @@ func (r *RegistryExecutor) load() (agentRegistry, error) {
 	var registry agentRegistry
 	if err := json.Unmarshal(body, &registry); err != nil {
 		return agentRegistry{}, fmt.Errorf("decode agent registry: %w", err)
+	}
+	if len(registry.Agents) == 0 {
+		registry.Agents = registry.Models
 	}
 	if len(registry.Agents) == 0 {
 		return agentRegistry{}, errors.New("agent registry has no agents")

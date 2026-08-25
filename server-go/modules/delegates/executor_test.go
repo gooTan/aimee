@@ -139,7 +139,7 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nread prompt\nprintf 'answer:%s' \"$prompt\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	registry := map[string]any{"default_agent": "helper", "agents": []map[string]any{{
+	registry := map[string]any{"default_agent": "helper", "models": []map[string]any{{
 		"name": "helper", "model": "test", "cli_kind": "generic", "cli_cmd": script, "enabled": true,
 		"roles": []string{"code"},
 	}}}

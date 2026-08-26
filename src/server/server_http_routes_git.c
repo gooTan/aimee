@@ -568,9 +568,27 @@ static int wfe_managed_repo(const char *workdir_in, const char *head, char *work
  * default (`main`). Binding the base to this trusted checkout prevents an item
  * from selecting an arbitrary remote branch while preserving non-default
  * integration lanes. */
-static int wfe_managed_base(const char *repo, const char *base, char *err, size_t errlen)
+static int wfe_managed_base(const char *trusted_repo, const char *repo_in, const char *base,
+                            char *err, size_t errlen)
 {
-   char branch[256];
+   char repo[MAX_PATH_LEN], common_raw[MAX_PATH_LEN], common[MAX_PATH_LEN],
+       trusted_git_raw[MAX_PATH_LEN], trusted_git[MAX_PATH_LEN], branch[256];
+   if (!repo_in || !realpath(repo_in, repo) ||
+       (size_t)snprintf(trusted_git_raw, sizeof(trusted_git_raw), "%s/.git", trusted_repo) >=
+           sizeof(trusted_git_raw) ||
+       !realpath(trusted_git_raw, trusted_git))
+   {
+      snprintf(err, errlen, "cannot resolve admitted integration checkout");
+      return -1;
+   }
+   const char *common_argv[] = {
+       "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir", NULL};
+   if (wfe_git_capture(repo, common_argv, common_raw, sizeof(common_raw)) != 0 ||
+       !realpath(common_raw, common) || strcmp(common, trusted_git) != 0)
+   {
+      snprintf(err, errlen, "admitted integration checkout is outside the managed repository");
+      return -1;
+   }
    const char *branch_argv[] = {"git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD", NULL};
    if (wfe_git_capture(repo, branch_argv, branch, sizeof(branch)) != 0 || !branch[0] ||
        strcmp(branch, "HEAD") == 0)
@@ -583,8 +601,8 @@ static int wfe_managed_base(const char *repo, const char *base, char *err, size_
 
 static int wfe_forge_body_fields_valid(const cJSON *body)
 {
-   static const char *const allowed[] = {"op",   "workdir", "head",   "base", "title",
-                                         "body", "draft",   "number", NULL};
+   static const char *const allowed[] = {"op",   "workdir", "head",   "base",   "title",
+                                         "body", "draft",   "number", "repo", NULL};
    for (const cJSON *field = body ? body->child : NULL; field; field = field->next)
    {
       int index = -1;
@@ -661,6 +679,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    cJSON *body = (rq->body && rq->body[0]) ? cJSON_Parse(rq->body) : NULL;
    const char *op = route_json_string(body, "op");
    const char *workdir_in = route_json_string(body, "workdir");
+   const char *repo_in = route_json_string(body, "repo");
    const char *head = route_json_string(body, "head");
    const char *base = route_json_string(body, "base");
    const char *title = route_json_string(body, "title");
@@ -670,6 +689,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    const cJSON *jnumber = body ? cJSON_GetObjectItemCaseSensitive(body, "number") : NULL;
    int number = cJSON_IsNumber(jnumber) ? jnumber->valueint : 0;
    if (!body || !wfe_forge_body_fields_valid(body) || !op || !workdir_in ||
+       (strcmp(op, "open") == 0 && !repo_in) ||
        (head && !wfe_ref_valid(head)) || (base && !wfe_ref_valid(base)) ||
        (title && strlen(title) > 256) || (pr_body && strlen(pr_body) > 60000) ||
        !wfe_forge_operation_valid(op, head, base, title, pr_body, jdraft, draft, jnumber, number))
@@ -726,7 +746,7 @@ int rh_internal_forge_execute(const route_req_t *rq, char *resp, int cap)
    {
       int base_ok = slice_head && wfe_slice_ref_matches_workdir(workdir, "aimee/feat/", 1, base);
       if (feature_head)
-         base_ok = wfe_managed_base(trusted_repo, base, err, sizeof(err));
+         base_ok = wfe_managed_base(trusted_repo, repo_in, base, err, sizeof(err));
       if (base_ok == 0)
          snprintf(err, sizeof(err), "pull request base is outside the managed target");
       if (base_ok == 1)

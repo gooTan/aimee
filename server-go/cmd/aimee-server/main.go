@@ -158,7 +158,7 @@ func main() {
 		// losing work.
 		if *moduleBusSocket != "" {
 			reviewer, reviewerErr := engine.NewBusReviewer(rootCtx, *moduleBusSocket,
-				engine.BusPrincipalClass, engine.WFEBusPrincipalRef, 0)
+				engine.BusPrincipalClass, engine.WFEReviewBusPrincipalRef, 0)
 			if reviewerErr != nil {
 				log.Printf("roundtable reviews unavailable: %v", reviewerErr)
 			} else {
@@ -176,7 +176,7 @@ func main() {
 				log.Printf("roundtable review requests will be sent over the event bus "+
 					"(socket=%s principal=%d/%d kind=%d); a roundtable module must be "+
 					"attached to answer them",
-					*moduleBusSocket, engine.BusPrincipalClass, engine.WFEBusPrincipalRef,
+					*moduleBusSocket, engine.BusPrincipalClass, engine.WFEReviewBusPrincipalRef,
 					roundtablemod.EventReview)
 				nativeRunner.SetRoundtableReviewer(reviewer)
 			}

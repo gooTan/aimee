@@ -61,6 +61,7 @@ type agentEntry struct {
 type agentRegistry struct {
 	DefaultAgent string       `json:"default_agent"`
 	Agents       []agentEntry `json:"agents"`
+	Models       []agentEntry `json:"models"`
 }
 
 // RegistryExecutor is the Go-owned delegate producer. It selects a configured
@@ -114,6 +115,9 @@ func (r *RegistryExecutor) load() (agentRegistry, error) {
 	var registry agentRegistry
 	if err := json.Unmarshal(body, &registry); err != nil {
 		return agentRegistry{}, fmt.Errorf("decode agent registry: %w", err)
+	}
+	if len(registry.Agents) == 0 {
+		registry.Agents = registry.Models
 	}
 	if len(registry.Agents) == 0 {
 		return agentRegistry{}, errors.New("agent registry has no agents")
@@ -337,28 +341,52 @@ func (r *RegistryExecutor) PlanGroup(ctx context.Context,
 	return models, nil
 }
 
-func selectAgent(registry agentRegistry, model, role, persona string) (agentEntry, error) {
+func canDisableTools(a agentEntry, tools bool) bool {
+	if tools {
+		return true
+	}
+	kind := strings.ToLower(strings.TrimSpace(a.CLIKind))
+	return kind == "claude" || kind == "claude-code"
+}
+
+func commandAvailable(a agentEntry) bool {
+	argv, err := splitCommand(a.CLICmd)
+	if err != nil || len(argv) == 0 || !filepath.IsAbs(argv[0]) {
+		return err == nil && len(argv) > 0
+	}
+	info, err := os.Stat(argv[0])
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+func selectAgent(registry agentRegistry, model, role, persona string, tools bool) (agentEntry, error) {
 	name := strings.TrimSpace(model)
 	explicit := name != "" && name != "$random"
+	incompatible := false
 	if name == "" || name == "$random" {
 		name = strings.TrimSpace(registry.DefaultAgent)
 	}
 	if name != "" {
 		for _, a := range registry.Agents {
-			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && eligible(a, role, persona) &&
+			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && commandAvailable(a) && eligible(a, role, persona) &&
 				(a.Name == name || a.Model == name) {
-				return a, nil
+				if canDisableTools(a, tools) {
+					return a, nil
+				}
+				incompatible = true
 			}
 		}
-		if explicit {
+		if explicit && !incompatible {
 			return agentEntry{}, fmt.Errorf("delegate model %q is not an enabled CLI agent", name)
 		}
 	}
 	for _, a := range registry.Agents {
-		if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" &&
-			eligible(a, role, persona) {
+		if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && commandAvailable(a) &&
+			eligible(a, role, persona) && canDisableTools(a, tools) {
 			return a, nil
 		}
+	}
+	if incompatible {
+		return agentEntry{}, errors.New("no enabled delegate CLI can disable tools")
 	}
 	return agentEntry{}, errors.New("no enabled delegate CLI is configured")
 }
@@ -465,8 +493,8 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 }
 
 type limitedBuffer struct {
-	mu sync.Mutex
-	bytes.Buffer
+	mu        sync.Mutex
+	buffer    bytes.Buffer
 	remaining int
 }
 
@@ -480,7 +508,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	if len(p) > b.remaining {
 		p = p[:b.remaining]
 	}
-	_, _ = b.Buffer.Write(p)
+	_, _ = b.buffer.Write(p)
 	b.remaining -= len(p)
 	return n, nil
 }
@@ -488,13 +516,13 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 func (b *limitedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Buffer.String()
+	return b.buffer.String()
 }
 
 func (b *limitedBuffer) BytesCopy() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]byte(nil), b.Buffer.Bytes()...)
+	return append([]byte(nil), b.buffer.Bytes()...)
 }
 
 // turnMonitor enforces MaxTurns from observable JSONL events. Claude emits one
@@ -711,7 +739,7 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 }
 
 func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
-	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed"}
+	result := delegatecontract.InvocationResult{Version: request.Version, Status: "failed"}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -720,7 +748,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		result.Error = err.Error()
 		return result
 	}
-	agent, err := selectAgent(registry, request.Model, request.Role, request.Persona)
+	agent, err := selectAgent(registry, request.Model, request.Role, request.Persona, request.Tools)
 	if err != nil {
 		result.Error = err.Error()
 		return result

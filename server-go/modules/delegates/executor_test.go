@@ -75,6 +75,16 @@ func TestExecutionStageCanonicalizesRoleAndReturnsTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestExecutionStageAcceptsVersionThreeCaller(t *testing.T) {
+	executor := &fixedExecutor{result: delegatecontract.InvocationResult{Version: 3, Status: "done"}}
+	request, _ := json.Marshal(delegatecontract.Invocation{Version: 3, Role: "draft", Persona: "architect", Prompt: "prepare"})
+	reply, status := NewHandler(executor)(bus.ModuleInvocation{StageID: StageInvoke}, request)
+	var result delegatecontract.InvocationResult
+	if status != bus.ModuleStatusOK || json.Unmarshal(reply, &result) != nil || result.Version != 3 {
+		t.Fatalf("status = %d result = %s", status, reply)
+	}
+}
+
 func TestExecutionStageAppliesProducerDeadline(t *testing.T) {
 	request, _ := json.Marshal(delegatecontract.Invocation{Version: 2, Role: "review",
 		Persona: "reviewer", Prompt: "inspect", ExecutionTimeoutMS: 20})
@@ -139,7 +149,7 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nread prompt\nprintf 'answer:%s' \"$prompt\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	registry := map[string]any{"default_agent": "helper", "agents": []map[string]any{{
+	registry := map[string]any{"default_agent": "helper", "models": []map[string]any{{
 		"name": "helper", "model": "test", "cli_kind": "generic", "cli_cmd": script, "enabled": true,
 		"roles": []string{"code"},
 	}}}
@@ -158,6 +168,30 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 2, Role: "code",
 		Persona: "security", Prompt: "inspect", Workdir: workdir, Tools: true})
 	if result.Status != "done" || !strings.Contains(result.Response, "You are acting as security.") {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRegistryExecutorCapturesCodexOutputWithTurnLimit(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "codex-helper")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"OK\"}}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{"models": []map[string]any{{
+		"name": "helper", "cli_kind": "codex", "cli_cmd": script, "roles": []string{"review"},
+	}}}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 3, Role: "review",
+		Model: "helper", Prompt: "review", Tools: true, MaxTurns: 12})
+	if result.Status != "done" || result.Response != "OK" {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -403,12 +437,41 @@ func TestSelectAgentFallsBackFromHTTPDefaultButHonoursExplicitModel(t *testing.T
 		{Name: "remote", Model: "remote-model", Backend: "openai", Roles: []string{"review"}},
 		{Name: "local", Model: "local-model", CLIKind: "codex", CLICmd: "codex", Roles: []string{"review"}},
 	}}
-	selected, err := selectAgent(registry, "", "review", "security")
+	selected, err := selectAgent(registry, "", "review", "security", true)
 	if err != nil || selected.Name != "local" {
 		t.Fatalf("default selection = %+v, %v", selected, err)
 	}
-	if _, err := selectAgent(registry, "remote-model", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "remote-model", "review", "security", true); err == nil {
 		t.Fatal("explicit HTTP-only model silently fell back to another agent")
+	}
+}
+
+func TestSelectAgentUsesCompatibleRunnerWhenToolsAreDisabled(t *testing.T) {
+	registry := agentRegistry{DefaultAgent: "codex", Agents: []agentEntry{
+		{Name: "codex", CLIKind: "codex", CLICmd: "codex", Roles: []string{"draft"}},
+		{Name: "claude", CLIKind: "claude", CLICmd: "claude", Roles: []string{"draft"}},
+	}}
+	selected, err := selectAgent(registry, "", "draft", "engineer", false)
+	if err != nil || selected.Name != "claude" {
+		t.Fatalf("tools-disabled selection = %+v, %v", selected, err)
+	}
+	selected, err = selectAgent(registry, "codex", "draft", "engineer", false)
+	if err != nil || selected.Name != "claude" {
+		t.Fatalf("explicit selection = %+v, %v", selected, err)
+	}
+	if _, err := executorArgv(selected, delegatecontract.Invocation{Role: "draft", Tools: false}); err != nil {
+		t.Fatalf("compatible fallback rejected tools-disabled invocation: %v", err)
+	}
+}
+
+func TestSelectAgentSkipsMissingAbsoluteRunner(t *testing.T) {
+	registry := agentRegistry{DefaultAgent: "missing", Agents: []agentEntry{
+		{Name: "missing", CLIKind: "claude", CLICmd: filepath.Join(t.TempDir(), "claude"), Roles: []string{"draft"}},
+		{Name: "available", CLIKind: "claude", CLICmd: "/bin/sh", Roles: []string{"draft"}},
+	}}
+	selected, err := selectAgent(registry, "", "draft", "engineer", false)
+	if err != nil || selected.Name != "available" {
+		t.Fatalf("selection = %+v, %v", selected, err)
 	}
 }
 
@@ -420,11 +483,11 @@ func TestSelectAgentExcludesUnavailableAgents(t *testing.T) {
 		{Name: "online", Model: "online-model", CLIKind: "codex", CLICmd: "codex",
 			Roles: []string{"review"}, Available: &available},
 	}}
-	selected, err := selectAgent(registry, "", "review", "security")
+	selected, err := selectAgent(registry, "", "review", "security", true)
 	if err != nil || selected.Name != "online" {
 		t.Fatalf("unbound selection = %+v, %v", selected, err)
 	}
-	if _, err := selectAgent(registry, "offline-model", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "offline-model", "review", "security", true); err == nil {
 		t.Fatal("explicit selector launched an unavailable agent")
 	}
 }
@@ -432,13 +495,13 @@ func TestSelectAgentExcludesUnavailableAgents(t *testing.T) {
 func TestSelectAgentEnforcesRoleAndPersona(t *testing.T) {
 	registry := agentRegistry{Agents: []agentEntry{{Name: "reviewer", CLIKind: "claude",
 		CLICmd: "claude", Roles: []string{"review"}, Personas: []string{"security"}}}}
-	if _, err := selectAgent(registry, "reviewer", "code", "security"); err == nil {
+	if _, err := selectAgent(registry, "reviewer", "code", "security", true); err == nil {
 		t.Fatal("agent accepted an undeclared role")
 	}
-	if _, err := selectAgent(registry, "reviewer", "review", "qa"); err == nil {
+	if _, err := selectAgent(registry, "reviewer", "review", "qa", true); err == nil {
 		t.Fatal("agent accepted an undeclared persona")
 	}
-	if _, err := selectAgent(registry, "reviewer", "review", "security"); err != nil {
+	if _, err := selectAgent(registry, "reviewer", "review", "security", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -446,10 +509,10 @@ func TestSelectAgentEnforcesRoleAndPersona(t *testing.T) {
 func TestSelectAgentAlwaysRejectsPrimaryOnly(t *testing.T) {
 	registry := agentRegistry{DefaultAgent: "primary", Agents: []agentEntry{{Name: "primary",
 		CLIKind: "codex", CLICmd: "codex", Roles: []string{"review"}, PrimaryOnly: true}}}
-	if _, err := selectAgent(registry, "", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "", "review", "security", true); err == nil {
 		t.Fatal("primary-only default was selected for delegation")
 	}
-	if _, err := selectAgent(registry, "primary", "review", "security"); err == nil {
+	if _, err := selectAgent(registry, "primary", "review", "security", true); err == nil {
 		t.Fatal("explicit primary-only agent was selected for delegation")
 	}
 }

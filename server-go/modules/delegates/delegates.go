@@ -120,7 +120,7 @@ func NewHandler(executor Executor) bus.ModuleHandler {
 		}
 		var trailing any
 		if err := decoder.Decode(&trailing); err != io.EOF ||
-			decoded.Version != delegatecontract.WireVersion ||
+			(decoded.Version != delegatecontract.WireVersion && decoded.Version != 3) ||
 			strings.TrimSpace(decoded.Role) == "" || strings.TrimSpace(decoded.Persona) == "" ||
 			strings.TrimSpace(decoded.Prompt) == "" || decoded.MaxTurns < 0 ||
 			decoded.ExecutionTimeoutMS < 0 || decoded.ExecutionTimeoutMS > int64((24*time.Hour)/time.Millisecond) {
@@ -141,7 +141,7 @@ func NewHandler(executor Executor) bus.ModuleHandler {
 			defer deadlineCancel()
 		}
 		result := executor.Execute(ctx, decoded)
-		if result.Version != delegatecontract.WireVersion ||
+		if result.Version != decoded.Version ||
 			(result.Status != "done" && result.Status != "failed") {
 			return nil, bus.ModuleStatusInternal
 		}

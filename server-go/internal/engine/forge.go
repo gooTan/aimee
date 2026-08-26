@@ -163,7 +163,7 @@ func (f *HTTPForge) Open(ctx context.Context, repo, workdir, head, base string, 
 		URL string `json:"url"`
 	}
 	if err := f.execute(ctx, map[string]any{"op": "open", "workdir": workdir,
-		"head": head, "base": base, "title": spec.Title, "body": spec.Body,
+		"repo": repo, "head": head, "base": base, "title": spec.Title, "body": spec.Body,
 		"draft": spec.Draft}, &result); err != nil {
 		return PullRequest{}, err
 	}

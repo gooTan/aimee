@@ -493,8 +493,8 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 }
 
 type limitedBuffer struct {
-	mu sync.Mutex
-	bytes.Buffer
+	mu        sync.Mutex
+	buffer    bytes.Buffer
 	remaining int
 }
 
@@ -508,7 +508,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	if len(p) > b.remaining {
 		p = p[:b.remaining]
 	}
-	_, _ = b.Buffer.Write(p)
+	_, _ = b.buffer.Write(p)
 	b.remaining -= len(p)
 	return n, nil
 }
@@ -516,13 +516,13 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 func (b *limitedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Buffer.String()
+	return b.buffer.String()
 }
 
 func (b *limitedBuffer) BytesCopy() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]byte(nil), b.Buffer.Bytes()...)
+	return append([]byte(nil), b.buffer.Bytes()...)
 }
 
 // turnMonitor enforces MaxTurns from observable JSONL events. Claude emits one

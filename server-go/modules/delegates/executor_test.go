@@ -172,6 +172,30 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	}
 }
 
+func TestRegistryExecutorCapturesCodexOutputWithTurnLimit(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "codex-helper")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"OK\"}}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{"models": []map[string]any{{
+		"name": "helper", "cli_kind": "codex", "cli_cmd": script, "roles": []string{"review"},
+	}}}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 3, Role: "review",
+		Model: "helper", Prompt: "review", Tools: true, MaxTurns: 12})
+	if result.Status != "done" || result.Response != "OK" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestRegistryExecutorEnforcesMaxParallelWithoutPoisoningAgentHealth(t *testing.T) {
 	home := t.TempDir()
 	workdir := filepath.Join(home, "worktree")

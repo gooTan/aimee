@@ -310,6 +310,8 @@ func TestImplementationPromptUsesNoOpForSiblingSatisfiedTask(t *testing.T) {
 		"work merged by a sibling",
 		"leave the worktree unchanged",
 		"do not manufacture cosmetic changes",
+		"Do not change Aimee or global configuration",
+		"do not run `aimee git verify`",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("implementation prompt missing %q: %q", want, prompt)

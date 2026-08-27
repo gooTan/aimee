@@ -3,7 +3,9 @@
  * captured from a real `codex app-server` session and assert the
  * extracted bits. */
 #include <assert.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +14,13 @@
 
 #include "cli_codex.h"
 #include "platform_test_util.h" /* platform_tmpdir: honour TMPDIR, do not leak into /tmp */
+
+static atomic_int test_request_cancel;
+
+int agent_request_cancelled(void)
+{
+   return atomic_load(&test_request_cancel);
+}
 
 static void test_parse_agent_message_extracts_text(void)
 {
@@ -396,6 +405,53 @@ static void test_agent_execute_cli_codex_uses_requested_cwd(void)
    rmdir(root);
 }
 
+static void *cancel_codex_turn(void *unused)
+{
+   (void)unused;
+   struct timespec delay = {.tv_sec = 0, .tv_nsec = 200 * 1000000L};
+   nanosleep(&delay, NULL);
+   atomic_store(&test_request_cancel, 1);
+   return NULL;
+}
+
+static void test_agent_execute_cli_codex_honours_cancellation(void)
+{
+   char path[256];
+   snprintf(path, sizeof path, "%s/aimee-codex-cancel-XXXXXX", platform_tmpdir());
+   int fd = mkstemp(path);
+   assert(fd >= 0);
+   const char *script =
+       "#!/bin/sh\n"
+       "i=0\n"
+       "while IFS= read -r line; do\n"
+       "  i=$((i + 1))\n"
+       "  case \"$i\" in\n"
+       "    1) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}' ;;\n"
+       "    2) printf '%s\\n' "
+       "'{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"thread\":{\"id\":\"t1\"}}}' ;;\n"
+       "    3) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}'; sleep 30 ;;\n"
+       "  esac\n"
+       "done\n";
+   assert(write(fd, script, strlen(script)) == (ssize_t)strlen(script));
+   close(fd);
+   assert(chmod(path, 0700) == 0);
+
+   agent_t agent = {0};
+   snprintf(agent.name, sizeof(agent.name), "fake-codex");
+   snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "%s", path);
+   agent.cli_idle_timeout_ms = 60000;
+
+   atomic_store(&test_request_cancel, 0);
+   pthread_t cancel_thread;
+   assert(pthread_create(&cancel_thread, NULL, cancel_codex_turn, NULL) == 0);
+   agent_result_t out;
+   assert(agent_execute_cli_codex(&agent, NULL, "wait", &out) == -1);
+   assert(pthread_join(cancel_thread, NULL) == 0);
+   assert(strcmp(out.error, "turn cancelled") == 0);
+   atomic_store(&test_request_cancel, 0);
+   unlink(path);
+}
+
 typedef struct
 {
    char buf[512];
@@ -761,6 +817,10 @@ int main(void)
 
    printf("test_agent_execute_cli_codex_uses_requested_cwd... ");
    test_agent_execute_cli_codex_uses_requested_cwd();
+   printf("OK\n");
+
+   printf("test_agent_execute_cli_codex_honours_cancellation... ");
+   test_agent_execute_cli_codex_honours_cancellation();
    printf("OK\n");
 
    printf("test_chat_stream_splits_distinct_agent_message_items... ");

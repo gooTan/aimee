@@ -22,6 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
+int agent_request_cancelled(void) __attribute__((weak));
+
 /* Default idle ceiling. The codex side has its own timeout; this is the
  * safety net for "subprocess wedged with no output." */
 #define CLI_CODEX_DEFAULT_IDLE_TIMEOUT_MS        -1     /* no idle timeout */
@@ -45,6 +47,7 @@ typedef enum
    CLI_CODEX_READ_READ_ERR,
    CLI_CODEX_READ_LINE_TOO_LARGE,
    CLI_CODEX_READ_OOM,
+   CLI_CODEX_READ_CANCELLED,
 } cli_codex_read_status_t;
 
 typedef struct
@@ -477,6 +480,8 @@ static int cli_codex_write_all(cli_codex_t *c, const char *data, size_t total)
    size_t off = 0;
    while (off < total)
    {
+      if (agent_request_cancelled && agent_request_cancelled())
+         return -1;
       ssize_t w = write(c->in_fd, data + off, total - off);
       if (w > 0)
       {
@@ -492,7 +497,7 @@ static int cli_codex_write_all(cli_codex_t *c, const char *data, size_t total)
          if (c->out_fd >= 0)
             FD_SET(c->out_fd, &rfds);
          int max_fd = c->in_fd > c->out_fd ? c->in_fd : c->out_fd;
-         struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
+         struct timeval tv = {.tv_sec = agent_request_cancelled ? 1 : 30, .tv_usec = 0};
          int sel = select(max_fd + 1, &rfds, &wfds, NULL, &tv);
          if (sel < 0)
          {
@@ -560,6 +565,12 @@ static char *cli_codex_read_line(cli_codex_t *c, int timeout_ms, long long deadl
    }
    for (;;)
    {
+      if (agent_request_cancelled && agent_request_cancelled())
+      {
+         if (status)
+            *status = CLI_CODEX_READ_CANCELLED;
+         return NULL;
+      }
       /* Look for newline in current buffer. */
       char *nl = c->buf ? memchr(c->buf, '\n', c->buf_len) : NULL;
       if (nl)
@@ -588,6 +599,8 @@ static char *cli_codex_read_line(cli_codex_t *c, int timeout_ms, long long deadl
          }
          ms = remaining < timeout_ms ? (long)remaining : timeout_ms;
       }
+      if (agent_request_cancelled && ms > 1000)
+         ms = 1000;
 
       fd_set rfds;
       FD_ZERO(&rfds);
@@ -699,6 +712,8 @@ static const char *cli_codex_read_status_str(cli_codex_read_status_t s)
       return "line-too-large";
    case CLI_CODEX_READ_OOM:
       return "out-of-memory";
+   case CLI_CODEX_READ_CANCELLED:
+      return "cancelled";
    }
    return "unknown";
 }
@@ -1303,6 +1318,11 @@ static void cli_codex_set_stall_error(cli_codex_t *c, cli_codex_read_status_t rs
 {
    if (!out || outsz == 0)
       return;
+   if (rstatus == CLI_CODEX_READ_CANCELLED)
+   {
+      snprintf(out, outsz, "turn cancelled");
+      return;
+   }
 
    cli_codex_collect_exit_diagnostics(c);
    char err_snippet[400] = {0};

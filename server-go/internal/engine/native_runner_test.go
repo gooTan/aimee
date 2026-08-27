@@ -1706,6 +1706,47 @@ type mutateFallbackAgents struct {
 	errs     []error
 }
 
+func TestFableDirectFallbackUsesSol(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_fable_fallback", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	agents := &mutateFallbackAgents{
+		avail: delegate.AvailabilityClassQuotaRateLimit,
+		costs: []float64{1.5, 2.5},
+		errs:  []error{errors.New("You've hit your session limit")},
+	}
+	runner := &NativeRunner{db: store, agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_fable_fallback"},
+		Node:     wfe.Node{ID: "plan"},
+	}, DelegateRequest{Role: "draft", Persona: "planner", Delegate: "fable", Prompt: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "ok" || result.CostUSD != 4 || result.CostUnknown {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(agents.requests) != 2 || agents.requests[0].Delegate != "fable" || agents.requests[1].Delegate != "sol" {
+		t.Fatalf("requests=%+v", agents.requests)
+	}
+	events, err := store.Events(t.Context(), "wi_fable_fallback", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		found = found || event.Kind == "model_fallback" && event.Actor == "fable" && event.Detail == "to=sol reason=quota_rate_limit"
+	}
+	if !found {
+		t.Fatalf("fallback event missing: %+v", events)
+	}
+}
+
 func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) (DelegateResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

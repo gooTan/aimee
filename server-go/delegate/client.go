@@ -502,6 +502,7 @@ func ClassifyProviderAvailability(err error, responseStarted bool) AvailabilityC
 	if strings.Contains(detail, "quota") || strings.Contains(detail, "rate limit") ||
 		strings.Contains(detail, "rate-limit") || strings.Contains(detail, "rate_limit") ||
 		strings.Contains(detail, "rate_limited") || strings.Contains(detail, "rate limited") ||
+		strings.Contains(detail, "hit your session limit") ||
 		strings.Contains(detail, "too many requests") || strings.Contains(detail, "429") ||
 		strings.Contains(detail, "credits exhausted") || strings.Contains(detail, "throttled") {
 		return AvailabilityClassQuotaRateLimit

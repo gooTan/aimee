@@ -288,6 +288,37 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 	}
 	started := time.Now()
 	result, err := r.agents.Delegate(ctx, request)
+	if err != nil && request.Delegate == "fable" && !request.ReplayOnly {
+		availability := result.AvailabilityClass
+		if availability == "" {
+			availability = delegateapi.AvailabilityClassOf(err)
+		}
+		responseStarted := result.ResponseStarted
+		var execution *delegateapi.DelegateExecutionError
+		if !responseStarted && errors.As(err, &execution) {
+			responseStarted = execution.ResponseStarted
+		}
+		if !responseStarted && isAvailabilityFallback(availability) {
+			primaryCost, primaryUnknown := delegateAttemptCost(result, err)
+			r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_fallback", "fable", "to=sol reason="+string(availability))
+			fallback := request
+			fallback.Delegate = "sol"
+			fallbackResult, fallbackErr := r.agents.Delegate(ctx, fallback)
+			fallbackCost, fallbackUnknown := delegateAttemptCost(fallbackResult, fallbackErr)
+			if fallbackErr != nil {
+				fallbackAvailability := fallbackResult.AvailabilityClass
+				if fallbackAvailability == "" {
+					fallbackAvailability = delegateapi.AvailabilityClassOf(fallbackErr)
+				}
+				return fallbackResult, &delegateapi.DelegateExecutionError{Err: fallbackErr, Dispatched: true,
+					CostKnown: !primaryUnknown && !fallbackUnknown, CostUSD: primaryCost + fallbackCost,
+					AvailabilityClass: fallbackAvailability, ResponseStarted: fallbackResult.ResponseStarted}
+			}
+			fallbackResult.CostUSD += primaryCost
+			fallbackResult.CostUnknown = primaryUnknown || fallbackUnknown
+			result, err = fallbackResult, nil
+		}
+	}
 	// Only the stage-deadline direction is annotated. When the delegate's own
 	// budget ends the loop the C runtime already names both limits, and wrapping
 	// every unrelated dispatch failure would bury its cause behind timings that
@@ -852,7 +883,7 @@ func packetImplementationKind(item db1.WorkItem, proposal string) (string, error
 	return "general", nil
 }
 
-func isMutateAvailabilityFallback(class delegateapi.AvailabilityClass) bool {
+func isAvailabilityFallback(class delegateapi.AvailabilityClass) bool {
 	switch class {
 	case delegateapi.AvailabilityClassQuotaRateLimit, delegateapi.AvailabilityClassCapacity,
 		delegateapi.AvailabilityClassCapacityDeadline, delegateapi.AvailabilityClassAuthenticationSession,
@@ -1024,7 +1055,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 				effectiveStarted = true
 			}
 		}
-		if !docs && delegate == "muse" && !req.ReplayOnly && !effectiveStarted && isMutateAvailabilityFallback(effectiveAvail) {
+		if !docs && delegate == "muse" && !req.ReplayOnly && !effectiveStarted && isAvailabilityFallback(effectiveAvail) {
 			primaryCost, primaryUnknown := delegateAttemptCost(result, err)
 			r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "model_fallback", "muse", "to=luna reason="+string(effectiveAvail))
 			lunaResult, lunaErr := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: "luna", Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})

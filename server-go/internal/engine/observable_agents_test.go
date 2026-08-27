@@ -76,6 +76,16 @@ func TestObservableAgentsRecordsModelOutcomeAndQuota(t *testing.T) {
 	}
 }
 
+func TestObservableDiagnosticIsBoundedAndKeepsFailureTail(t *testing.T) {
+	detail := observableDiagnostic(strings.Repeat("startup event ", 2_000) + "You've hit your session limit")
+	if len(detail) > maxObservableDiagnosticBytes {
+		t.Fatalf("diagnostic length=%d, want <= %d", len(detail), maxObservableDiagnosticBytes)
+	}
+	if !strings.Contains(detail, "[truncated]") || !strings.HasSuffix(detail, "You've hit your session limit") {
+		t.Fatalf("diagnostic=%q", detail)
+	}
+}
+
 func TestObservableAgentsRecordsHeartbeatWhileModelRuns(t *testing.T) {
 	store, err := db1.Open(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	delegateapi "github.com/JBailes/aimee/server-go/delegate"
@@ -10,6 +11,16 @@ import (
 )
 
 const modelHeartbeatInterval = 15 * time.Second
+
+const maxObservableDiagnosticBytes = 1024
+
+func observableDiagnostic(detail string) string {
+	detail = strings.Join(strings.Fields(safeDiagnostic(detail)), " ")
+	if len(detail) <= maxObservableDiagnosticBytes {
+		return detail
+	}
+	return strings.ToValidUTF8(detail[:600], "") + " … [truncated] … " + strings.ToValidUTF8(detail[len(detail)-400:], "")
+}
 
 // observableAgents decorates the single resource-plane boundary used by both
 // ordinary delegates and roundtable seats. It records only safe operational
@@ -93,7 +104,7 @@ func (o observableAgents) Delegate(ctx context.Context, request DelegateRequest)
 		if availability == "" {
 			availability = delegateapi.AvailabilityClassOf(err)
 		}
-		finish("model_error", actor, "status=failed availability="+string(availability)+" error="+safeDiagnostic(err.Error()))
+		finish("model_error", actor, "status=failed availability="+string(availability)+" error="+observableDiagnostic(err.Error()))
 		return result, err
 	}
 	finish("model_complete", actor, "status=complete")
@@ -127,7 +138,7 @@ func (o observableAgents) DelegateGroup(ctx context.Context, requests []Delegate
 			if availability == "" {
 				availability = delegateapi.AvailabilityClassOf(result.Err)
 			}
-			finishes[i]("model_error", modelActor(requests[i]), "status=failed availability="+string(availability)+" error="+safeDiagnostic(result.Err.Error()))
+			finishes[i]("model_error", modelActor(requests[i]), "status=failed availability="+string(availability)+" error="+observableDiagnostic(result.Err.Error()))
 		} else {
 			finishes[i]("model_complete", modelActor(requests[i]), "status=complete")
 		}

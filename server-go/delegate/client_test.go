@@ -221,6 +221,12 @@ func TestClassifyAvailability(t *testing.T) {
 	}
 }
 
+func TestClassifyProviderAvailabilityRecognizesClaudeSessionLimit(t *testing.T) {
+	if got := ClassifyProviderAvailability(errors.New("You've hit your session limit · resets 1:20am"), false); got != AvailabilityClassQuotaRateLimit {
+		t.Fatalf("class=%q, want %q", got, AvailabilityClassQuotaRateLimit)
+	}
+}
+
 func TestDelegateCarriesAvailabilityClass(t *testing.T) {
 	client := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
 		Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}

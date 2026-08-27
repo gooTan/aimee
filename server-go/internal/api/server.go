@@ -51,6 +51,7 @@ func New(db *db1.Store, artifacts *wfe.ArtifactStore, workflowDir ...string) (*S
 	s.mux.HandleFunc("GET /v1/workflow/items/all", s.items)
 	s.mux.HandleFunc("GET /v1/workflow/items/{id}", s.item)
 	s.mux.HandleFunc("GET /v1/workflow/items/{id}/events", s.events)
+	s.mux.HandleFunc("POST /internal/model-events", s.recordModelEvent)
 	s.mux.HandleFunc("GET /v1/workflow/items/{id}/proposal", s.proposal)
 	s.mux.HandleFunc("POST /v1/workflow/items/{id}/pause", s.workflowPause)
 	s.mux.HandleFunc("POST /v1/workflow/items/{id}/resume", s.workflowResume)
@@ -268,6 +269,31 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		events = []db1.Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "next_after": next})
+}
+
+func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
+	var event struct {
+		WorkItemID string `json:"work_item_id"`
+		Stage      string `json:"stage"`
+		Kind       string `json:"kind"`
+		Actor      string `json:"actor"`
+		Detail     string `json:"detail"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+		return
+	}
+	allowed := event.Kind == "model_dispatch" || event.Kind == "model_heartbeat" || event.Kind == "model_complete" || event.Kind == "model_error" || event.Kind == "model_fallback"
+	if !allowed || event.WorkItemID == "" || event.Stage == "" || event.Actor == "" || len(event.Detail) > 4096 {
+		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+		return
+	}
+	if err := s.db.RecordEvent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) proposal(w http.ResponseWriter, r *http.Request) {

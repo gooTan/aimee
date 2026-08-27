@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/JBailes/aimee/server-go/delegate"
 	"github.com/JBailes/aimee/server-go/modules/roundtable/panel"
@@ -34,8 +35,22 @@ func NewPanelReviewer(presets *panel.Store, seats panel.Delegates) (*PanelReview
 }
 
 // NewBusDelegates seats a panel through the delegates module's bus stage.
-func NewBusDelegates(client *delegate.BusClient) panel.Delegates {
-	return seatBus{client: client}
+func NewBusDelegates(client *delegate.BusClient, observers ...func(ModelEvent)) panel.Delegates {
+	var observer func(ModelEvent)
+	if len(observers) > 0 {
+		observer = observers[0]
+	}
+	return seatBus{client: client, observer: observer}
+}
+
+// ModelEvent is safe operational metadata for a live roundtable seat. Prompts,
+// responses, tool arguments, and hidden reasoning never cross this boundary.
+type ModelEvent struct {
+	WorkItemID string `json:"work_item_id"`
+	Stage      string `json:"stage"`
+	Kind       string `json:"kind"`
+	Actor      string `json:"actor"`
+	Detail     string `json:"detail"`
 }
 
 // Review runs one roundtable and returns its verdict.
@@ -123,7 +138,75 @@ func (r *PanelReviewer) Review(ctx context.Context, request panel.ReviewRequest)
 // Classifying and redacting a seat failure happens here because this is the
 // side that knows the transport's error taxonomy; the panel reports what it is
 // told and never parses an error itself.
-type seatBus struct{ client *delegate.BusClient }
+type seatBus struct {
+	client   *delegate.BusClient
+	observer func(ModelEvent)
+}
+
+func seatActor(request panel.SeatRequest) string {
+	if request.Participant != "" {
+		return request.Participant
+	}
+	if request.Selector != "" {
+		return request.Selector
+	}
+	return "unassigned"
+}
+
+func seatPhase(slot string) string {
+	switch {
+	case strings.Contains(slot, ":chairman"):
+		return "chairman"
+	case strings.Contains(slot, ":discussion:"):
+		return "discussion"
+	default:
+		return "analysis"
+	}
+}
+
+func (s seatBus) observe(run panel.Run, request panel.SeatRequest) func(panel.SeatResult) {
+	if s.observer == nil || run.ID == "" {
+		return func(panel.SeatResult) {}
+	}
+	actor := seatActor(request)
+	started := time.Now()
+	detail := fmt.Sprintf("phase=%s role=%s persona=%s tools=%t", seatPhase(request.DurableSlot), request.Role, request.Persona, request.Tools)
+	emit := func(kind, eventActor, extra string) {
+		s.observer(ModelEvent{WorkItemID: run.ID, Stage: run.Stage, Kind: kind, Actor: eventActor, Detail: detail + " " + extra})
+	}
+	if request.FallbackFrom != "" {
+		emit("model_fallback", request.FallbackFrom, "to="+actor+" reason="+request.FallbackReason)
+	}
+	emit("model_dispatch", actor, "status=running")
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				emit("model_heartbeat", actor, "status=running elapsed="+time.Since(started).Round(time.Second).String())
+			}
+		}
+	}()
+	return func(result panel.SeatResult) {
+		close(done)
+		<-stopped
+		finalActor := result.Participant
+		if finalActor == "" {
+			finalActor = actor
+		}
+		if result.Err != nil {
+			emit("model_error", finalActor, "status=failed availability="+result.AvailabilityClass+" error="+result.FailureDetail+" elapsed="+time.Since(started).Round(time.Millisecond).String())
+			return
+		}
+		emit("model_complete", finalActor, "status=complete elapsed="+time.Since(started).Round(time.Millisecond).String())
+	}
+}
 
 func (s seatBus) request(run panel.Run, seat panel.SeatRequest) delegate.DelegateRequest {
 	return delegate.DelegateRequest{
@@ -193,7 +276,9 @@ func (s seatBus) Group(ctx context.Context, run panel.Run, seats []panel.SeatReq
 		return out
 	}
 	requests := make([]delegate.DelegateRequest, len(seats))
+	finishes := make([]func(panel.SeatResult), len(seats))
 	for i, seat := range seats {
+		finishes[i] = s.observe(run, seat)
 		requests[i] = s.request(run, seat)
 		if run.CostLimitUSD > 0 {
 			// Seats execute concurrently, so their individual ceilings must sum to
@@ -203,13 +288,17 @@ func (s seatBus) Group(ctx context.Context, run panel.Run, seats []panel.SeatReq
 	}
 	for i, call := range s.client.DelegateGroup(ctx, requests) {
 		out[i] = seatResult(call.Participant, call.Response, call.CostUSD, call.CostUnknown, call.AvailabilityClass, call.Err, call.ResponseStarted)
+		finishes[i](out[i])
 	}
 	return out
 }
 
 func (s seatBus) One(ctx context.Context, run panel.Run, seat panel.SeatRequest) panel.SeatResult {
+	finish := s.observe(run, seat)
 	request := s.request(run, seat)
 	request.MaxCostUSD = run.CostLimitUSD
 	result, err := s.client.Delegate(ctx, request)
-	return seatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, result.AvailabilityClass, err, result.ResponseStarted)
+	out := seatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, result.AvailabilityClass, err, result.ResponseStarted)
+	finish(out)
+	return out
 }

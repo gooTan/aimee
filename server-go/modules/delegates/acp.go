@@ -15,7 +15,7 @@ import (
 	delegatecontract "github.com/JBailes/aimee/server-go/delegate"
 )
 
-const maxACPLine = 256 * 1024
+const maxACPLine = maxExecutorOutput
 
 type acpLine struct {
 	text string

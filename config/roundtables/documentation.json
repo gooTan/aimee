@@ -11,6 +11,6 @@
   "chairman": "fable",
   "chairman_fallback": "sol",
   "chairman_enabled": true,
-  "min_successful": 6,
+  "min_successful": 4,
   "discussion": true
 }

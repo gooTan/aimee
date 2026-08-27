@@ -80,6 +80,26 @@ func TestACPTransportHappyReadOnly(t *testing.T) {
 	}
 }
 
+func TestACPTransportAcceptsProtocolSizedLines(t *testing.T) {
+	exec, workdir := newMuseExecutor(t, "large-message", 0)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	result := exec.Execute(ctx, delegatecontract.Invocation{
+		Version: delegatecontract.WireVersion,
+		Role:    "draft",
+		Persona: "architect",
+		Prompt:  "hello",
+		Workdir: workdir,
+		Tools:   false,
+	})
+	if result.Status != "done" {
+		t.Fatalf("status = %q want done err=%q", result.Status, result.Error)
+	}
+	if len(result.Response) != 300*1024 {
+		t.Fatalf("response length = %d want %d", len(result.Response), 300*1024)
+	}
+}
+
 func TestACPTransportRejectsUnacceptedPins(t *testing.T) {
 	cases := []struct {
 		name       string

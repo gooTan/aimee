@@ -238,6 +238,19 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 	}
 	switch scenario {
+	case "large-message":
+		acceptInitAndNew()
+		acceptModel()
+		p5 := readRequest(5, "session/set_config_option")
+		validateEffort(p5)
+		reply(5, nil, "")
+		p3 := readRequest(3, "session/prompt")
+		validatePrompt(p3)
+		if err := enc.Encode(map[string]interface{}{"jsonrpc": "2.0", "method": "session/update", "params": map[string]interface{}{"sessionId": "fake-session", "update": map[string]interface{}{"sessionUpdate": "agent_message_chunk", "content": map[string]interface{}{"type": "text", "text": strings.Repeat("x", 300*1024)}}}}); err != nil {
+			fail("failed to send large session/update: %v", err)
+		}
+		reply(3, map[string]interface{}{"stopReason": "end_turn"}, "")
+		os.Exit(0)
 	case "happy-readonly":
 		acceptInitAndNew()
 		acceptModel()

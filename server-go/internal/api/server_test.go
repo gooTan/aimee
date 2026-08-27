@@ -44,6 +44,23 @@ func setWorkflowIdentity(req *http.Request, user string, operator bool) {
 	}
 }
 
+func TestInternalModelEventIsRecorded(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_events", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "plan_gate"}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(`{"work_item_id":"wi_events","stage":"plan_gate","kind":"model_dispatch","actor":"sol","detail":"phase=analysis status=running"}`))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := store.Events(t.Context(), "wi_events", 0, 10)
+	if err != nil || len(events) != 2 || events[1].Kind != "model_dispatch" || events[1].Actor != "sol" {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}
+
 func TestProposalEndpointImportsLegacySourceWithoutTruncation(t *testing.T) {
 	server, store, _ := newTestServer(t)
 	tail := "ACCEPTANCE_CRITERION_AFTER_ALL_PRIOR_BYTE_LIMITS"

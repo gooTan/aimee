@@ -2,10 +2,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,6 +46,27 @@ var errUsage = errors.New("usage: aimee-module-NAME DAEMON_MODULE_BUS_SOCKET")
 // or with no way to reach an agent, is not a degraded review but no review.
 const roundtableDelegatePrincipalRef uint32 = 65
 
+func workflowModelObserver(socket string) func(roundtable.ModelEvent) {
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	}}}
+	return func(event roundtable.ModelEvent) {
+		body, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://localhost/internal/model-events", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}
+}
+
 func roundtableReviewer(ctx context.Context, moduleBusSocket string) (*roundtable.PanelReviewer, error) {
 	home := os.Getenv("AIMEE_HOME")
 	if home == "" {
@@ -68,7 +93,8 @@ func roundtableReviewer(ctx context.Context, moduleBusSocket string) (*roundtabl
 		busClient.Detach()
 		return nil, err
 	}
-	return roundtable.NewPanelReviewer(presets, roundtable.NewBusDelegates(client))
+	return roundtable.NewPanelReviewer(presets, roundtable.NewBusDelegates(client,
+		workflowModelObserver(filepath.Join(home, "aimee-wfe-http.sock"))))
 }
 
 // sandboxHome resolves the learned store's root the same way the WFE resolves

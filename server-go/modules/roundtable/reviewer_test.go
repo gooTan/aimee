@@ -178,6 +178,21 @@ func TestSeatBusForwardsAvailabilityClass(t *testing.T) {
 	}
 }
 
+func TestSeatBusReportsLiveModelEvents(t *testing.T) {
+	var events []ModelEvent
+	seats := seatBus{observer: func(event ModelEvent) { events = append(events, event) }}
+	finish := seats.observe(panel.Run{ID: "wi_panel", Stage: "plan_gate"}, panel.SeatRequest{
+		Role: "review", Persona: "qa", Selector: "sol", Tools: true,
+		DurableSlot: "panel:x:discussion:1:seat:0", FallbackFrom: "fable", FallbackReason: "quota_rate_limit",
+	})
+	finish(panel.SeatResult{Participant: "sol"})
+	if len(events) != 3 || events[0].Kind != "model_fallback" || events[0].Actor != "fable" ||
+		events[1].Kind != "model_dispatch" || events[1].Actor != "sol" || events[2].Kind != "model_complete" ||
+		!strings.Contains(events[1].Detail, "phase=discussion") {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
 func TestSeatFailureDetailIsRedacted(t *testing.T) {
 	result := seatResult("", "", 0, false,
 		delegate.AvailabilityClassNone,

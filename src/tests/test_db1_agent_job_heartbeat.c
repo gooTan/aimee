@@ -148,8 +148,10 @@ static void test_uncapped_prompt_result_round_trip(void)
    assert(huge);
    memset(huge, 'H', over);
    huge[over] = '\0';
-   db1_agent_job_update(job, "done", 1, huge);
-   assert(db1_agent_job_get(job, &row) == 0);
+   int huge_job = db1_agent_job_create("code", "huge result", "agent", "owner");
+   assert(huge_job > 0);
+   db1_agent_job_update(huge_job, "done", 1, huge);
+   assert(db1_agent_job_get(huge_job, &row) == 0);
    assert(strlen(row.result) <= DB1_AJ_RESULT_STORE_MAX);
    assert(strstr(row.result, "[truncated") != NULL);
    db1_agent_job_free(&row);
@@ -483,7 +485,7 @@ static void test_restart_reconciliation_cancels_only_nonterminal_jobs(void)
    printf("  PASS: test_restart_reconciliation_cancels_only_nonterminal_jobs\n");
 }
 
-static void test_done_update_wins_cancel_complete_race(void)
+static void test_acknowledged_cancel_wins_late_completion(void)
 {
    setup_db();
    int job = db1_agent_job_create("review", "test", "agent", "owner");
@@ -494,12 +496,12 @@ static void test_done_update_wins_cancel_complete_race(void)
 
    db1_agent_job_t row;
    assert(db1_agent_job_get(job, &row) == 0);
-   assert(strcmp(row.status, "done") == 0);
-   assert(row.cursor_turn == 8);
-   assert(strcmp(row.result, "review result") == 0);
+   assert(strcmp(row.status, "cancelled") == 0);
+   assert(strcmp(row.result, "cancelled: operator cancel") == 0);
+   assert(row.lease_owner[0] == '\0');
 
    teardown_db();
-   printf("  PASS: test_done_update_wins_cancel_complete_race\n");
+   printf("  PASS: test_acknowledged_cancel_wins_late_completion\n");
 }
 
 static void test_failed_update_does_not_overwrite_cancelled(void)
@@ -680,7 +682,7 @@ int main(void)
    test_is_cancelled_round_trip();
    test_restart_reconciliation_cancels_only_nonterminal_jobs();
    test_update_does_not_overwrite_cancelled();
-   test_done_update_wins_cancel_complete_race();
+   test_acknowledged_cancel_wins_late_completion();
    test_failed_update_does_not_overwrite_cancelled();
    test_status_reads_do_not_run_global_agent_name_backfill();
    test_routed_agent_name_survives_status_reads();

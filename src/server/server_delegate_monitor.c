@@ -3,11 +3,13 @@
 #include "server_delegate_monitor.h"
 #include <aimee/delegates/delegate_backend_docker.h> /* delegate_backend_docker_reap_aged (leaked-container reap) */
 #include "agent_admission.h" /* agent_admission_touch / _reap_idle (wedged-slot reclaim) */
+#include "agent_config.h"    /* agent_set_request_cancel */
 #include "http_retry.h"      /* http_set_progress_cb */
 #include "cli_session.h"     /* cli_session_set_heartbeat_cb (tmux-CLI delegates) */
 #include "log.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,7 @@ int db1_agent_job_list_running_ids(int *out_ids, int max);
 int db1_agent_job_classify_stale(int job_id, int idle_threshold_secs, int in_tool_threshold_secs,
                                  char *out_state, size_t out_state_cap);
 int db1_agent_job_cancel_by_id(int job_id, const char *reason);
+int db1_agent_job_is_cancelled(int job_id);
 void db1_agent_job_heartbeat(int job_id);
 
 /* The id of the delegation running on this thread (== the admission context handle for a
@@ -33,6 +36,30 @@ const char *delegation_active_id(void) __attribute__((weak));
  * http_retry progress callback fires after every model HTTP attempt; bumping the
  * heartbeat there keeps a slow-but-progressing delegate alive (see header). */
 static _Thread_local int g_hb_job_id;
+typedef struct
+{
+   int job_id;
+   atomic_int stop;
+   atomic_int cancel;
+} delegate_heartbeat_state_t;
+static _Thread_local pthread_t g_hb_thread;
+static _Thread_local delegate_heartbeat_state_t *g_hb_state;
+
+static void *delegate_heartbeat_thread(void *arg)
+{
+   delegate_heartbeat_state_t *state = arg;
+   int heartbeat_wait = 0;
+   while (!atomic_load(&state->stop))
+   {
+      if (db1_agent_job_is_cancelled(state->job_id))
+         atomic_store(&state->cancel, 1);
+      else if (heartbeat_wait == 0)
+         db1_agent_job_heartbeat(state->job_id);
+      heartbeat_wait = (heartbeat_wait + 1) % 10;
+      sleep(1);
+   }
+   return NULL;
+}
 
 static void delegate_heartbeat_cb(void)
 {
@@ -58,17 +85,51 @@ static void delegate_heartbeat_cli_cb(void *ud)
    delegate_heartbeat_cb();
 }
 
+static int delegate_cancel_cli_cb(void *ud)
+{
+   (void)ud;
+   return g_hb_job_id > 0 && db1_agent_job_is_cancelled(g_hb_job_id);
+}
+
 void server_delegate_heartbeat_begin(int job_id)
 {
+   server_delegate_heartbeat_end();
    g_hb_job_id = job_id > 0 ? job_id : 0;
    http_set_progress_cb(job_id > 0 ? delegate_heartbeat_cb : NULL);
    cli_session_set_heartbeat_cb(job_id > 0 ? delegate_heartbeat_cli_cb : NULL, NULL);
+   cli_session_set_cancel_check(job_id > 0 ? delegate_cancel_cli_cb : NULL, NULL);
+   if (job_id > 0)
+   {
+      g_hb_state = calloc(1, sizeof(*g_hb_state));
+      if (g_hb_state)
+      {
+         g_hb_state->job_id = job_id;
+         atomic_init(&g_hb_state->stop, 0);
+         atomic_init(&g_hb_state->cancel, 0);
+         if (pthread_create(&g_hb_thread, NULL, delegate_heartbeat_thread, g_hb_state) != 0)
+         {
+            free(g_hb_state);
+            g_hb_state = NULL;
+         }
+         else
+            agent_set_request_cancel(&g_hb_state->cancel);
+      }
+   }
 }
 
 void server_delegate_heartbeat_end(void)
 {
+   if (g_hb_state)
+   {
+      atomic_store(&g_hb_state->stop, 1);
+      pthread_join(g_hb_thread, NULL);
+      agent_set_request_cancel(NULL);
+      free(g_hb_state);
+      g_hb_state = NULL;
+   }
    http_set_progress_cb(NULL);
    cli_session_set_heartbeat_cb(NULL, NULL);
+   cli_session_set_cancel_check(NULL, NULL);
    g_hb_job_id = 0;
 }
 

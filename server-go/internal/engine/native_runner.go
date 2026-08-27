@@ -1047,6 +1047,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	if err := r.commitChanges(ctx, workdir, req.Node.ID); err != nil {
 		return StepResult{}, err
 	}
+	satisfiedNoDelta := false
 	// A write delegate that left no commit and no branch work did not implement the
 	// task. Advancing turns that into an empty diff at freeze,
 	// which reads as "the work is already in the base" and accepts the slice, so a
@@ -1075,6 +1076,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		// doc_gate still review it; blocking review feedback overrides that exemption.
 		satisfiedNoop := (docs && delegatePartialIsNoChange(result.Response)) ||
 			(!docs && implementationPartialIsSatisfiedNoChange(result.Response))
+		satisfiedNoDelta = headErr == nil && head == baseHead && satisfiedNoop
 		blockingReviewUnchanged := false
 		if headErr == nil && head == baseHead && feedbackHasBlockingFinding(req.Feedback) &&
 			req.Feedback.ArtifactHash != "" {
@@ -1104,7 +1106,12 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	if err != nil {
 		return StepResult{}, err
 	}
-	return StepResult{Status: StepAdvanced, ArtifactType: "branch", Artifact: branch, ContentHash: head, CostUSD: cost, CostUnknown: costUnknown}, nil
+	detail := ""
+	if satisfiedNoDelta {
+		detail = "satisfied/no_delta"
+	}
+	return StepResult{Status: StepAdvanced, ArtifactType: "branch", Artifact: branch, ContentHash: head,
+		Detail: detail, CostUSD: cost, CostUnknown: costUnknown}, nil
 }
 
 func feedbackHasBlockingFinding(feedback *wfe.ReviewFeedback) bool {

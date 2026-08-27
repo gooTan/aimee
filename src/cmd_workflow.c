@@ -314,8 +314,7 @@ static int wf_events_since(const char *id, long long *after, int heading)
    for (;;)
    {
       char path[320];
-      snprintf(path, sizeof path, "/v1/workflow/items/%s/events?after=%lld&limit=200", id,
-               *after);
+      snprintf(path, sizeof path, "/v1/workflow/items/%s/events?after=%lld&limit=200", id, *after);
       int st = 0;
       char *resp = aimee_client_request("GET", path, NULL, &st);
       if (!resp || st != 200)

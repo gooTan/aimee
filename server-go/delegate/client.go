@@ -411,6 +411,20 @@ func SafeDiagnostic(detail string) string {
 	return detail
 }
 
+func SafeDiagnosticSummary(detail string, maxBytes int) string {
+	detail = strings.Join(strings.Fields(SafeDiagnostic(detail)), " ")
+	if maxBytes <= 0 || len(detail) <= maxBytes {
+		return detail
+	}
+	const marker = " … [truncated] … "
+	if maxBytes <= len(marker) {
+		return strings.ToValidUTF8(detail[:maxBytes], "")
+	}
+	available := maxBytes - len(marker)
+	prefix := available * 3 / 5
+	return strings.ToValidUTF8(detail[:prefix], "") + marker + strings.ToValidUTF8(detail[len(detail)-(available-prefix):], "")
+}
+
 func IsCapacityBackpressure(err error) bool {
 	if err == nil {
 		return false

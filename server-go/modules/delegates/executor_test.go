@@ -345,6 +345,34 @@ func TestRegistryExecutorDoesNotClassifyFailureAfterResponseBegins(t *testing.T)
 	}
 }
 
+func TestRegistryExecutorClassifiesClaudeRateLimitPreambleBeforeResponse(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "limited-claude")
+	body := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}' '{\"type\":\"rate_limit_event\"}' '{\"type\":\"assistant\",\"is_api_error_message\":true}' '{\"type\":\"result\",\"api_error_status\":429,\"result\":\"You have hit your session limit\"}'\n+exit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "fable", "cli_kind": "claude", "cli_cmd": script, "roles": []string{"draft"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "draft", Persona: "architect", Prompt: "plan", Workdir: workdir})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassQuotaRateLimit || result.ResponseStarted {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestPlanGroupPreservesDiversityEligibilityAndCapacity(t *testing.T) {
 	home := t.TempDir()
 	registry := map[string]any{"agents": []map[string]any{

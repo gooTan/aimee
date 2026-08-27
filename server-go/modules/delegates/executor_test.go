@@ -628,7 +628,7 @@ func TestWatchdogKillsAndReapsDeepProcessTreeWhenProducerDies(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		done <- runWatchdog(controlRead,
-			[]string{"/bin/sh", "-c", `/bin/sh -c 'sleep 30 & child=$!; printf "%s %s %s\n" "$PPID" "$$" "$child"; wait' & wait`},
+			[]string{"/bin/sh", "-c", `/bin/sh -c 'setsid sleep 30 >/dev/null 2>&1 & child=$!; printf "%s %s %s\n" "$PPID" "$$" "$child"; wait' & wait`},
 			strings.NewReader(""), outputWrite, outputWrite)
 	}()
 	var leader, child, grandchild int

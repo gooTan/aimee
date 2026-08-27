@@ -14,13 +14,23 @@ nodes:
     block: branch.open
     params:
       base: trunk
+    next: scout
+  - id: scout
+    block: understand
+    params:
+      brief: true
+      delegate: luna
+      with_user: false
     next: plan
+    on_fail: scout
   - id: plan
     block: author.plan
     in:
-      proposal: draft.out
+      proposal: scout.out
     params:
+      delegate: fable
       max_rounds: 60
+      require_brief: true
     next: plan_gate
     on_fail: plan
   - id: plan_gate
@@ -34,11 +44,9 @@ nodes:
         eligible:
           - contrarian
         required:
-          - security
-          - architect
-          - qa
           - reviewer
-      quorum: 4
+          - qa
+      quorum: 2
       roundtable: plan
     on_pass: split
     on_fail: plan
@@ -78,9 +86,19 @@ nodes:
     in:
       src: accept_freeze.out
     params:
-      delegate: sol-review
+      delegate: sol
       require_code_review_skill: true
       task: Apply the repository code-review skill across the Standards and Spec axes.
+    next: fable_judgment
+    on_fail: split
+  - id: fable_judgment
+    block: review
+    in:
+      src: accept_freeze.out
+    params:
+      delegate: fable
+      persona: chairman
+      task: Make the final acceptance judgment after the Gemini and Sol code-review-skill passes. Confirm the requested behavior is complete and reject any surviving blocker before documentation and pull-request handoff.
     next: document
     on_fail: split
   - id: document
@@ -105,10 +123,9 @@ nodes:
         eligible:
           - technical-writer
         required:
-          - architect
-          - qa
           - reviewer
-      quorum: 3
+          - qa
+      quorum: 2
       roundtable: documentation
     on_pass: archive
     on_fail: document

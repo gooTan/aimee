@@ -68,6 +68,11 @@ type SeatRequest struct {
 	Tools bool
 	// MaxTurnsCap bounds a seat without overriding a smaller role or agent cap.
 	MaxTurnsCap int
+	// FallbackFrom and FallbackReason are safe operational metadata set only on
+	// an explicit fallback attempt. The transport may surface the transition;
+	// neither field is included in the model prompt.
+	FallbackFrom   string
+	FallbackReason string
 }
 
 // SeatResult is what a seat returned, or why it did not.

@@ -158,6 +158,8 @@ func RunChairman(ctx context.Context, delegates Delegates, run Run, panel Panel,
 			fallback := request
 			fallback.Selector = panel.ChairmanFallback
 			fallback.DurableSlot = chairmanDurableSlot(run) + ":fallback"
+			fallback.FallbackFrom = panel.Chairman
+			fallback.FallbackReason = string(attempt.availability)
 			fallbackAttempt := runChairmanAttempt(ctx, delegates, run, fallback, reviewed, artifactStage)
 			cost += fallbackAttempt.cost
 			costUnknown = costUnknown || fallbackAttempt.costUnknown

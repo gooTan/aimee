@@ -700,7 +700,7 @@ Subcommands:
   list                   List workflows under $AIMEE_HOME/workflows
   new <file.yaml>        Scaffold a starter workflow
   run <name> --proposal <file> --repo <path> [--watch]
-  status <id> [--events] Inspect one durable run
+  status <id> [--watch] [--events] Inspect one durable run; --watch streams events
 ```
 
 ### `aimee workspace`

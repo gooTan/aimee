@@ -393,7 +393,7 @@ func NewNativeRunner(db *db1.Store, worktrees *WorktreeManager, agents AgentClie
 	if forge == nil {
 		forge = unavailableForge{}
 	}
-	return &NativeRunner{db: db, worktrees: worktrees, agents: agents, verifier: verifier, artifacts: artifacts, workflows: workflows, forge: forge}, nil
+	return &NativeRunner{db: db, worktrees: worktrees, agents: observableAgents{next: agents, db: db}, verifier: verifier, artifacts: artifacts, workflows: workflows, forge: forge}, nil
 }
 
 func (r *NativeRunner) Run(ctx context.Context, req StepRequest) (StepResult, error) {
@@ -701,10 +701,18 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 	var validationErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		delegate := paramString(req.Node, "delegate", "")
+		role := "draft"
+		tools := false
+		if brief {
+			// ContextBrief preparation is the workflow's read-only scout pass. It
+			// needs repository search, but never write authority.
+			role = "search"
+			tools = true
+		}
 		if kind == "packets" {
 			delegate = "fable"
 		}
-		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem)})
+		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: role, Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem), Tools: tools})
 		if validationErr != nil {
 			return StepResult{}, validationErr
 		}
@@ -1018,6 +1026,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		}
 		if !docs && delegate == "muse" && !req.ReplayOnly && !effectiveStarted && isMutateAvailabilityFallback(effectiveAvail) {
 			primaryCost, primaryUnknown := delegateAttemptCost(result, err)
+			r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "model_fallback", "muse", "to=luna reason="+string(effectiveAvail))
 			lunaResult, lunaErr := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: "luna", Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 			if lunaErr != nil {
 				lunaCost, lunaUnknown := delegateAttemptCost(lunaResult, lunaErr)
@@ -1188,7 +1197,12 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	if reviewWorkdir == "" {
 		reviewWorkdir = req.WorkItem.Repo
 	}
-	if skill := repoCodeReviewSkill(reviewWorkdir); skill != "" {
+	skill := repoCodeReviewSkill(reviewWorkdir)
+	if skill == "" && paramBool(req.Node, "require_code_review_skill") {
+		return StepResult{Status: StepPending, PauseReason: "required_skill_unavailable",
+			Detail: "required repository code-review skill is unavailable"}, nil
+	}
+	if skill != "" {
 		prompt += "\n\nREPOSITORY CODE-REVIEW SKILL (apply this repository's documented review method and standards):\n" + skill
 	}
 	// A verification rung receives the previous reviewer's findings. The

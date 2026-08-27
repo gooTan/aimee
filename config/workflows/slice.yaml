@@ -40,11 +40,9 @@ nodes:
       roundtable: implementation
       panel:
         required:
-          - security
-          - architect
-          - qa
           - reviewer
-      quorum: 4
+          - qa
+      quorum: 2
       max_rounds: 6
     on_pass: pr
     on_fail: impl

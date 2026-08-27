@@ -255,7 +255,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 200 {
 		limit = 200
 	}
-	events, err := s.db.Events(r.Context(), r.PathValue("id"), after, limit)
+	events, err := s.db.EventsTree(r.Context(), r.PathValue("id"), after, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

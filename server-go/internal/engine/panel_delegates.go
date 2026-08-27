@@ -89,6 +89,10 @@ func (p panelDelegates) Group(ctx context.Context, run roundtablecfg.Run, seats 
 }
 
 func (p panelDelegates) One(ctx context.Context, run roundtablecfg.Run, seat roundtablecfg.SeatRequest) roundtablecfg.SeatResult {
+	if seat.FallbackFrom != "" {
+		p.runner.recordModelEvent(run.ID, run.Stage, "model_fallback", seat.FallbackFrom,
+			"to="+seat.Selector+" reason="+seat.FallbackReason)
+	}
 	request := p.request(run, seat)
 	request.MaxCostUSD = run.CostLimitUSD
 	result, err := p.runner.agents.Delegate(ctx, request)

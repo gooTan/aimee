@@ -80,6 +80,21 @@ func TestDefaultVerifyCommandUsesGitVerifyKeyValueSyntax(t *testing.T) {
 	}
 }
 
+func TestRequiredCodeReviewSkillParksWhenUnavailable(t *testing.T) {
+	runner := &NativeRunner{}
+	result, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{Repo: t.TempDir()},
+		Node:     wfe.Node{Params: map[string]any{"require_code_review_skill": true}},
+		Inputs:   map[string]wfe.Artifact{"src": {Content: []byte("diff"), Hash: "hash"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepPending || result.PauseReason != "required_skill_unavailable" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestDelegateDeadlineCapLeavesWriteVerificationReserve(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
@@ -713,6 +728,28 @@ func TestStructuredCorrectiveSynthesisIncludesCompleteInvalidResponse(t *testing
 	repairPrompt := agents.requests[1].Prompt
 	if !strings.Contains(repairPrompt, invalid) || !strings.Contains(repairPrompt, "PREVIOUS RESPONSE WAS INVALID") {
 		t.Fatalf("repair prompt omitted complete invalid artifact or validation feedback: %q", repairPrompt)
+	}
+}
+
+func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"]}`}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "scout", Params: map[string]any{
+			"brief": true, "delegate": "luna",
+		}},
+		Proposal: "inspect the relevant implementation before planning",
+	}, "intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced || len(agents.requests) != 1 {
+		t.Fatalf("result=%+v requests=%+v", result, agents.requests)
+	}
+	request := agents.requests[0]
+	if request.Delegate != "luna" || request.Role != "search" || !request.Tools || request.Persona != "architect" {
+		t.Fatalf("scout dispatch=%+v, want pinned Luna search with read-only tools", request)
 	}
 }
 

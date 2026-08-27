@@ -1,12 +1,16 @@
 {
   "name": "plan",
   "seats": [
-    {"model": "luna", "persona": "reviewer"},
-    {"model": "luna", "persona": "qa"}
+    {"model": "sol", "persona": "reviewer"},
+    {"model": "sol", "persona": "qa"},
+    {"model": "opus-ui", "persona": "reviewer"},
+    {"model": "opus-ui", "persona": "qa"},
+    {"model": "antigravity", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "qa"}
   ],
-  "chairman": "luna",
-  "chairman_fallback": "luna",
+  "chairman": "fable",
+  "chairman_fallback": "sol",
   "chairman_enabled": true,
-  "min_successful": 2,
-  "discussion": false
+  "min_successful": 6,
+  "discussion": true
 }

@@ -1155,12 +1155,16 @@ const maxReviewSkillBytes = 24 * 1024
 // document when it ships one, so every reviewing delegate applies the repo's
 // documented review method and standards instead of a generic checklist.
 func repoCodeReviewSkill(workdir string) string {
-	for _, rel := range []string{
-		".agents/skills/code-review/SKILL.md",
-		".claude/skills/code-review/SKILL.md",
-		"skills/code-review/SKILL.md",
-	} {
-		content, err := os.ReadFile(filepath.Join(workdir, rel))
+	paths := []string{
+		filepath.Join(workdir, ".agents/skills/code-review/SKILL.md"),
+		filepath.Join(workdir, ".claude/skills/code-review/SKILL.md"),
+		filepath.Join(workdir, "skills/code-review/SKILL.md"),
+	}
+	if home := strings.TrimSpace(os.Getenv("AIMEE_HOME")); home != "" {
+		paths = append(paths, filepath.Join(home, "skills/code-review/SKILL.md"))
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}

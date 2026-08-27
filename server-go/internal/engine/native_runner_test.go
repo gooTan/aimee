@@ -81,6 +81,7 @@ func TestDefaultVerifyCommandUsesGitVerifyKeyValueSyntax(t *testing.T) {
 }
 
 func TestRequiredCodeReviewSkillParksWhenUnavailable(t *testing.T) {
+	t.Setenv("AIMEE_HOME", "")
 	runner := &NativeRunner{}
 	result, err := runner.review(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{Repo: t.TempDir()},
@@ -92,6 +93,21 @@ func TestRequiredCodeReviewSkillParksWhenUnavailable(t *testing.T) {
 	}
 	if result.Status != StepPending || result.PauseReason != "required_skill_unavailable" {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestCodeReviewSkillFallsBackToCentralAimeeHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AIMEE_HOME", home)
+	path := filepath.Join(home, "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("central Matt Pocock review skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoCodeReviewSkill(t.TempDir()); got != "central Matt Pocock review skill" {
+		t.Fatalf("skill=%q", got)
 	}
 }
 

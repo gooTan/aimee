@@ -1160,7 +1160,7 @@ static void ag_local(app_ctx_t *ctx, int argc, char **argv)
    snprintf(ag->provider, sizeof(ag->provider), "%s", ag_canonical_local_provider(provider_arg));
    ag->cost_tier = opt_get_int(&opts, "cost-tier", 0);
    ag->max_tokens = opt_get_int(&opts, "max-tokens", AGENT_DEFAULT_MAX_TOKENS);
-   ag->timeout_ms = opt_get_int(&opts, "timeout-ms", opt_get_int(&opts, "timeout", 300000));
+   ag->timeout_ms = opt_get_int(&opts, "timeout-ms", opt_get_int(&opts, "timeout", 0));
    ag->enabled = 1;
    ag->tools_enabled = opt_has(&opts, "no-tools") ? 0 : 1;
    ag->recommended_sampling = opt_has(&opts, "recommended-sampling") ? 1 : 0;

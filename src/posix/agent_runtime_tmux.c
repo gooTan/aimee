@@ -245,14 +245,10 @@ static int cli_session_execute_inner(const agent_t *agent, const agent_network_t
       snprintf(out->error, sizeof(out->error), "out of memory");
       return -1;
    }
-   /* Bound the receive: a CLI stuck in a provider retry loop (e.g. an Anthropic
-    * outage) animates its pane forever without the session dying, so the
-    * stability heuristic alone would hang indefinitely. Prefer the explicit
-    * per-CLI response timeout, then the agent timeout, then the default. */
-   int recv_timeout_ms =
-       agent->cli_idle_timeout_ms > 0
-           ? agent->cli_idle_timeout_ms
-           : (agent->timeout_ms > 0 ? agent->timeout_ms : AGENT_DEFAULT_TIMEOUT_MS);
+   /* Explicit per-CLI or agent bounds still apply; absent means unbounded. */
+   int recv_timeout_ms = agent->cli_idle_timeout_ms > 0
+                             ? agent->cli_idle_timeout_ms
+                             : (agent->timeout_ms > 0 ? agent->timeout_ms : -1);
    recv_timeout_ms = agent_timeout_cap_ms(recv_timeout_ms, agent->tool_loop_timeout_ms_cap);
    int recv_rc = cli_session_recv(&sess, raw, CLI_SESSION_BUF_MAX, recv_timeout_ms);
    if (recv_rc != 0)

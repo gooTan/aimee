@@ -65,8 +65,10 @@ func gitIdentityArgs() []string {
 func defaultVerifyCommand() []string {
 	// `git verify` is a key=value-style infrastructure command. Its machine
 	// format is selected with format=json; `--json` is parsed as a value-taking
-	// long flag and exits 2 before verification runs.
-	return []string{"aimee", "git", "verify", "format=json"}
+	// long flag and exits 2 before verification runs. The WFE owns workdir, so
+	// its verifier is authoritative for that work-item worktree even when the
+	// submitting chat session is mapped to a different repository.
+	return []string{"aimee", "git", "verify", "force_in_scope=true", "format=json"}
 }
 
 func (v CommandVerifier) Verify(ctx context.Context, workdir string) error {
@@ -635,7 +637,7 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 		encoded, _ := json.Marshal(req.Feedback)
 		prompt += "\n\nPRIOR REVIEW FEEDBACK TO RESOLVE:\n" + string(encoded)
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem)})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -702,7 +704,7 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		if kind == "packets" {
 			delegate = "fable"
 		}
-		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: req.WorkItem.Repo})
+		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem)})
 		if validationErr != nil {
 			return StepResult{}, validationErr
 		}
@@ -731,6 +733,13 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		typeName = "plan"
 	}
 	return StepResult{Status: StepAdvanced, ArtifactType: typeName, Artifact: string(content), CostUSD: cost, CostUnknown: costUnknown}, nil
+}
+
+func workflowDelegateWorkdir(item db1.WorkItem) string {
+	if item.Worktree != "" {
+		return item.Worktree
+	}
+	return item.Repo
 }
 
 func (r *NativeRunner) branchOpen(ctx context.Context, req StepRequest) (StepResult, error) {
@@ -797,7 +806,8 @@ func retryDetailForPrompt(detail string) string {
 }
 
 func implementationDelegatePrompt() string {
-	return "Implement the complete approved task in this worktree, run the repository verification, fix failures, and leave the accepted changes in the worktree. " +
+	return "Implement the complete approved task in this worktree, run relevant project checks directly, fix failures, and leave the accepted changes in the worktree. " +
+		"Do not change Aimee or global configuration and do not run `aimee git verify`; the workflow runner performs authoritative repository verification after you return. " +
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
@@ -860,7 +870,7 @@ func delegateAttemptCost(result DelegateResult, err error) (float64, bool) {
 // the entire task and the plan reference-only context.
 func repairDelegatePrompt() string {
 	return "Repair this worktree by addressing EXACTLY the review findings listed under REVIEW FEEDBACK TO RESOLVE; those findings are the complete task. " +
-		"Make the smallest change that resolves each finding, run the repository verification, and fix any failures it reports. " +
+		"Make the smallest change that resolves each finding and run relevant project checks directly. Do not change Aimee or global configuration and do not run `aimee git verify`; the workflow runner performs authoritative repository verification after you return. " +
 		"Do not re-implement the approved plan, do not refactor beyond what the findings require, and do not touch files the findings do not require. " +
 		"Any other input below is reference context only."
 }
@@ -1047,6 +1057,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	if err := r.commitChanges(ctx, workdir, req.Node.ID); err != nil {
 		return StepResult{}, err
 	}
+	satisfiedNoDelta := false
 	// A write delegate that left no commit and no branch work did not implement the
 	// task. Advancing turns that into an empty diff at freeze,
 	// which reads as "the work is already in the base" and accepts the slice, so a
@@ -1075,6 +1086,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		// doc_gate still review it; blocking review feedback overrides that exemption.
 		satisfiedNoop := (docs && delegatePartialIsNoChange(result.Response)) ||
 			(!docs && implementationPartialIsSatisfiedNoChange(result.Response))
+		satisfiedNoDelta = headErr == nil && head == baseHead && satisfiedNoop
 		blockingReviewUnchanged := false
 		if headErr == nil && head == baseHead && feedbackHasBlockingFinding(req.Feedback) &&
 			req.Feedback.ArtifactHash != "" {
@@ -1104,7 +1116,12 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	if err != nil {
 		return StepResult{}, err
 	}
-	return StepResult{Status: StepAdvanced, ArtifactType: "branch", Artifact: branch, ContentHash: head, CostUSD: cost, CostUnknown: costUnknown}, nil
+	detail := ""
+	if satisfiedNoDelta {
+		detail = "satisfied/no_delta"
+	}
+	return StepResult{Status: StepAdvanced, ArtifactType: "branch", Artifact: branch, ContentHash: head,
+		Detail: detail, CostUSD: cost, CostUnknown: costUnknown}, nil
 }
 
 func feedbackHasBlockingFinding(feedback *wfe.ReviewFeedback) bool {

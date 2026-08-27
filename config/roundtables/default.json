@@ -9,6 +9,5 @@
   "chairman_fallback": "codex:gpt-5.6-sol",
   "chairman_enabled": true,
   "min_successful": 2,
-  "deadline_ms": 600000,
   "discussion": false
 }

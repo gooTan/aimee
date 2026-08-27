@@ -11,6 +11,28 @@
 
 static delegate_capability_provider_fn g_capability_provider;
 
+static void route_role_mismatch(char *errbuf, size_t errbuf_sz, const agent_config_t *cfg,
+                                const char *via_name, const char *role)
+{
+   if (!errbuf || errbuf_sz == 0)
+      return;
+   int wrote = snprintf(errbuf, errbuf_sz,
+                        "agent '%s' cannot handle role '%s'; compatible seats:", via_name, role);
+   size_t n = wrote > 0 && (size_t)wrote < errbuf_sz ? (size_t)wrote : errbuf_sz - 1;
+   int found = 0;
+   for (int i = 0; cfg && i < cfg->agent_count && n + 2 < errbuf_sz; i++)
+   {
+      const agent_t *agent = &cfg->agents[i];
+      if (!agent->enabled || !agent_has_role(agent, role))
+         continue;
+      found = 1;
+      wrote = snprintf(errbuf + n, errbuf_sz - n, " %s", agent->name);
+      n += wrote > 0 && (size_t)wrote < errbuf_sz - n ? (size_t)wrote : errbuf_sz - n - 1;
+   }
+   if (!found && n + 5 < errbuf_sz)
+      (void)snprintf(errbuf + n, errbuf_sz - n, " none");
+}
+
 void delegate_routing_register_capability_provider(delegate_capability_provider_fn provider)
 {
    g_capability_provider = provider;
@@ -423,7 +445,7 @@ int delegate_apply_route_overrides(agent_config_t *cfg, const char *role, const 
       }
       if (role && role[0] && !agent_has_role(selected, role))
       {
-         route_err(errbuf, errbuf_sz, "agent '%s' cannot handle role '%s'", via_name, role);
+         route_role_mismatch(errbuf, errbuf_sz, cfg, via_name, role);
          return -1;
       }
    }

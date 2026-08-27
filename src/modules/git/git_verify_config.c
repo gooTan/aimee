@@ -164,6 +164,12 @@ void verify_config_prefer_verify_local(const char *project_root, verify_config_t
    const char *root = (project_root && project_root[0]) ? project_root : ".";
    char subdir[MAX_PATH_LEN];
    int generated = generated_verify_local_step(cfg);
+   if (generated)
+   {
+      char *old_test_jobs = strstr(cfg->steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-2");
+      if (old_test_jobs)
+         old_test_jobs[strlen("AIMEE_VERIFY_TEST_JOBS:-2") - 1] = '1';
+   }
    if (generated_make_step_set(cfg) &&
        makefile_has_target(root, "verify-local", subdir, sizeof(subdir)))
    {

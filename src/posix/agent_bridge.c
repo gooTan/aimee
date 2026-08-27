@@ -279,6 +279,11 @@ static int core_agent_cancelled(void *unused)
    return agent_request_cancelled && agent_request_cancelled();
 }
 
+static int core_agent_cancel_available(void)
+{
+   return agent_request_cancelled != NULL;
+}
+
 static int conn_past_deadline(const http_conn_t *conn)
 {
    return aimee_core_control_check(&conn->control) == AIMEE_CORE_TIMEOUT;
@@ -297,7 +302,7 @@ static int connect_controlled(const char *host, int port, int timeout_ms, unsign
    aimee_core_control_t control;
    int connect_timeout = agent_http_effective_connect_timeout_ms(timeout_ms);
    if (aimee_core_control_init_timeout(&control, connect_timeout, HTTP_CANCEL_POLL_MS,
-                                       agent_request_cancelled ? core_agent_cancelled : NULL,
+                                       core_agent_cancel_available() ? core_agent_cancelled : NULL,
                                        NULL) != AIMEE_CORE_OK)
       return -1;
    int fd = -1;
@@ -374,7 +379,7 @@ static int conn_open(http_conn_t *conn, const parsed_url_t *url, int timeout_ms)
    conn->ssl = NULL;
    if (aimee_core_control_init_timeout(
            &conn->control, timeout_ms > 0 ? timeout_ms : 0, HTTP_CANCEL_POLL_MS,
-           agent_request_cancelled ? core_agent_cancelled : NULL, NULL) != AIMEE_CORE_OK)
+           core_agent_cancel_available() ? core_agent_cancelled : NULL, NULL) != AIMEE_CORE_OK)
       return -1;
 
    const proxy_bootstrap_t *pb = proxy_get();

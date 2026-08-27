@@ -78,21 +78,17 @@ static int agent_job_write(int job_id, const char *status, int cursor_turn, cons
       return -1;
 
    sqlite3_stmt *stmt = NULL;
-   /* Don't let progress updates overwrite a 'cancelled' status — cmd_cancel
-    * sets it out-of-band and the running loop would otherwise stomp it back
-    * to 'running' on its next per-turn update. Allow final success to win a
-    * cancel/complete race so a delegate that finished while a cancellation was
-    * being issued still records its result instead of leaving contradictory
-    * job status and agent-log rows.
+   /* Once cancellation is acknowledged, a late provider response must not
+    * resurrect the job as done.
     *
     * Cost is written in the same statement as the terminal status: a poller that
     * observes a terminal job must never be able to read the default zero and
     * commit it durably as measured spend. */
-   static const char *sql = "UPDATE agent_jobs SET status = ?4, cursor = ?5, result = ?6,"
-                            " cost_usd = CASE WHEN ?1 THEN ?2 ELSE cost_usd END,"
-                            " cost_known = CASE WHEN ?1 THEN 1 ELSE cost_known END,"
-                            " updated_at = datetime('now')"
-                            " WHERE id = ?3 AND (status != 'cancelled' OR ?4 = 'done')";
+   static const char *sql =
+       "UPDATE agent_jobs SET status = ?4, cursor = ?5, result = ?6,"
+       " cost_usd = CASE WHEN ?1 THEN ?2 ELSE cost_usd END,"
+       " cost_known = CASE WHEN ?1 THEN 1 ELSE cost_known END, updated_at = datetime('now')"
+       " WHERE id = ?3 AND status != 'cancelled' RETURNING id";
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return -1;
 
@@ -127,9 +123,10 @@ static int agent_job_write(int job_id, const char *status, int cursor_turn, cons
    sqlite3_bind_text(stmt, 5, cursor, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 6, result_text, -1, SQLITE_TRANSIENT);
    int rc = sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
+   int changed = rc == SQLITE_ROW && sqlite3_column_int(stmt, 0) == job_id;
+   int final_rc = sqlite3_finalize(stmt);
    free(capped);
-   return rc == SQLITE_DONE ? 0 : -1;
+   return changed && final_rc == SQLITE_OK ? 0 : -1;
 }
 
 void db1_agent_job_update(int job_id, const char *status, int cursor_turn, const char *result)
@@ -176,8 +173,9 @@ void db1_agent_job_heartbeat(int job_id)
       return;
 
    sqlite3_stmt *stmt = NULL;
-   static const char *sql = "UPDATE agent_jobs SET heartbeat_at = datetime('now'),"
-                            " updated_at = datetime('now') WHERE id = ?";
+   /* A runtime heartbeat proves the worker is alive, not that the model made
+    * progress. Keep updated_at as the last-progress timestamp. */
+   static const char *sql = "UPDATE agent_jobs SET heartbeat_at = datetime('now') WHERE id = ?";
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return;
    sqlite3_bind_int(stmt, 1, job_id);
@@ -243,7 +241,7 @@ int db1_agent_job_classify_stale(int job_id, int idle_threshold_secs, int in_too
 
    sqlite3_stmt *stmt = NULL;
    static const char *sql = "SELECT role, current_tool,"
-                            " (julianday('now') - julianday(heartbeat_at)) * 86400 AS age_secs"
+                            " (julianday('now') - julianday(updated_at)) * 86400 AS age_secs"
                             " FROM agent_jobs WHERE id = ?";
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return 0;
@@ -489,7 +487,7 @@ int db1_agent_job_cancel_unassigned(int job_id, const char *reason, int min_age_
     * caller to believe a job it just cancelled is still someone else's to run. */
    static const char *sql =
        "UPDATE agent_jobs SET status = 'cancelled', cancelled_at = datetime('now'),"
-       " cancel_reason = ?, updated_at = datetime('now')"
+       " cancel_reason = ?, lease_owner = '', current_tool = '', updated_at = datetime('now')"
        " WHERE id = ?"
        "   AND (status = 'pending' OR (status = 'running' AND trim(agent_name) = ''))"
        "   AND COALESCE(NULLIF(heartbeat_at, ''), created_at) <= datetime('now', ?)"
@@ -526,8 +524,9 @@ int db1_agent_job_cancel_by_id(int job_id, const char *reason)
    sqlite3_stmt *stmt = NULL;
    static const char *sql =
        "UPDATE agent_jobs SET status = 'cancelled', cancelled_at = datetime('now'),"
-       " cancel_reason = ?, result = CASE WHEN result = '' THEN ? ELSE result END"
-       " WHERE id = ? AND status IN ('pending', 'running')";
+       " cancel_reason = ?, result = CASE WHEN result = '' THEN ? ELSE result END,"
+       " lease_owner = '', current_tool = '', updated_at = datetime('now')"
+       " WHERE id = ? AND status IN ('pending', 'running') RETURNING id";
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return 0;
    char result[512];
@@ -536,9 +535,9 @@ int db1_agent_job_cancel_by_id(int job_id, const char *reason)
    sqlite3_bind_text(stmt, 2, result, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int(stmt, 3, job_id);
    int rc = sqlite3_step(stmt);
-   int changed = (rc == SQLITE_DONE) ? sqlite3_changes(db) : 0;
-   sqlite3_finalize(stmt);
-   return changed;
+   int changed = rc == SQLITE_ROW && sqlite3_column_int(stmt, 0) == job_id;
+   int final_rc = sqlite3_finalize(stmt);
+   return changed && final_rc == SQLITE_OK ? 1 : 0;
 }
 
 int db1_agent_job_cancel_nonterminal_on_restart(const char *reason)
@@ -550,7 +549,8 @@ int db1_agent_job_cancel_nonterminal_on_restart(const char *reason)
    static const char *sql =
        "UPDATE agent_jobs SET status = 'cancelled', cancelled_at = datetime('now'),"
        " cancel_reason = ?, result = CASE WHEN result = '' THEN 'cancelled: ' || ? ELSE result END,"
-       " updated_at = datetime('now') WHERE status IN ('pending', 'running')";
+       " lease_owner = '', current_tool = '', updated_at = datetime('now')"
+       " WHERE status IN ('pending', 'running')";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return -1;
@@ -572,7 +572,8 @@ int db1_agent_job_cancel_stale(int threshold_seconds, const char *reason)
    char sql[384];
    snprintf(sql, sizeof(sql),
             "UPDATE agent_jobs SET status = 'cancelled', cancelled_at = datetime('now'),"
-            " cancel_reason = ?, result = CASE WHEN result = '' THEN ? ELSE result END"
+            " cancel_reason = ?, result = CASE WHEN result = '' THEN ? ELSE result END,"
+            " lease_owner = '', current_tool = '', updated_at = datetime('now')"
             " WHERE status = 'running'"
             "   AND created_at < datetime('now', '-%d seconds')",
             threshold_seconds);

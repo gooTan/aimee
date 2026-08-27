@@ -342,7 +342,7 @@ ENV PATH=/var/lib/aimee/.npm-global/bin:/usr/local/go/bin:$PATH
 # verifier's native build and test fan-out so five workflows do not multiply the
 # visible CPU count into hundreds of competing compiler/test processes.
 ENV AIMEE_VERIFY_MAKE_JOBS=2
-ENV AIMEE_VERIFY_TEST_JOBS=2
+ENV AIMEE_VERIFY_TEST_JOBS=1
 # claude-code self-updates on launch by default. In this npm-global-prefix layout
 # its updater reinstalls the package WITHOUT re-running the install.cjs postinstall
 # that fetches the platform-native binary, leaving an empty package dir and a

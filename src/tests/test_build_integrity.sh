@@ -414,7 +414,7 @@ if [ -z "$missing_server_verify_deps" ] &&
    grep -qF 'COPY --from=wfe-build /usr/local/go/ /usr/local/go/' ../Dockerfile.server &&
    grep -qF 'ENV PATH=/var/lib/aimee/.npm-global/bin:/usr/local/go/bin:$PATH' ../Dockerfile.server &&
    grep -qF 'ENV AIMEE_VERIFY_MAKE_JOBS=2' ../Dockerfile.server &&
-   grep -qF 'ENV AIMEE_VERIFY_TEST_JOBS=2' ../Dockerfile.server; then
+   grep -qF 'ENV AIMEE_VERIFY_TEST_JOBS=1' ../Dockerfile.server; then
     pass "server runtime carries the complete workflow verification toolchain"
 else
     fail "server runtime is missing workflow verification packages or Go 1.25:$missing_server_verify_deps"

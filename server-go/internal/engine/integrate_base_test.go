@@ -544,6 +544,9 @@ func TestPartialImplementWithNoCommitDoesNotAdvance(t *testing.T) {
 	if out.Status != StepAdvanced {
 		t.Fatalf("explicit completed no-op status=%q detail=%q, want advanced", out.Status, out.Detail)
 	}
+	if out.Detail != "satisfied/no_delta" {
+		t.Fatalf("explicit completed no-op detail=%q, want satisfied/no_delta", out.Detail)
+	}
 	if verifier.calls != 1 {
 		t.Fatalf("explicit completed no-op verifier calls=%d, want 1", verifier.calls)
 	}

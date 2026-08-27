@@ -554,12 +554,18 @@ func TestRegistryRejectsMissingCLIKind(t *testing.T) {
 }
 
 func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
-	_, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
-	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
-		t.Fatalf("codex tools-disabled error = %v", err)
+	sandbox := slices.Index(argv, "--sandbox")
+	if err != nil || sandbox < 0 || sandbox+1 >= len(argv) || argv[sandbox+1] != "read-only" {
+		t.Fatalf("codex read-only review argv = %q, %v", argv, err)
 	}
-	argv, err := executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
+	_, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+		delegatecontract.Invocation{Role: "code", Tools: false}, "prompt")
+	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
+		t.Fatalf("codex write-role tools-disabled error = %v", err)
+	}
+	argv, err = executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
 	tools := slices.Index(argv, "--tools")
 	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" {
@@ -628,7 +634,7 @@ func TestWatchdogKillsAndReapsDeepProcessTreeWhenProducerDies(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		done <- runWatchdog(controlRead,
-			[]string{"/bin/sh", "-c", `/bin/sh -c 'sleep 30 & child=$!; printf "%s %s %s\n" "$PPID" "$$" "$child"; wait' & wait`},
+			[]string{"/bin/sh", "-c", `/bin/sh -c 'setsid sleep 30 >/dev/null 2>&1 & child=$!; printf "%s %s %s\n" "$PPID" "$$" "$child"; wait' & wait`},
 			strings.NewReader(""), outputWrite, outputWrite)
 	}()
 	var leader, child, grandchild int

@@ -138,7 +138,7 @@ static int mirror_reconstruct_cwd(const char *cwd, const char *root, const char 
        * each one used to be silent. The caller then left the client-side path
        * in place, which does not exist server-side, and the request fell
        * through to the workspace RUNNER — where it waited out WS_RUNNER_OP_MS
-       * (600s) and failed with "unavailable through the registered workspace
+       * (1800s) and failed with "unavailable through the registered workspace
        * runner".
        *
        * So the operator saw a ten-minute stall and an error naming a subsystem

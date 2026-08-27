@@ -42,10 +42,6 @@
 /* Max panel seats (matches the verdict-array bound the gate.roundtable executor
  * passes as `max`). */
 #define WFE_PANEL_MAX 16
-/* Per-attempt wall-clock ceiling for the parallel panel: a panelist still
- * running at the deadline is abandoned so one hung model can never wedge the
- * round. */
-#define WFE_PANEL_DEADLINE_MS 300000
 
 /* How long an unseatable/failed panel QUEUES for review agents before the gate
  * degrades. The review roster is small and shared with implement delegates:
@@ -214,7 +210,7 @@ static int live_panel(const wfe_review_packet_t *pkt, const char *const *require
       opts.mode = ROUNDTABLE_REVIEW;
       opts.turns = ROUNDTABLE_PARALLEL;
       opts.max_rounds = 1;
-      opts.deadline_ms = WFE_PANEL_DEADLINE_MS;
+      opts.deadline_ms = 0;
       opts.required_participants = panel_count;
 
       roundtable_result_t rt;

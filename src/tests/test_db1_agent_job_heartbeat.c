@@ -57,11 +57,11 @@ static void teardown_db(void)
    unlink(p2);
 }
 
-static void age_heartbeat(int job, int seconds)
+static void age_progress(int job, int seconds)
 {
    char sql[192];
    snprintf(sql, sizeof(sql),
-            "UPDATE agent_jobs SET heartbeat_at = datetime('now', '-%d seconds') WHERE id = %d",
+            "UPDATE agent_jobs SET updated_at = datetime('now', '-%d seconds') WHERE id = %d",
             seconds, job);
    assert(sqlite3_exec(db1_conn(), sql, NULL, NULL, NULL) == SQLITE_OK);
 }
@@ -148,8 +148,10 @@ static void test_uncapped_prompt_result_round_trip(void)
    assert(huge);
    memset(huge, 'H', over);
    huge[over] = '\0';
-   db1_agent_job_update(job, "done", 1, huge);
-   assert(db1_agent_job_get(job, &row) == 0);
+   int huge_job = db1_agent_job_create("code", "huge result", "agent", "owner");
+   assert(huge_job > 0);
+   db1_agent_job_update(huge_job, "done", 1, huge);
+   assert(db1_agent_job_get(huge_job, &row) == 0);
    assert(strlen(row.result) <= DB1_AJ_RESULT_STORE_MAX);
    assert(strstr(row.result, "[truncated") != NULL);
    db1_agent_job_free(&row);
@@ -212,7 +214,7 @@ static void test_classify_stale_in_tool(void)
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "Bash", 1);
 
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -232,7 +234,7 @@ static void test_classify_stale_idle(void)
    /* current_tool="" — between calls, awaiting model. */
    db1_agent_job_heartbeat_ext(job, "", 1);
 
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -254,7 +256,7 @@ static void test_classify_thresholds_are_independent(void)
    int job = db1_agent_job_create("code", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "Bash", 1);
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -272,7 +274,7 @@ static void test_review_in_tool_uses_short_stale_cap(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "bash", 1);
-   age_heartbeat(job, 241);
+   age_progress(job, 241);
 
    char state[16] = {0};
    int stale =
@@ -290,7 +292,7 @@ static void test_code_in_tool_keeps_long_stale_threshold(void)
    int job = db1_agent_job_create("code", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "bash", 1);
-   age_heartbeat(job, 241);
+   age_progress(job, 241);
 
    char state[16] = {0};
    int stale =
@@ -308,7 +310,7 @@ static void test_classify_model_wait_uses_idle_threshold(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "model", 3);
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -326,7 +328,7 @@ static void test_classify_final_response_uses_idle_threshold(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "final_response", 3);
-   age_heartbeat(job, 121);
+   age_progress(job, 121);
 
    char state[16] = {0};
    int stale =
@@ -338,7 +340,7 @@ static void test_classify_final_response_uses_idle_threshold(void)
    assert(stale == 0);
    assert(strcmp(state, "fresh") == 0);
 
-   age_heartbeat(job, 10000);
+   age_progress(job, 10000);
    stale = db1_agent_job_classify_stale(job, /*idle*/ 9999, /*in_tool*/ 9999, state, sizeof(state));
    assert(stale == 1);
    assert(strcmp(state, "final_response") == 0);
@@ -353,7 +355,7 @@ static void test_classify_model_wait_does_not_use_tool_threshold(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "model", 3);
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -483,7 +485,7 @@ static void test_restart_reconciliation_cancels_only_nonterminal_jobs(void)
    printf("  PASS: test_restart_reconciliation_cancels_only_nonterminal_jobs\n");
 }
 
-static void test_done_update_wins_cancel_complete_race(void)
+static void test_acknowledged_cancel_wins_late_completion(void)
 {
    setup_db();
    int job = db1_agent_job_create("review", "test", "agent", "owner");
@@ -494,12 +496,12 @@ static void test_done_update_wins_cancel_complete_race(void)
 
    db1_agent_job_t row;
    assert(db1_agent_job_get(job, &row) == 0);
-   assert(strcmp(row.status, "done") == 0);
-   assert(row.cursor_turn == 8);
-   assert(strcmp(row.result, "review result") == 0);
+   assert(strcmp(row.status, "cancelled") == 0);
+   assert(strcmp(row.result, "cancelled: operator cancel") == 0);
+   assert(row.lease_owner[0] == '\0');
 
    teardown_db();
-   printf("  PASS: test_done_update_wins_cancel_complete_race\n");
+   printf("  PASS: test_acknowledged_cancel_wins_late_completion\n");
 }
 
 static void test_failed_update_does_not_overwrite_cancelled(void)
@@ -680,7 +682,7 @@ int main(void)
    test_is_cancelled_round_trip();
    test_restart_reconciliation_cancels_only_nonterminal_jobs();
    test_update_does_not_overwrite_cancelled();
-   test_done_update_wins_cancel_complete_race();
+   test_acknowledged_cancel_wins_late_completion();
    test_failed_update_does_not_overwrite_cancelled();
    test_status_reads_do_not_run_global_agent_name_backfill();
    test_routed_agent_name_survives_status_reads();

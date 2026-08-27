@@ -21,7 +21,7 @@
 /* A submit waits for a client to run the op and answer, which is as slow as the
  * work itself. Bounded anyway: an unbounded wait cannot be told apart from a
  * client that has silently gone. */
-#define WS_RUNNER_CALL_MS 600000ULL
+#define WS_RUNNER_CALL_MS 1800000ULL
 
 static atomic_ullong g_trace = 1;
 

@@ -121,14 +121,15 @@ static void agent_normalize_legacy_claude_cli(agent_t *ag)
       return;
    if (strcmp(ag->backend, AGENT_BACKEND_PROVIDER_CLI) != 0 || strcmp(ag->cli_kind, "claude") != 0)
       return;
+   if (strcmp(ag->cli_cmd, "claude-p") != 0)
+      return;
 
    snprintf(ag->backend, sizeof(ag->backend), "%s", AGENT_BACKEND_TMUX_CLI);
    if (!ag->provider[0] || strcmp(ag->provider, "openai") == 0)
       snprintf(ag->provider, sizeof(ag->provider), "%s", "claude");
    if (!ag->auth_type[0] || strcmp(ag->auth_type, "bearer") == 0)
       snprintf(ag->auth_type, sizeof(ag->auth_type), "%s", "none");
-   if (!ag->cli_cmd[0] || strcmp(ag->cli_cmd, "claude-p") == 0)
-      snprintf(ag->cli_cmd, sizeof(ag->cli_cmd), "%s", "claude");
+   snprintf(ag->cli_cmd, sizeof(ag->cli_cmd), "%s", "claude");
    ag->cli_kind[0] = '\0';
 }
 

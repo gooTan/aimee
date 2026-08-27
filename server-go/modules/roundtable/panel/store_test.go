@@ -180,7 +180,7 @@ func TestShippedRoundtablePresetsExactAllocation(t *testing.T) {
 		if resolveErr != nil {
 			t.Fatalf("%s preset: %v", name, resolveErr)
 		}
-		if got.Name != name || !got.Acquired || !got.ChairmanEnabled || got.MinSuccessful != 6 || got.DeadlineMS != 0 || !got.Discussion || got.Chairman != "fable" || got.ChairmanFallback != "sol" || !reflect.DeepEqual(got.Seats, want) {
+		if got.Name != name || !got.Acquired || !got.ChairmanEnabled || got.MinSuccessful != 4 || got.DeadlineMS != 0 || !got.Discussion || got.Chairman != "fable" || got.ChairmanFallback != "sol" || !reflect.DeepEqual(got.Seats, want) {
 			t.Fatalf("%s panel mismatch: %+v", name, got)
 		}
 		return got

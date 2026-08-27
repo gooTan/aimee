@@ -1811,12 +1811,14 @@ static void test_verify_load_config_repairs_existing_generated_plan_with_go_modu
                           "  steps:\n"
                           "    - name: verify-local\n"
                           "      run: cd src && make -j${AIMEE_VERIFY_MAKE_JOBS:-$(nproc)} "
-                          "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-1} verify-local\n");
+                          "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-2} verify-local\n");
 
    verify_config_t cfg;
    assert(verify_load_config(tmpdir, &cfg) == 0);
    assert(cfg.count == 4);
    assert(strcmp(cfg.steps[0].name, "verify-local") == 0);
+   assert(strstr(cfg.steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-1") != NULL);
+   assert(strstr(cfg.steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-2") == NULL);
    assert(strcmp(cfg.steps[1].name, "go-test-root") == 0);
    assert(strcmp(cfg.steps[2].name, "go-test-alpha-go") == 0);
    assert(strcmp(cfg.steps[3].name, "go-test-zeta-go") == 0);

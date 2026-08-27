@@ -23,6 +23,7 @@ import (
 )
 
 const maxExecutorOutput = 16 << 20
+const maxExecutorDiagnostic = 1024
 
 const (
 	watchdogArgument = "__aimee_delegate_watchdog"
@@ -700,6 +701,39 @@ func finalOutput(kind string, output []byte) string {
 	return strings.TrimSpace(final)
 }
 
+func outputResponseStarted(kind string, output []byte) bool {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind == "" || kind == "generic" {
+		return strings.TrimSpace(string(output)) != ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		switch kind {
+		case "claude", "claude-code":
+			if item["type"] == "assistant" && item["is_api_error_message"] != true {
+				return true
+			}
+		case "codex":
+			if item["type"] == "item.completed" {
+				nested, _ := item["item"].(map[string]any)
+				if nested["type"] == "agent_message" {
+					return true
+				}
+			}
+		case "agy":
+			if item["event"] == "result" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RunWatchdog handles the private re-exec mode used by executorCommand. Every
 // delegates process entry point calls this before parsing normal arguments.
 func RunWatchdog(args []string) (bool, int) {
@@ -881,8 +915,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		cmd.Stdout = monitor
 	}
 	if err := cmd.Run(); err != nil {
-		response := finalOutput(agent.CLIKind, output.BytesCopy())
-		result.ResponseStarted = response != ""
+		result.ResponseStarted = outputResponseStarted(agent.CLIKind, output.BytesCopy())
 		if monitor.Exceeded() {
 			detail := fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
 			result.Error = detail
@@ -892,7 +925,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Error = delegatecontract.ErrDelegateExecutionDeadline.Error()
 			if detail := strings.TrimSpace(output.String()); detail != "" {
-				result.Error += ": " + delegatecontract.SafeDiagnostic(detail)
+				result.Error += ": " + delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
 			}
 			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, result.ResponseStarted)
 			return result
@@ -901,8 +934,8 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		if detail == "" {
 			detail = err.Error()
 		}
-		result.Error = delegatecontract.SafeDiagnostic(detail)
-		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(err, result.ResponseStarted)
+		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
 		return result
 	}
 	response := finalOutput(agent.CLIKind, output.BytesCopy())

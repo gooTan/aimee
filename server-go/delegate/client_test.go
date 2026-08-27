@@ -393,3 +393,10 @@ func TestSafeDiagnosticPreservesWireClassificationSlugs(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeDiagnosticSummaryBoundsOutputAndPreservesTail(t *testing.T) {
+	got := SafeDiagnosticSummary(strings.Repeat("startup ", 1_000)+"You've hit your session limit", 256)
+	if len(got) > 256 || !strings.Contains(got, "[truncated]") || !strings.HasSuffix(got, "You've hit your session limit") {
+		t.Fatalf("summary=%q len=%d", got, len(got))
+	}
+}

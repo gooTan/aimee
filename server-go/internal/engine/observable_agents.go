@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	delegateapi "github.com/JBailes/aimee/server-go/delegate"
@@ -15,11 +14,7 @@ const modelHeartbeatInterval = 15 * time.Second
 const maxObservableDiagnosticBytes = 1024
 
 func observableDiagnostic(detail string) string {
-	detail = strings.Join(strings.Fields(safeDiagnostic(detail)), " ")
-	if len(detail) <= maxObservableDiagnosticBytes {
-		return detail
-	}
-	return strings.ToValidUTF8(detail[:600], "") + " … [truncated] … " + strings.ToValidUTF8(detail[len(detail)-400:], "")
+	return delegateapi.SafeDiagnosticSummary(detail, maxObservableDiagnosticBytes)
 }
 
 // observableAgents decorates the single resource-plane boundary used by both

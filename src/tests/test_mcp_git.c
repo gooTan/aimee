@@ -1811,7 +1811,7 @@ static void test_verify_load_config_repairs_existing_generated_plan_with_go_modu
                           "  steps:\n"
                           "    - name: verify-local\n"
                           "      run: cd src && make -j${AIMEE_VERIFY_MAKE_JOBS:-$(nproc)} "
-                          "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-2} verify-local\n");
+                          "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-1} verify-local\n");
 
    verify_config_t cfg;
    assert(verify_load_config(tmpdir, &cfg) == 0);
@@ -2029,7 +2029,7 @@ static void test_verify_load_config_falls_back_to_verify_local(void)
    assert(strcmp(cfg.steps[0].name, "verify-local") == 0);
    assert(strcmp(cfg.steps[0].run,
                  "make -j${AIMEE_VERIFY_MAKE_JOBS:-$(nproc 2>/dev/null || echo 4)} "
-                 "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-2} "
+                 "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-1} "
                  "verify-local") == 0);
 
    verify_test_teardown(tmpdir, fake_home);

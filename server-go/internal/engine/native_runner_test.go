@@ -75,7 +75,7 @@ func configuredTestRoundtable(t *testing.T) *roundtablecfg.Store {
 
 func TestDefaultVerifyCommandUsesGitVerifyKeyValueSyntax(t *testing.T) {
 	got := strings.Join(defaultVerifyCommand(), " ")
-	if got != "aimee git verify format=json" {
+	if got != "aimee git verify force_in_scope=true format=json" {
 		t.Fatalf("default verifier command = %q, want supported git verify syntax", got)
 	}
 }

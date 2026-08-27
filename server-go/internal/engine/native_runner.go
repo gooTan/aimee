@@ -65,8 +65,10 @@ func gitIdentityArgs() []string {
 func defaultVerifyCommand() []string {
 	// `git verify` is a key=value-style infrastructure command. Its machine
 	// format is selected with format=json; `--json` is parsed as a value-taking
-	// long flag and exits 2 before verification runs.
-	return []string{"aimee", "git", "verify", "format=json"}
+	// long flag and exits 2 before verification runs. The WFE owns workdir, so
+	// its verifier is authoritative for that work-item worktree even when the
+	// submitting chat session is mapped to a different repository.
+	return []string{"aimee", "git", "verify", "force_in_scope=true", "format=json"}
 }
 
 func (v CommandVerifier) Verify(ctx context.Context, workdir string) error {

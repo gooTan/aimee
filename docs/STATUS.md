@@ -88,3 +88,4 @@ means the contract or branch exists but is not part of the integrated path yet.
 
 Generated [commands](gen/cli-commands.md), [configuration](gen/configuration.md), and
 [routes](gen/api-v1.md) are the exact surface for this checkout.
+- 2026-08-27: Live Aimee build workflow verification.

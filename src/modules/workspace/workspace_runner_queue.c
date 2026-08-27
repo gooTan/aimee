@@ -15,7 +15,7 @@
 #include <string.h>
 
 /* Same bound as a submit: the caller is waiting on real work. */
-#define WS_RUNNER_OP_MS 600000ULL
+#define WS_RUNNER_OP_MS 1800000ULL
 
 void ws_runner_queue_init(ws_runner_queue_t *q)
 {

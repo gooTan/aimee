@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -464,7 +465,7 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 	kind := strings.ToLower(strings.TrimSpace(agent.CLIKind))
 	switch kind {
 	case "codex":
-		if !request.Tools {
+		if !request.Tools && RoleIsWrite(request.Role) {
 			return nil, errors.New("codex CLI cannot guarantee a tools-disabled invocation")
 		}
 		argv = append(argv, "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never")
@@ -745,7 +746,7 @@ func runWatchdog(control io.Reader, argv []string, stdin io.Reader,
 	select {
 	case err := <-done:
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		reapWatchdogChildren()
+		terminateWatchdogChildren()
 		if err == nil {
 			return 0
 		}
@@ -757,15 +758,25 @@ func runWatchdog(control io.Reader, argv []string, stdin io.Reader,
 	case <-producerGone:
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-done
-		reapWatchdogChildren()
+		terminateWatchdogChildren()
 		return 125
 	}
 }
 
-func reapWatchdogChildren() {
+func terminateWatchdogChildren() {
+	childrenPath := fmt.Sprintf("/proc/%d/task/%d/children", os.Getpid(), os.Getpid())
 	for {
+		children, err := os.ReadFile(childrenPath)
+		if err != nil || len(strings.Fields(string(children))) == 0 {
+			return
+		}
+		for _, field := range strings.Fields(string(children)) {
+			if pid, parseErr := strconv.Atoi(field); parseErr == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
 		var status syscall.WaitStatus
-		if _, err := syscall.Wait4(-1, &status, 0, nil); errors.Is(err, syscall.ECHILD) {
+		if _, err = syscall.Wait4(-1, &status, 0, nil); errors.Is(err, syscall.ECHILD) {
 			return
 		} else if err != nil && !errors.Is(err, syscall.EINTR) {
 			return

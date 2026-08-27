@@ -806,7 +806,8 @@ func retryDetailForPrompt(detail string) string {
 }
 
 func implementationDelegatePrompt() string {
-	return "Implement the complete approved task in this worktree, run the repository verification, fix failures, and leave the accepted changes in the worktree. " +
+	return "Implement the complete approved task in this worktree, run relevant project checks directly, fix failures, and leave the accepted changes in the worktree. " +
+		"Do not change Aimee or global configuration and do not run `aimee git verify`; the workflow runner performs authoritative repository verification after you return. " +
 		"If the current branch already fully satisfies the task (including work merged by a sibling), leave the worktree unchanged and report that it is complete; do not manufacture cosmetic changes."
 }
 
@@ -869,7 +870,7 @@ func delegateAttemptCost(result DelegateResult, err error) (float64, bool) {
 // the entire task and the plan reference-only context.
 func repairDelegatePrompt() string {
 	return "Repair this worktree by addressing EXACTLY the review findings listed under REVIEW FEEDBACK TO RESOLVE; those findings are the complete task. " +
-		"Make the smallest change that resolves each finding, run the repository verification, and fix any failures it reports. " +
+		"Make the smallest change that resolves each finding and run relevant project checks directly. Do not change Aimee or global configuration and do not run `aimee git verify`; the workflow runner performs authoritative repository verification after you return. " +
 		"Do not re-implement the approved plan, do not refactor beyond what the findings require, and do not touch files the findings do not require. " +
 		"Any other input below is reference context only."
 }

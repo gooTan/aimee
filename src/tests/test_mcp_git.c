@@ -1817,6 +1817,8 @@ static void test_verify_load_config_repairs_existing_generated_plan_with_go_modu
    assert(verify_load_config(tmpdir, &cfg) == 0);
    assert(cfg.count == 4);
    assert(strcmp(cfg.steps[0].name, "verify-local") == 0);
+   assert(strstr(cfg.steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-1") != NULL);
+   assert(strstr(cfg.steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-2") == NULL);
    assert(strcmp(cfg.steps[1].name, "go-test-root") == 0);
    assert(strcmp(cfg.steps[2].name, "go-test-alpha-go") == 0);
    assert(strcmp(cfg.steps[3].name, "go-test-zeta-go") == 0);
@@ -2029,7 +2031,7 @@ static void test_verify_load_config_falls_back_to_verify_local(void)
    assert(strcmp(cfg.steps[0].name, "verify-local") == 0);
    assert(strcmp(cfg.steps[0].run,
                  "make -j${AIMEE_VERIFY_MAKE_JOBS:-$(nproc 2>/dev/null || echo 4)} "
-                 "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-2} "
+                 "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-1} "
                  "verify-local") == 0);
 
    verify_test_teardown(tmpdir, fake_home);

@@ -905,7 +905,7 @@ include tests/Rules.mk
 # Keep a conservative per-run default; operators can still raise it explicitly.
 # The command-line value intentionally overrides TEST_RUN_JOBS inherited from a
 # (possibly stale) auto-generated verify config.
-AIMEE_VERIFY_TEST_JOBS ?= 2
+AIMEE_VERIFY_TEST_JOBS ?= 1
 
 # Keep the local repository gate complete as new Go services are added. The C
 # Makefile is the curated entrypoint used by `aimee git verify`, so omitting a Go

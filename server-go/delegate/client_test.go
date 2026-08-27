@@ -229,9 +229,9 @@ func TestClassifyProviderAvailabilityRecognizesClaudeSessionLimit(t *testing.T) 
 
 func TestDelegateCarriesAvailabilityClass(t *testing.T) {
 	client := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
-		Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}
+		Agent: "fable", Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}
 	result, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
-	if err == nil || result.AvailabilityClass != AvailabilityClassProviderUnavailable {
+	if err == nil || result.AvailabilityClass != AvailabilityClassProviderUnavailable || result.Agent != "fable" || result.Participant != "fable" {
 		t.Fatalf("single delegate lost availability class: result=%+v err=%v", result, err)
 	}
 

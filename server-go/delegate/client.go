@@ -304,7 +304,11 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if !responseStarted {
 			availability = validAvailabilityClass(result.AvailabilityClass)
 		}
-		return DelegateResult{AvailabilityClass: availability, ResponseStarted: responseStarted}, &DelegateExecutionError{Err: failure,
+		participant := request.Participant
+		if participant == "" {
+			participant = result.Agent
+		}
+		return DelegateResult{Agent: result.Agent, Participant: participant, AvailabilityClass: availability, ResponseStarted: responseStarted}, &DelegateExecutionError{Err: failure,
 			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD,
 			AvailabilityClass: availability, ResponseStarted: responseStarted}
 	}

@@ -288,7 +288,7 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 	}
 	started := time.Now()
 	result, err := r.agents.Delegate(ctx, request)
-	if err != nil && request.Delegate == "fable" && !request.ReplayOnly {
+	if err != nil && (request.Delegate == "fable" || result.Agent == "fable") && !request.ReplayOnly {
 		availability := result.AvailabilityClass
 		if availability == "" {
 			availability = delegateapi.AvailabilityClassOf(err)

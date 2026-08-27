@@ -1704,6 +1704,7 @@ type mutateFallbackAgents struct {
 	costs    []float64
 	unknowns []bool
 	errs     []error
+	agents   []string
 }
 
 func TestFableDirectFallbackUsesSol(t *testing.T) {
@@ -1716,22 +1717,23 @@ func TestFableDirectFallbackUsesSol(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents := &mutateFallbackAgents{
-		avail: delegate.AvailabilityClassQuotaRateLimit,
-		costs: []float64{1.5, 2.5},
-		errs:  []error{errors.New("You've hit your session limit")},
+		avail:  delegate.AvailabilityClassQuotaRateLimit,
+		costs:  []float64{1.5, 2.5},
+		errs:   []error{errors.New("You've hit your session limit")},
+		agents: []string{"fable", "sol"},
 	}
 	runner := &NativeRunner{db: store, agents: agents}
 	result, err := runner.delegate(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{ID: "wi_fable_fallback"},
 		Node:     wfe.Node{ID: "plan"},
-	}, DelegateRequest{Role: "draft", Persona: "planner", Delegate: "fable", Prompt: "plan"})
+	}, DelegateRequest{Role: "draft", Persona: "planner", Prompt: "plan"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Response != "ok" || result.CostUSD != 4 || result.CostUnknown {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(agents.requests) != 2 || agents.requests[0].Delegate != "fable" || agents.requests[1].Delegate != "sol" {
+	if len(agents.requests) != 2 || agents.requests[0].Delegate != "" || agents.requests[1].Delegate != "sol" {
 		t.Fatalf("requests=%+v", agents.requests)
 	}
 	events, err := store.Events(t.Context(), "wi_fable_fallback", 0, 20)
@@ -1769,7 +1771,11 @@ func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) 
 	if idx < len(a.errs) {
 		err = a.errs[idx]
 	}
-	result := DelegateResult{AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
+	agent := ""
+	if idx < len(a.agents) {
+		agent = a.agents[idx]
+	}
+	result := DelegateResult{Agent: agent, AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
 	if err != nil {
 		return result, err
 	}

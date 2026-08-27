@@ -206,31 +206,28 @@ func TestCanonicalBuildWorkflowBindings(t *testing.T) {
 	if !ok {
 		t.Fatal("build missing node feature")
 	}
-	if feature.Next != "prep" {
-		t.Fatalf("feature.next=%q, want prep", feature.Next)
+	if feature.Next != "scout" {
+		t.Fatalf("feature.next=%q, want scout", feature.Next)
 	}
 	if feature.Block != "branch.open" {
 		t.Fatalf("feature block=%q, want branch.open", feature.Block)
 	}
 
-	prep, ok := find("prep")
+	scout, ok := find("scout")
 	if !ok {
-		t.Fatal("build missing node prep")
+		t.Fatal("build missing node scout")
 	}
-	if prep.Block != "understand" {
-		t.Fatalf("prep block=%q, want understand", prep.Block)
+	if scout.Block != "understand" {
+		t.Fatalf("scout block=%q, want understand", scout.Block)
 	}
-	if !mustParamBool(prep, "brief") {
-		t.Fatalf("prep brief=%v, want true", prep.Params["brief"])
+	if !mustParamBool(scout, "brief") {
+		t.Fatalf("scout brief=%v, want true", scout.Params["brief"])
 	}
-	if mustParamString(prep, "delegate") != "muse" {
-		t.Fatalf("prep delegate=%q, want muse", prep.Params["delegate"])
+	if mustParamString(scout, "delegate") != "luna" {
+		t.Fatalf("scout delegate=%q, want luna", scout.Params["delegate"])
 	}
-	if mustParamInt(prep, "max_rounds") != 2 {
-		t.Fatalf("prep max_rounds=%v, want 2", prep.Params["max_rounds"])
-	}
-	if prep.Next != "plan" || prep.OnFail != "prep" {
-		t.Fatalf("prep edges next=%q on_fail=%q, want plan/prep", prep.Next, prep.OnFail)
+	if scout.Next != "plan" || scout.OnFail != "scout" {
+		t.Fatalf("scout edges next=%q on_fail=%q, want plan/scout", scout.Next, scout.OnFail)
 	}
 
 	plan, ok := find("plan")
@@ -240,23 +237,20 @@ func TestCanonicalBuildWorkflowBindings(t *testing.T) {
 	if plan.Block != "author.plan" {
 		t.Fatalf("plan block=%q, want author.plan", plan.Block)
 	}
-	if got := plan.In["proposal"]; got != "prep.out" {
-		t.Fatalf("plan proposal binding=%q, want prep.out", got)
+	if got := plan.In["proposal"]; got != "scout.out" {
+		t.Fatalf("plan proposal binding=%q, want scout.out", got)
 	}
 	if mustParamString(plan, "delegate") != "fable" {
 		t.Fatalf("plan delegate=%q, want fable", plan.Params["delegate"])
 	}
-	if mustParamString(plan, "persona") != "architect" {
-		t.Fatalf("plan persona=%q, want architect", plan.Params["persona"])
-	}
 	if !mustParamBool(plan, "require_brief") {
 		t.Fatalf("plan require_brief=%v, want true", plan.Params["require_brief"])
 	}
-	if mustParamInt(plan, "max_rounds") != 6 {
-		t.Fatalf("plan max_rounds=%v, want 6", plan.Params["max_rounds"])
+	if mustParamInt(plan, "max_rounds") != 60 {
+		t.Fatalf("plan max_rounds=%v, want 60", plan.Params["max_rounds"])
 	}
-	if plan.Next != "plan_gate" || plan.OnFail != "prep" {
-		t.Fatalf("plan edges next=%q on_fail=%q, want plan_gate/prep", plan.Next, plan.OnFail)
+	if plan.Next != "plan_gate" || plan.OnFail != "plan" {
+		t.Fatalf("plan edges next=%q on_fail=%q, want plan_gate/plan", plan.Next, plan.OnFail)
 	}
 
 	planGate, ok := find("plan_gate")
@@ -283,22 +277,29 @@ func TestCanonicalBuildWorkflowBindings(t *testing.T) {
 	if split.Block != "split" {
 		t.Fatalf("split block=%q, want split", split.Block)
 	}
-	if mustParamString(split, "delegate") != "fable" {
-		t.Fatalf("split delegate=%q, want fable", split.Params["delegate"])
-	}
-	if mustParamInt(split, "max_rounds") != 3 {
-		t.Fatalf("split max_rounds=%v, want 3", split.Params["max_rounds"])
-	}
 	if split.Next != "slices" || split.OnFail != "split" {
 		t.Fatalf("split edges next=%q on_fail=%q, want slices/split", split.Next, split.OnFail)
 	}
 
-	acceptGate, ok := find("accept_gate")
+	slices, ok := find("slices")
 	if !ok {
-		t.Fatal("build missing accept_gate")
+		t.Fatal("build missing slices")
 	}
-	if mustParamString(acceptGate, "roundtable") != "implementation" {
-		t.Fatalf("accept_gate roundtable=%q, want implementation", acceptGate.Params["roundtable"])
+	if slices.Block != "foreach.workflow" || mustParamString(slices, "workflow") != "slice" || mustParamInt(slices, "max_rounds") != 3 {
+		t.Fatalf("slices binding=%+v, want foreach slice with 3 rounds", slices)
+	}
+
+	geminiReview, ok := find("gemini_review")
+	if !ok || mustParamString(geminiReview, "delegate") != "antigravity" || !mustParamBool(geminiReview, "require_code_review_skill") || geminiReview.Next != "sol_review" {
+		t.Fatalf("gemini_review binding=%+v", geminiReview)
+	}
+	solReview, ok := find("sol_review")
+	if !ok || mustParamString(solReview, "delegate") != "sol" || !mustParamBool(solReview, "require_code_review_skill") || solReview.Next != "fable_judgment" {
+		t.Fatalf("sol_review binding=%+v", solReview)
+	}
+	fableJudgment, ok := find("fable_judgment")
+	if !ok || mustParamString(fableJudgment, "delegate") != "fable" || mustParamString(fableJudgment, "persona") != "chairman" || fableJudgment.Next != "document" {
+		t.Fatalf("fable_judgment binding=%+v", fableJudgment)
 	}
 
 	docGate, ok := find("doc_gate")

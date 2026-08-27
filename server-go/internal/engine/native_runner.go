@@ -637,7 +637,7 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 		encoded, _ := json.Marshal(req.Feedback)
 		prompt += "\n\nPRIOR REVIEW FEEDBACK TO RESOLVE:\n" + string(encoded)
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: req.WorkItem.Repo})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem)})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -704,7 +704,7 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		if kind == "packets" {
 			delegate = "fable"
 		}
-		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: req.WorkItem.Repo})
+		result, validationErr = r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: delegate, Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem)})
 		if validationErr != nil {
 			return StepResult{}, validationErr
 		}
@@ -733,6 +733,13 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		typeName = "plan"
 	}
 	return StepResult{Status: StepAdvanced, ArtifactType: typeName, Artifact: string(content), CostUSD: cost, CostUnknown: costUnknown}, nil
+}
+
+func workflowDelegateWorkdir(item db1.WorkItem) string {
+	if item.Worktree != "" {
+		return item.Worktree
+	}
+	return item.Repo
 }
 
 func (r *NativeRunner) branchOpen(ctx context.Context, req StepRequest) (StepResult, error) {

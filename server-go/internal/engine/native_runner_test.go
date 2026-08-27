@@ -1081,7 +1081,7 @@ func TestNativeRunnerUsesCompleteArtifactsAndOnlyPositiveUIPins(t *testing.T) {
 	withPanel(runner, configuredTestRoundtable(t))
 	proposal := strings.Repeat("proposal 漢字\n", 200_000) + "PROPOSAL_END"
 	proposalArtifact := wfe.Artifact{Type: "proposal", Content: []byte(proposal), Hash: wfe.Hash([]byte(proposal))}
-	planResult, err := runner.author(context.Background(), StepRequest{WorkItem: db1.WorkItem{Repo: "/repo"}, Node: wfe.Node{Params: map[string]any{"roundtable": "default"}}, Proposal: proposal, Inputs: map[string]wfe.Artifact{"proposal": proposalArtifact}}, "plan")
+	planResult, err := runner.author(context.Background(), StepRequest{WorkItem: db1.WorkItem{Repo: "/repo", Worktree: "/wfe-worktree"}, Node: wfe.Node{Params: map[string]any{"roundtable": "default"}}, Proposal: proposal, Inputs: map[string]wfe.Artifact{"proposal": proposalArtifact}}, "plan")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1091,6 +1091,9 @@ func TestNativeRunnerUsesCompleteArtifactsAndOnlyPositiveUIPins(t *testing.T) {
 	plannerPrompt := agents.requests[len(agents.requests)-1].Prompt
 	if len(agents.requests) != 1 || !strings.Contains(plannerPrompt, "ORIGINAL REQUEST:\n"+proposal) || strings.Contains(plannerPrompt, "\n\nPROPOSAL:\n") {
 		t.Fatalf("planner did not frame its source as the original request: %+v", agents.requests)
+	}
+	if agents.requests[0].Workdir != "/wfe-worktree" {
+		t.Fatalf("planner workdir=%q, want managed workflow worktree", agents.requests[0].Workdir)
 	}
 	customBlock := wfe.BlockDefinition{Name: "custom", Custom: true, Produces: "report", Prompt: "Do the work."}
 	_, err = runner.custom(context.Background(), StepRequest{WorkItem: db1.WorkItem{Repo: "/repo"}, Proposal: proposal}, customBlock)

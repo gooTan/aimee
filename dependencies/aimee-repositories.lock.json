@@ -166,7 +166,7 @@
       "placements": [
         "server"
       ],
-      "source_sha256": "6869b65bfe846559b089b09253d130b4e50077fffc9a136e43c7ce7f5d154db6",
+      "source_sha256": "65ea9266d0bef8bc664e2881498d475fb1c4825919a80131a5a16d359ac4bb7c",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 10,
@@ -392,7 +392,7 @@
       "placements": [
         "server"
       ],
-      "source_sha256": "9407ae0b198acdbbab173005af58037ab7ccd890d1863de8c58cf62d942442a4",
+      "source_sha256": "7b3d05fab801d08e8b05f8f425c0e6b5c66b252d0b1372dac56e567f14193133",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 21,

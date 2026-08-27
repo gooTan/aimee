@@ -465,7 +465,7 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 	kind := strings.ToLower(strings.TrimSpace(agent.CLIKind))
 	switch kind {
 	case "codex":
-		if !request.Tools {
+		if !request.Tools && RoleIsWrite(request.Role) {
 			return nil, errors.New("codex CLI cannot guarantee a tools-disabled invocation")
 		}
 		argv = append(argv, "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never")

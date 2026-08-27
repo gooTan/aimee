@@ -57,11 +57,11 @@ static void teardown_db(void)
    unlink(p2);
 }
 
-static void age_heartbeat(int job, int seconds)
+static void age_progress(int job, int seconds)
 {
    char sql[192];
    snprintf(sql, sizeof(sql),
-            "UPDATE agent_jobs SET heartbeat_at = datetime('now', '-%d seconds') WHERE id = %d",
+            "UPDATE agent_jobs SET updated_at = datetime('now', '-%d seconds') WHERE id = %d",
             seconds, job);
    assert(sqlite3_exec(db1_conn(), sql, NULL, NULL, NULL) == SQLITE_OK);
 }
@@ -214,7 +214,7 @@ static void test_classify_stale_in_tool(void)
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "Bash", 1);
 
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -234,7 +234,7 @@ static void test_classify_stale_idle(void)
    /* current_tool="" — between calls, awaiting model. */
    db1_agent_job_heartbeat_ext(job, "", 1);
 
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -256,7 +256,7 @@ static void test_classify_thresholds_are_independent(void)
    int job = db1_agent_job_create("code", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "Bash", 1);
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -274,7 +274,7 @@ static void test_review_in_tool_uses_short_stale_cap(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "bash", 1);
-   age_heartbeat(job, 241);
+   age_progress(job, 241);
 
    char state[16] = {0};
    int stale =
@@ -292,7 +292,7 @@ static void test_code_in_tool_keeps_long_stale_threshold(void)
    int job = db1_agent_job_create("code", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "bash", 1);
-   age_heartbeat(job, 241);
+   age_progress(job, 241);
 
    char state[16] = {0};
    int stale =
@@ -310,7 +310,7 @@ static void test_classify_model_wait_uses_idle_threshold(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "model", 3);
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =
@@ -328,7 +328,7 @@ static void test_classify_final_response_uses_idle_threshold(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "final_response", 3);
-   age_heartbeat(job, 121);
+   age_progress(job, 121);
 
    char state[16] = {0};
    int stale =
@@ -340,7 +340,7 @@ static void test_classify_final_response_uses_idle_threshold(void)
    assert(stale == 0);
    assert(strcmp(state, "fresh") == 0);
 
-   age_heartbeat(job, 10000);
+   age_progress(job, 10000);
    stale = db1_agent_job_classify_stale(job, /*idle*/ 9999, /*in_tool*/ 9999, state, sizeof(state));
    assert(stale == 1);
    assert(strcmp(state, "final_response") == 0);
@@ -355,7 +355,7 @@ static void test_classify_model_wait_does_not_use_tool_threshold(void)
    int job = db1_agent_job_create("review", "test", "agent", "owner");
    assert(job > 0);
    db1_agent_job_heartbeat_ext(job, "model", 3);
-   age_heartbeat(job, 2);
+   age_progress(job, 2);
 
    char state[16] = {0};
    int stale =

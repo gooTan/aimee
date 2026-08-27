@@ -1047,16 +1047,7 @@ int agent_load_config(agent_config_t *cfg)
          }
          else
          {
-            /* No operator timeout: give a reasoning-capable model a higher per-call
-             * default so its slow (multi-minute) completions aren't cut off and
-             * retried as spurious read failures. Capability lookup is total +
-             * offline (same guarantees as the tools_enabled derivation below);
-             * an unknown/non-reasoning model keeps the standard default. */
-            model_capability_t tmc;
-            int reasoning = ag->model[0] &&
-                            model_capability_get(agent_catalog_provider(ag), ag->model, &tmc) &&
-                            (tmc.flags & MODEL_CAP_REASONING);
-            ag->timeout_ms = reasoning ? AGENT_REASONING_TIMEOUT_MS : AGENT_DEFAULT_TIMEOUT_MS;
+            ag->timeout_ms = 0; /* absent means unbounded */
          }
 
          /* "enabled" accepts a boolean or a 0/1 number: hand-edited rosters

@@ -210,10 +210,8 @@ void test_catalog_provider_separates_vendor_from_wire(void)
    assert((cap.flags & MODEL_CAP_TOOLS) != 0);
    assert(cap.context_window == 262144);
 
-   /* The reasoning-derived timeout is the observable consequence: both agents
-    * must now get the long timeout rather than the short default. */
-   assert(mm->timeout_ms == AGENT_REASONING_TIMEOUT_MS);
-   assert(kimi->timeout_ms == AGENT_REASONING_TIMEOUT_MS);
+   assert(mm->timeout_ms == 0);
+   assert(kimi->timeout_ms == 0);
 
    printf("  PASS: test_catalog_provider_separates_vendor_from_wire\n");
 

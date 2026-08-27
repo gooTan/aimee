@@ -199,7 +199,7 @@ func main() {
 		scheduler := engine.NewScheduler(store, workflowEngine, *concurrency, nil)
 		var liveMu sync.Mutex
 		lastConcurrency := *concurrency
-		lastPolicy := engine.RunPolicy{MaxTurns: 300, MaxWall: 1800 * time.Second, AutoResumeWall: true, MaxResumes: 50}
+		lastPolicy := engine.RunPolicy{MaxTurns: 300, AutoResumeWall: true, MaxResumes: 50}
 		readInt := func(key string, fallback int) int {
 			value, ok, err := configStore.IntValue(key)
 			if err != nil {

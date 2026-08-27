@@ -23,7 +23,6 @@
 int db1_agent_job_list_running_ids(int *out_ids, int max);
 int db1_agent_job_classify_stale(int job_id, int idle_threshold_secs, int in_tool_threshold_secs,
                                  char *out_state, size_t out_state_cap);
-int db1_agent_job_cancel_by_id(int job_id, const char *reason);
 int db1_agent_job_is_cancelled(int job_id);
 void db1_agent_job_heartbeat(int job_id);
 
@@ -134,10 +133,8 @@ void server_delegate_heartbeat_end(void)
 }
 
 /* Defaults from delegate-reliability-heartbeat-and-cost-rollup.md §1. */
-#define DEFAULT_IDLE_THRESHOLD_SECS    450
-#define DEFAULT_IN_TOOL_THRESHOLD_SECS 1200
-#define DEFAULT_POLL_INTERVAL_SECS     30
-#define MAX_RUNNING_JOBS_PER_SWEEP     128
+#define DEFAULT_POLL_INTERVAL_SECS 30
+#define MAX_RUNNING_JOBS_PER_SWEEP 128
 
 static pthread_t g_monitor_thread;
 static volatile int g_monitor_running;
@@ -150,22 +147,17 @@ int server_delegate_monitor_sweep(int idle_threshold_secs, int in_tool_threshold
    if (n <= 0)
       return 0;
 
-   int cancelled = 0;
+   int stalled = 0;
    for (int i = 0; i < n; i++)
    {
       char state[16] = {0};
       if (db1_agent_job_classify_stale(ids[i], idle_threshold_secs, in_tool_threshold_secs, state,
                                        sizeof(state)) != 1)
          continue;
-      char reason[96];
-      snprintf(reason, sizeof(reason), "stale: %s (no heartbeat progress)", state);
-      if (db1_agent_job_cancel_by_id(ids[i], reason) > 0)
-      {
-         LOG_WARN("server.delegate_monitor", "auto-cancelled job #%d (state=%s)", ids[i], state);
-         cancelled++;
-      }
+      LOG_WARN("server.delegate_monitor", "job #%d may be stalled (state=%s)", ids[i], state);
+      stalled++;
    }
-   return cancelled;
+   return stalled;
 }
 
 /* Reap aged delegate containers this many sweeps apart (~5 min at 30 s/sweep).
@@ -190,9 +182,6 @@ static void *monitor_thread(void *arg)
    int sweeps = 0;
    while (!g_monitor_stop)
    {
-      (void)server_delegate_monitor_sweep(DEFAULT_IDLE_THRESHOLD_SECS,
-                                          DEFAULT_IN_TOOL_THRESHOLD_SECS);
-
       int freed = agent_admission_reap_idle(ADMISSION_IDLE_REAP_SECS);
       if (freed > 0)
          LOG_WARN("server.delegate_monitor", "reclaimed %d wedged admission slot(s)", freed);
@@ -234,8 +223,7 @@ void server_delegate_monitor_init(void)
       return;
    }
    g_monitor_running = 1;
-   LOG_INFO("server.delegate_monitor", "started (idle=%ds, in_tool=%ds, poll=%ds)",
-            DEFAULT_IDLE_THRESHOLD_SECS, DEFAULT_IN_TOOL_THRESHOLD_SECS,
+   LOG_INFO("server.delegate_monitor", "started (heartbeat poll=%ds; status reports stalls)",
             DEFAULT_POLL_INTERVAL_SECS);
 }
 

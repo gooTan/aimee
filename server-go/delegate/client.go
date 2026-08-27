@@ -19,12 +19,11 @@ import (
 )
 
 const (
-	EventKind       uint32 = 6657
-	StageInvoke     uint32 = 1
-	EventGroupPlan  uint32 = 6678
-	StageGroupPlan  uint32 = 22
-	WireVersion            = 3
-	DefaultDeadline        = 30 * time.Minute
+	EventKind      uint32 = 6657
+	StageInvoke    uint32 = 1
+	EventGroupPlan uint32 = 6678
+	StageGroupPlan uint32 = 22
+	WireVersion           = 3
 )
 
 type DelegateRequest struct {
@@ -146,8 +145,8 @@ type Invocation struct {
 	Workdir  string `json:"workdir,omitempty"`
 	Tools    bool   `json:"tools"`
 	MaxTurns int    `json:"max_turns,omitempty"`
-	// ExecutionTimeoutMS is a delegate-owned run bound, not workflow state. It
-	// lets the producer terminate work at the same boundary as the bus caller.
+	// ExecutionTimeoutMS is an optional delegate-owned run bound. Zero means
+	// unbounded; explicit caller context deadlines still propagate here.
 	ExecutionTimeoutMS int64 `json:"execution_timeout_ms,omitempty"`
 }
 
@@ -207,9 +206,6 @@ func NewClient(caller StageCaller, deadline time.Duration) (*BusClient, error) {
 	if caller == nil {
 		return nil, errors.New("delegate bus caller is required")
 	}
-	if deadline <= 0 {
-		deadline = DefaultDeadline
-	}
 	return &BusClient{caller: caller, deadline: deadline}, nil
 }
 
@@ -240,20 +236,24 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 			return DelegateResult{AvailabilityClass: AvailabilityClassStartDeadline}, &DelegateExecutionError{
 				Err: err, AvailabilityClass: AvailabilityClassStartDeadline}
 		}
-		if remaining < deadline {
+		if deadline <= 0 || remaining < deadline {
 			deadline = remaining
 		}
 	}
 	if request.ToolLoopTimeoutMSCap > 0 {
 		cap := time.Duration(request.ToolLoopTimeoutMSCap) * time.Millisecond
-		if cap < deadline {
+		if deadline <= 0 || cap < deadline {
 			deadline = cap
 		}
+	}
+	executionTimeoutMS := int64(0)
+	if deadline > 0 {
+		executionTimeoutMS = max(1, deadline.Milliseconds())
 	}
 	wire := Invocation{Version: WireVersion, Role: request.Role, Persona: request.Persona,
 		Model: request.Delegate, Prompt: request.Prompt, Workdir: request.Workdir,
 		Tools: request.Tools, MaxTurns: request.MaxTurnsCap,
-		ExecutionTimeoutMS: max(1, deadline.Milliseconds())}
+		ExecutionTimeoutMS: executionTimeoutMS}
 	body, err := json.Marshal(wire)
 	if err != nil {
 		return DelegateResult{}, err

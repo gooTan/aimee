@@ -112,7 +112,7 @@ var policyDefaults = map[string]any{
 	"trigger.max_concurrent":            2,
 	"trigger.scan_interval_secs":        5,
 	"autonomy.auto_resume_cap_parks":    true,
-	"autonomy.max_wall_secs":            1800,
+	"autonomy.max_wall_secs":            0,
 	"autonomy.max_turns":                300,
 	"autonomy.max_resumes":              50,
 	"autonomy.stale_abandon_secs":       3600,

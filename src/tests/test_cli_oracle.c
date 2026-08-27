@@ -112,11 +112,30 @@ static void test_oracle_argv_without_model(void)
    printf("PASS: unpinned oracle agent omits the model flag\n");
 }
 
+static void test_oracle_argv_without_deadline(void)
+{
+   agent_t agent = {0};
+   provider_cli_cfg_t cfg = {.agent = &agent};
+   char task_path[PATH_MAX];
+   char answer_path[PATH_MAX];
+   snprintf(task_path, sizeof(task_path), "%s/task.md", platform_tmpdir());
+   snprintf(answer_path, sizeof(answer_path), "%s/answer.md", platform_tmpdir());
+   char *tokens[64] = {0};
+   int split = 0;
+   int argc = oracle_build_argv(&cfg, task_path, answer_path, 0, tokens, 48, &split);
+   assert(argc > 0);
+   for (int i = 0; i < argc; i++)
+      assert(strcmp(tokens[i], "--timeout") != 0);
+   provider_cli_free_tokens(tokens, split);
+   printf("PASS: unbounded oracle agent omits the timeout flag\n");
+}
+
 int main(void)
 {
    test_oracle_adapter_registered();
    test_oracle_argv_policy();
    test_oracle_argv_without_model();
+   test_oracle_argv_without_deadline();
    printf("ALL PASS\n");
    return 0;
 }

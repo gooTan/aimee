@@ -34,11 +34,8 @@
 
 #include "util.h"
 
-#define ORACLE_ARG_MAX 48
-/* Pro-model runs regularly take tens of minutes; default to 45 minutes and
- * let cli_idle_timeout_ms override in either direction. */
-#define ORACLE_DEFAULT_TIMEOUT_MS (45 * 60 * 1000)
-#define ORACLE_STDOUT_TAIL_CAP    4096
+#define ORACLE_ARG_MAX         48
+#define ORACLE_STDOUT_TAIL_CAP 4096
 
 /* The task file carries the real prompt; this argv prompt only points at it. */
 #define ORACLE_TASK_INSTRUCTION                                                                    \
@@ -58,7 +55,7 @@ int oracle_build_argv(const provider_cli_cfg_t *cfg, const char *task_path, cons
       *split_count = count;
 
    static _Thread_local char timeout_arg[32];
-   snprintf(timeout_arg, sizeof(timeout_arg), "%ld", timeout_seconds > 0 ? timeout_seconds : 60);
+   snprintf(timeout_arg, sizeof(timeout_arg), "%ld", timeout_seconds);
 
    int argc = count;
 
@@ -81,8 +78,11 @@ int oracle_build_argv(const provider_cli_cfg_t *cfg, const char *task_path, cons
    ORACLE_ADD_ARG("--write-output");
    ORACLE_ADD_ARG(out_path);
    ORACLE_ADD_ARG("--no-notify");
-   ORACLE_ADD_ARG("--timeout");
-   ORACLE_ADD_ARG(timeout_arg);
+   if (timeout_seconds > 0)
+   {
+      ORACLE_ADD_ARG("--timeout");
+      ORACLE_ADD_ARG(timeout_arg);
+   }
    if (agent && agent->model[0])
    {
       ORACLE_ADD_ARG("-m");
@@ -179,18 +179,18 @@ static int oracle_wait_child(pid_t pid, int stdout_fd, long long deadline_ms, ch
    for (;;)
    {
       long long now = util_now_ms();
-      if (now >= deadline_ms)
+      if (deadline_ms > 0 && now >= deadline_ms)
       {
          timed_out = 1;
          break;
       }
-      long long remain = deadline_ms - now;
+      long long remain = deadline_ms > 0 ? deadline_ms - now : 0;
       struct timeval tv = {.tv_sec = (time_t)(remain / 1000),
                            .tv_usec = (suseconds_t)((remain % 1000) * 1000)};
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(stdout_fd, &rfds);
-      int sel = select(stdout_fd + 1, &rfds, NULL, NULL, &tv);
+      int sel = select(stdout_fd + 1, &rfds, NULL, NULL, deadline_ms > 0 ? &tv : NULL);
       if (sel < 0)
       {
          if (errno == EINTR)
@@ -256,9 +256,10 @@ static int oracle_execute(const provider_cli_cfg_t *cfg, agent_result_t *out)
    snprintf(out->agent_name, sizeof(out->agent_name), "%s", cfg->agent->name);
 
    long long start_ms = util_now_ms();
-   long long timeout_ms = (cfg->agent->cli_idle_timeout_ms > 0) ? cfg->agent->cli_idle_timeout_ms
-                                                                : ORACLE_DEFAULT_TIMEOUT_MS;
-   long long deadline_ms = start_ms + timeout_ms;
+   long long timeout_ms = cfg->agent->cli_idle_timeout_ms > 0
+                              ? cfg->agent->cli_idle_timeout_ms
+                              : (cfg->agent->timeout_ms > 0 ? cfg->agent->timeout_ms : 0);
+   long long deadline_ms = timeout_ms > 0 ? start_ms + timeout_ms : 0;
 
    char task_path[512];
    if (oracle_write_task_file(cfg, task_path, sizeof(task_path)) != 0)

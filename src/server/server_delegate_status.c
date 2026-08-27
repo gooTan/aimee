@@ -8,6 +8,10 @@
 #include "liveness.h"
 #include "cJSON.h"
 
+#define DELEGATE_IDLE_PROGRESS_SECS    450
+#define DELEGATE_IN_TOOL_PROGRESS_SECS 1200
+#define DELEGATE_RUNTIME_STALE_MINUTES 1
+
 static void delegate_status_quarantine_degenerate_done(int job_id, db1_agent_job_t *job)
 {
    if (!job || strcmp(job->status, "done") != 0 || !job->result[0] ||
@@ -52,9 +56,25 @@ static void delegate_status_populate_job(cJSON *resp, int job_id)
          cJSON_AddStringToObject(resp, "result", job.result);
       if (job.heartbeat_at[0])
          cJSON_AddStringToObject(resp, "heartbeat_at", job.heartbeat_at);
+      if (job.updated_at[0])
+         cJSON_AddStringToObject(resp, "progress_at", job.updated_at);
       if (job.current_tool[0])
          cJSON_AddStringToObject(resp, "current_tool", job.current_tool);
       cJSON_AddNumberToObject(resp, "api_call_count", job.api_call_count);
+      if (strcmp(job.status, "running") == 0)
+      {
+         char progress_state[16] = {0};
+         int progress_stale = db1_agent_job_classify_stale(job_id, DELEGATE_IDLE_PROGRESS_SECS,
+                                                           DELEGATE_IN_TOOL_PROGRESS_SECS,
+                                                           progress_state, sizeof(progress_state));
+         int runtime_stale =
+             db1_agent_job_heartbeat_is_stale(job.heartbeat_at, DELEGATE_RUNTIME_STALE_MINUTES);
+         cJSON_AddStringToObject(resp, "liveness",
+                                 runtime_stale    ? "runtime_unresponsive"
+                                 : progress_stale ? "suspected_stall"
+                                                  : "working");
+         cJSON_AddStringToObject(resp, "progress_state", progress_state);
+      }
       /* cost_known distinguishes an unmeasured job from a genuinely free one.
        * A poller that commits cost_usd as measured spend must check it. */
       cJSON_AddNumberToObject(resp, "cost_usd", job.cost_usd);

@@ -15,7 +15,6 @@ import (
 	delegatecontract "github.com/JBailes/aimee/server-go/delegate"
 )
 
-const defaultACPidle = 5 * time.Minute
 const maxACPLine = 256 * 1024
 
 type acpLine struct {
@@ -38,9 +37,6 @@ type acpTransport struct {
 }
 
 func startACPTransport(ctx context.Context, cancel context.CancelFunc, closeCommand func(), cmd *exec.Cmd, idleTimeout time.Duration) (*acpTransport, error) {
-	if idleTimeout <= 0 {
-		idleTimeout = defaultACPidle
-	}
 	stderr := &limitedBuffer{remaining: maxExecutorOutput}
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
@@ -98,7 +94,10 @@ func startACPTransport(ctx context.Context, cancel context.CancelFunc, closeComm
 	go func() {
 		wait <- cmd.Wait()
 	}()
-	idle := time.NewTimer(idleTimeout)
+	var idle *time.Timer
+	if idleTimeout > 0 {
+		idle = time.NewTimer(idleTimeout)
+	}
 	return &acpTransport{
 		ctx:          ctx,
 		cancel:       cancel,
@@ -161,6 +160,10 @@ func (t *acpTransport) sendRaw(raw []byte) error {
 }
 
 func (t *acpTransport) nextLine(limit time.Duration) (string, error) {
+	var idleC <-chan time.Time
+	if t.idle != nil {
+		idleC = t.idle.C
+	}
 	var limitC <-chan time.Time
 	var limitTimer *time.Timer
 	if limit > 0 {
@@ -171,7 +174,7 @@ func (t *acpTransport) nextLine(limit time.Duration) (string, error) {
 	select {
 	case <-t.ctx.Done():
 		return "", t.ctx.Err()
-	case <-t.idle.C:
+	case <-idleC:
 		return "", errors.New("ACP delegate idle timeout")
 	case <-limitC:
 		return "", errors.New("ACP handshake timeout")
@@ -182,13 +185,15 @@ func (t *acpTransport) nextLine(limit time.Duration) (string, error) {
 		if line.err != nil {
 			return "", line.err
 		}
-		if !t.idle.Stop() {
-			select {
-			case <-t.idle.C:
-			default:
+		if t.idle != nil {
+			if !t.idle.Stop() {
+				select {
+				case <-t.idle.C:
+				default:
+				}
 			}
+			t.idle.Reset(t.idleTimeout)
 		}
-		t.idle.Reset(t.idleTimeout)
 		return line.text, nil
 	}
 }

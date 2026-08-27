@@ -15,6 +15,10 @@ import (
 	"github.com/JBailes/aimee/server-go/internal/wfe"
 )
 
+func factoryPremiumPolicy() PremiumPolicy {
+	return PremiumPolicy{Delegates: map[string]bool{"sol": true, "fable": true}, MaxCalls: 2}
+}
+
 // TestFactoryLiveSmoke drives one shipped factory workflow end to end with
 // REAL delegate CLIs on the operator's subscriptions: the true engine,
 // scheduler, worktrees, verifier, premium ledger, and human gate, with only

@@ -173,8 +173,9 @@ void db1_agent_job_heartbeat(int job_id)
       return;
 
    sqlite3_stmt *stmt = NULL;
-   static const char *sql = "UPDATE agent_jobs SET heartbeat_at = datetime('now'),"
-                            " updated_at = datetime('now') WHERE id = ?";
+   /* A runtime heartbeat proves the worker is alive, not that the model made
+    * progress. Keep updated_at as the last-progress timestamp. */
+   static const char *sql = "UPDATE agent_jobs SET heartbeat_at = datetime('now') WHERE id = ?";
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return;
    sqlite3_bind_int(stmt, 1, job_id);
@@ -240,7 +241,7 @@ int db1_agent_job_classify_stale(int job_id, int idle_threshold_secs, int in_too
 
    sqlite3_stmt *stmt = NULL;
    static const char *sql = "SELECT role, current_tool,"
-                            " (julianday('now') - julianday(heartbeat_at)) * 86400 AS age_secs"
+                            " (julianday('now') - julianday(updated_at)) * 86400 AS age_secs"
                             " FROM agent_jobs WHERE id = ?";
    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return 0;

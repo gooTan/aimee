@@ -210,7 +210,7 @@ int wfe_autonomy_run(const char *work_item_id, char *err, size_t errlen)
     * runaway backstops, NOT the dollar cost cap (which parks budget_exceeded).
     * Config-backed + live (env override > autonomy.* snapshot); a missing/bad value falls
     * back to the historical default. Tunable from the web Settings GUI. */
-   long max_turns = 300, max_wall = 1800, lv;
+   long max_turns = 300, max_wall = 0, lv;
    if (config_autonomy_lookup("AIMEE_AUTONOMY_MAX_TURNS", &lv) && lv > 0)
       max_turns = lv;
    if (config_autonomy_lookup("AIMEE_AUTONOMY_MAX_WALL_SECS", &lv) && lv > 0)
@@ -441,7 +441,7 @@ int wfe_autonomy_run(const char *work_item_id, char *err, size_t errlen)
       {
          struct timespec ts;
          clock_gettime(CLOCK_MONOTONIC, &ts);
-         if ((long)(ts.tv_sec - ts0.tv_sec) >= max_wall)
+         if (max_wall > 0 && (long)(ts.tv_sec - ts0.tv_sec) >= max_wall)
          {
             breach = "wall-clock cap reached (this resume)";
             reason = "wall_cap_exceeded";

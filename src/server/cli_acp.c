@@ -40,9 +40,8 @@
 
 #define ACP_FS_READ_CAP (16 * 1024 * 1024) /* max bytes served from a single fs/read */
 
-#define ACP_DEFAULT_TIMEOUT_MS 300000
-#define ACP_LINE_MAX           (256 * 1024)
-#define ACP_ARG_MAX            64
+#define ACP_LINE_MAX (256 * 1024)
+#define ACP_ARG_MAX  64
 
 typedef struct
 {
@@ -180,10 +179,10 @@ static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
       }
 
       long long now = util_now_ms();
-      if (now >= deadline_ms)
+      if (deadline_ms > 0 && now >= deadline_ms)
          return NULL;
 
-      long long remain_ms = deadline_ms - now;
+      long long remain_ms = deadline_ms > 0 ? deadline_ms - now : 0;
       struct timeval tv = {
           .tv_sec = (time_t)(remain_ms / 1000),
           .tv_usec = (suseconds_t)((remain_ms % 1000) * 1000),
@@ -192,7 +191,7 @@ static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(p->out_fd, &rfds);
-      int sel = select(p->out_fd + 1, &rfds, NULL, NULL, &tv);
+      int sel = select(p->out_fd + 1, &rfds, NULL, NULL, deadline_ms > 0 ? &tv : NULL);
       if (sel <= 0)
          return NULL; /* timeout or error */
 
@@ -693,9 +692,10 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
    snprintf(out->agent_name, sizeof(out->agent_name), "%s", cfg->agent->name);
 
    long long start_ms = util_now_ms();
-   int timeout_ms = (cfg->agent->cli_idle_timeout_ms > 0) ? cfg->agent->cli_idle_timeout_ms
-                                                          : ACP_DEFAULT_TIMEOUT_MS;
-   long long deadline_ms = start_ms + timeout_ms;
+   int timeout_ms = cfg->agent->cli_idle_timeout_ms > 0
+                        ? cfg->agent->cli_idle_timeout_ms
+                        : (cfg->agent->timeout_ms > 0 ? cfg->agent->timeout_ms : 0);
+   long long deadline_ms = timeout_ms > 0 ? start_ms + timeout_ms : 0;
 
    acp_proc_t p = {.in_fd = -1, .out_fd = -1, .pid = 0};
    const char *cli_cmd = cfg->agent->cli_cmd[0] ? cfg->agent->cli_cmd : "acp";
@@ -830,7 +830,7 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
    /* 4. read events until turn complete (parsing is in pure acp_turn_consume).
     * The turn ends with the response to the session/prompt request (id 3). */
    acp_turn_state_t st = {.prompt_id = 3};
-   while (!st.done && util_now_ms() < deadline_ms)
+   while (!st.done && (deadline_ms <= 0 || util_now_ms() < deadline_ms))
    {
       char *line = acp_read_line(&p, deadline_ms);
       if (!line)

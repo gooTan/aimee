@@ -180,7 +180,7 @@ func TestWallCapBelowWriteRoleFloorIsRejectedNamingBothValues(t *testing.T) {
 
 // The shipped default must keep loading. A floor that rejected the default would
 // be a worse failure than the misconfiguration it exists to catch.
-func TestDefaultWallCapRemainsAcceptable(t *testing.T) {
+func TestDefaultWallCapIsDisabled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "aimee.yaml")
 	if err := os.WriteFile(path, []byte("provider: codex\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -193,8 +193,8 @@ func TestDefaultWallCapRemainsAcceptable(t *testing.T) {
 	if !ok {
 		t.Fatalf("shipped default missing: %#v", policyDefaults["autonomy.max_wall_secs"])
 	}
-	if shipped < MinAutonomyMaxWallSecs {
-		t.Fatalf("shipped default %d is below the enforced floor %d", shipped, MinAutonomyMaxWallSecs)
+	if shipped != 0 {
+		t.Fatalf("shipped default %d, want unbounded", shipped)
 	}
 	if err := store.Set("autonomy.max_wall_secs", float64(shipped)); err != nil {
 		t.Fatalf("shipped default rejected: %v", err)

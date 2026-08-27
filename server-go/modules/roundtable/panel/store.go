@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-const DefaultDeadlineMS = 600000
-
 // Seat is one convened reviewer. Persona is its review lens; Selector is an
 // operator's positive pin, empty meaning ordinary eligibility routing.
 // Participant and Ordinal are filled in when the panel actually convenes.
@@ -136,9 +134,6 @@ func resolvePreset(p preset, lenses []string, pins map[string]string) (Panel, er
 		return Panel{}, fmt.Errorf("roundtable %q min_successful %d exceeds its %d required seats", p.Name, minimum, requiredSeats)
 	}
 	deadline := p.DeadlineMS
-	if deadline <= 0 {
-		deadline = DefaultDeadlineMS
-	}
 	chairman := strings.TrimSpace(p.Chairman)
 	chairmanFallback := strings.TrimSpace(p.ChairmanFallback)
 	if p.ChairmanEnabled {

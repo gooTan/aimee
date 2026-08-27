@@ -14,10 +14,11 @@ import (
 )
 
 type recordingCaller struct {
-	request []byte
-	result  InvocationResult
-	reply   []byte
-	err     error
+	request  []byte
+	deadline time.Duration
+	result   InvocationResult
+	reply    []byte
+	err      error
 }
 
 type groupRoutingCaller struct {
@@ -53,11 +54,12 @@ func (c *groupRoutingCaller) Call(_ context.Context, _, stage uint32, _ uint64,
 }
 
 func (c *recordingCaller) Call(_ context.Context, kind, stage uint32, _ uint64,
-	_ time.Duration, request []byte) ([]byte, error) {
+	deadline time.Duration, request []byte) ([]byte, error) {
 	if kind != EventKind || stage != StageInvoke {
 		panic("wrong delegate stage")
 	}
 	c.request = append([]byte(nil), request...)
+	c.deadline = deadline
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -65,6 +67,27 @@ func (c *recordingCaller) Call(_ context.Context, kind, stage uint32, _ uint64,
 		return c.reply, nil
 	}
 	return json.Marshal(c.result)
+}
+
+func TestDelegateIsUnboundedWhenNoDeadlineIsConfigured(t *testing.T) {
+	caller := &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "done", Response: "ok"}}
+	client, err := NewClient(caller, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	if caller.deadline != 0 {
+		t.Fatalf("bus deadline = %s, want unbounded", caller.deadline)
+	}
+	var wire Invocation
+	if err := json.Unmarshal(caller.request, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.ExecutionTimeoutMS != 0 {
+		t.Fatalf("execution timeout = %d, want unbounded", wire.ExecutionTimeoutMS)
+	}
 }
 
 func TestBusWireOmitsCallerLifecycleState(t *testing.T) {

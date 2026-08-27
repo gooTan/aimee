@@ -1241,16 +1241,16 @@ static long long cli_codex_idle_deadline_ms(int idle_timeout_ms)
 
 static int cli_codex_request_idle_timeout_ms(int timeout_ms)
 {
-   return timeout_ms < 0 ? -1 : (timeout_ms > 0 ? timeout_ms : CLI_CODEX_DEFAULT_IDLE_TIMEOUT_MS);
+   return timeout_ms > 0 ? timeout_ms : -1;
 }
 
 static int cli_codex_agent_idle_timeout_ms(const agent_t *agent)
 {
    if (agent->cli_idle_timeout_ms > 0)
       return agent->cli_idle_timeout_ms;
-   if (agent->timeout_ms > 0 && agent->timeout_ms != AGENT_DEFAULT_TIMEOUT_MS)
+   if (agent->timeout_ms > 0)
       return agent->timeout_ms;
-   return CLI_CODEX_DEFAULT_IDLE_TIMEOUT_MS;
+   return -1;
 }
 
 static cJSON *cli_codex_request(cli_codex_t *c, const char *method, cJSON *params, int id,

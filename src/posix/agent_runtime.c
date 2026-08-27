@@ -682,7 +682,7 @@ native_provider_http:
       clock_gettime(CLOCK_MONOTONIC, &now_ts);
       int elapsed_ms = (int)((now_ts.tv_sec - loop_start.tv_sec) * 1000 +
                              (now_ts.tv_nsec - loop_start.tv_nsec) / 1000000);
-      if (elapsed_ms > total_timeout_ms)
+      if (total_timeout_ms > 0 && elapsed_ms > total_timeout_ms)
       {
          if (agent->tool_loop_timeout_ms_cap > 0)
             snprintf(out->error, sizeof(out->error),

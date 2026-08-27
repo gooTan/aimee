@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -165,71 +166,33 @@ func TestShippedRoundtablePresetsExactAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// plan: the known-good live allocation uses Luna for both required seats.
-	plan, err := store.Resolve("plan", nil, nil)
-	if err != nil {
-		t.Fatalf("plan preset: %v", err)
+	required := []Seat{
+		{Selector: "sol", Persona: "reviewer"},
+		{Selector: "sol", Persona: "qa"},
+		{Selector: "opus-ui", Persona: "reviewer"},
+		{Selector: "opus-ui", Persona: "qa"},
+		{Selector: "antigravity", Persona: "reviewer"},
+		{Selector: "antigravity", Persona: "qa"},
 	}
-	if plan.Name != "plan" || len(plan.Seats) != 2 || !plan.Acquired || !plan.ChairmanEnabled || plan.MinSuccessful != 2 || plan.DeadlineMS != 0 || plan.Discussion {
-		t.Fatalf("plan panel mismatch: %+v", plan)
-	}
-	if plan.Chairman != "luna" || plan.ChairmanFallback != "luna" {
-		t.Fatalf("plan chairman mismatch: chairman=%q fallback=%q", plan.Chairman, plan.ChairmanFallback)
-	}
-	if plan.Seats[0].Selector != "luna" || plan.Seats[0].Persona != "reviewer" || plan.Seats[0].Optional {
-		t.Fatalf("plan seat 0 mismatch: %+v", plan.Seats[0])
-	}
-	if plan.Seats[1].Selector != "luna" || plan.Seats[1].Persona != "qa" || plan.Seats[1].Optional {
-		t.Fatalf("plan seat 1 mismatch: %+v", plan.Seats[1])
-	}
-	// No Fable seat in plan.
-	for _, seat := range plan.Seats {
-		if seat.Selector == "claude:claude-fable-5" {
-			t.Fatalf("plan must not contain a Fable seat: %+v", plan.Seats)
+	assertPanel := func(name string, want []Seat) Panel {
+		t.Helper()
+		got, resolveErr := store.Resolve(name, nil, nil)
+		if resolveErr != nil {
+			t.Fatalf("%s preset: %v", name, resolveErr)
 		}
+		if got.Name != name || !got.Acquired || !got.ChairmanEnabled || got.MinSuccessful != 6 || got.DeadlineMS != 0 || !got.Discussion || got.Chairman != "fable" || got.ChairmanFallback != "sol" || !reflect.DeepEqual(got.Seats, want) {
+			t.Fatalf("%s panel mismatch: %+v", name, got)
+		}
+		return got
 	}
 
-	// implementation/documentation: the known-good live allocation uses Antigravity.
-	implementation, err := store.Resolve("implementation", nil, nil)
-	if err != nil {
-		t.Fatalf("implementation preset: %v", err)
-	}
-	if implementation.Name != "implementation" || len(implementation.Seats) != 3 || !implementation.Acquired || !implementation.ChairmanEnabled || implementation.MinSuccessful != 2 || implementation.DeadlineMS != 0 || implementation.Discussion {
-		t.Fatalf("implementation panel mismatch: %+v", implementation)
-	}
-	if implementation.Chairman != "antigravity" || implementation.ChairmanFallback != "antigravity" {
-		t.Fatalf("implementation chairman mismatch: chairman=%q fallback=%q", implementation.Chairman, implementation.ChairmanFallback)
-	}
-	if implementation.Seats[0].Selector != "antigravity" || implementation.Seats[0].Persona != "reviewer" || implementation.Seats[0].Optional {
-		t.Fatalf("implementation seat 0 mismatch: %+v", implementation.Seats[0])
-	}
-	if implementation.Seats[1].Selector != "antigravity" || implementation.Seats[1].Persona != "qa" || implementation.Seats[1].Optional {
-		t.Fatalf("implementation seat 1 mismatch: %+v", implementation.Seats[1])
-	}
-	if implementation.Seats[2].Selector != "antigravity" || implementation.Seats[2].Persona != "architect" || !implementation.Seats[2].Optional {
-		t.Fatalf("implementation seat 2 mismatch: %+v", implementation.Seats[2])
-	}
-
-	// documentation: identical allocation to implementation but name documentation.
-	documentation, err := store.Resolve("documentation", nil, nil)
-	if err != nil {
-		t.Fatalf("documentation preset: %v", err)
-	}
-	if documentation.Name != "documentation" || len(documentation.Seats) != 3 || !documentation.Acquired || !documentation.ChairmanEnabled || documentation.MinSuccessful != 2 || documentation.DeadlineMS != 0 || documentation.Discussion {
-		t.Fatalf("documentation panel mismatch: %+v", documentation)
-	}
-	if documentation.Chairman != "antigravity" || documentation.ChairmanFallback != "antigravity" {
-		t.Fatalf("documentation chairman mismatch: chairman=%q fallback=%q", documentation.Chairman, documentation.ChairmanFallback)
-	}
-	if documentation.Seats[0].Selector != "antigravity" || documentation.Seats[0].Persona != "reviewer" || documentation.Seats[0].Optional {
-		t.Fatalf("documentation seat 0 mismatch: %+v", documentation.Seats[0])
-	}
-	if documentation.Seats[1].Selector != "antigravity" || documentation.Seats[1].Persona != "qa" || documentation.Seats[1].Optional {
-		t.Fatalf("documentation seat 1 mismatch: %+v", documentation.Seats[1])
-	}
-	if documentation.Seats[2].Selector != "antigravity" || documentation.Seats[2].Persona != "architect" || !documentation.Seats[2].Optional {
-		t.Fatalf("documentation seat 2 mismatch: %+v", documentation.Seats[2])
-	}
+	assertPanel("plan", required)
+	implementation := append(append([]Seat(nil), required...),
+		Seat{Selector: "sol", Persona: "architect", Optional: true},
+		Seat{Selector: "opus-ui", Persona: "architect", Optional: true},
+		Seat{Selector: "antigravity", Persona: "architect", Optional: true})
+	assertPanel("implementation", implementation)
+	assertPanel("documentation", required)
 
 	// default must remain unchanged for other workflows.
 	def, err := store.Resolve("default", nil, nil)

@@ -157,6 +157,9 @@ func TestChairmanFallbackRunsForAvailabilityFailures(t *testing.T) {
 			if agents.requests[0].Selector != "primary" || agents.requests[1].Selector != "fallback" {
 				t.Fatalf("selectors=%q,%q", agents.requests[0].Selector, agents.requests[1].Selector)
 			}
+			if agents.requests[1].FallbackFrom != "primary" || agents.requests[1].FallbackReason != string(class) {
+				t.Fatalf("fallback metadata=%+v", agents.requests[1])
+			}
 		})
 	}
 }

@@ -27,6 +27,8 @@ func (a *e2eAgents) Delegate(_ context.Context, request DelegateRequest) (Delega
 	case "review":
 		return DelegateResult{Response: fmt.Sprintf(`{"run_id":%q,"artifact_hash":%q,"artifact_stage":%q,"original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`,
 			request.WorkItemID, request.ArtifactHash, request.ArtifactStage)}, nil
+	case "search":
+		return DelegateResult{Response: `{"schema_version":1,"summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
 	case "draft":
 		if strings.Contains(request.Prompt, "Prepare a concise ContextBrief") {
 			return DelegateResult{Response: `{"schema_version":1,"summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil

@@ -267,6 +267,13 @@ func newShippedWorkflowRepo(t *testing.T, root string) string {
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("root\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	skill := filepath.Join(repo, ".agents", "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skill, []byte("# Code review\nReview correctness and the requested behavior.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	run(repo, "add", ".")
 	run(repo, "commit", "-m", "init")
 	run(repo, "push", "-u", "origin", "trunk")

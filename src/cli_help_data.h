@@ -320,7 +320,7 @@
      "  list                   List workflows under $AIMEE_HOME/workflows\n"
      "  new <file.yaml>        Scaffold a starter workflow\n"
      "  run <name> --proposal <file> --repo <path> [--watch]\n"
-     "  status <id> [--events] Inspect one durable run\n"},
+     "  status <id> [--watch] [--events] Inspect one durable run; --watch streams events\n"},
     {"code", "Code-health audit", CLIENT_TIER_ADVANCED, 0,
      "  audit [dir] [--json] [--fix]   File-health audit (untested files,\n"
      "                         TODO/FIXME markers, debt score) over the tree;\n"

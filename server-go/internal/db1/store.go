@@ -542,14 +542,46 @@ type Event struct {
 	CreatedAt   string  `json:"created_at"`
 }
 
+// RecordEvent appends an operational event without changing workflow state.
+// Model liveness uses this path so status --watch can remain informative while
+// a long-running delegate call is still in flight.
+func (s *Store) RecordEvent(ctx context.Context, workItemID, stage, kind, actor, detail string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail)
+VALUES (?, ?, ?, ?, ?)`, workItemID, stage, kind, actor, detail)
+	if err != nil {
+		return fmt.Errorf("record lifecycle event: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Events(ctx context.Context, workItemID string, after int64, limit int) ([]Event, error) {
+	return s.events(ctx, workItemID, after, limit, false)
+}
+
+// EventsTree returns one globally ordered cursor across a workflow and all of
+// its slice descendants, so watching a build also shows its implementation.
+func (s *Store) EventsTree(ctx context.Context, workItemID string, after int64, limit int) ([]Event, error) {
+	return s.events(ctx, workItemID, after, limit, true)
+}
+
+func (s *Store) events(ctx context.Context, workItemID string, after int64, limit int, descendants bool) ([]Event, error) {
 	if limit < 1 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 SELECT id, work_item_id, stage, kind, actor, detail, content_hash, cost_usd, created_at
-FROM lifecycle_event WHERE work_item_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-		workItemID, after, limit)
+FROM lifecycle_event WHERE work_item_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+	args := []any{workItemID, after, limit}
+	if descendants {
+		query = `WITH RECURSIVE tree(id) AS (
+  SELECT ? UNION ALL
+  SELECT child.work_item_id FROM lifecycle_work_item child JOIN tree parent ON child.parent_id = parent.id
+)
+SELECT id, work_item_id, stage, kind, actor, detail, content_hash, cost_usd, created_at
+FROM lifecycle_event WHERE work_item_id IN (SELECT id FROM tree) AND id > ? ORDER BY id ASC LIMIT ?`
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list lifecycle events: %w", err)
 	}

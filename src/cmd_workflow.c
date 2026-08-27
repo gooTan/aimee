@@ -15,6 +15,8 @@
 #ifndef _WIN32
 #include <dirent.h>
 #include <unistd.h>
+#else
+#include <windows.h>
 #endif
 
 static void print_accepts_builtin(wfe_block_type_t t)
@@ -306,9 +308,55 @@ static int wf_item_get(const char *id, cJSON **out, int *status)
 
 /* Poll the run until it leaves the "active" state (terminal or parked at a gate),
  * printing each state/stage transition. */
+static int wf_events_since(const char *id, long long *after, int heading)
+{
+   int printed_heading = 0;
+   for (;;)
+   {
+      char path[320];
+      snprintf(path, sizeof path, "/v1/workflow/items/%s/events?after=%lld&limit=200", id, *after);
+      int st = 0;
+      char *resp = aimee_client_request("GET", path, NULL, &st);
+      if (!resp || st != 200)
+      {
+         free(resp);
+         return -1;
+      }
+      cJSON *root = cJSON_Parse(resp);
+      free(resp);
+      cJSON *events = root ? cJSON_GetObjectItemCaseSensitive(root, "events") : NULL;
+      if (!cJSON_IsArray(events))
+      {
+         cJSON_Delete(root);
+         return -1;
+      }
+      int count = cJSON_GetArraySize(events);
+      if (count > 0 && heading && !printed_heading)
+      {
+         printf("\n  events:\n");
+         printed_heading = 1;
+      }
+      cJSON *event = NULL;
+      cJSON_ArrayForEach(event, events)
+      {
+         cJSON *eid = cJSON_GetObjectItemCaseSensitive(event, "id");
+         if (cJSON_IsNumber(eid) && (long long)eid->valuedouble > *after)
+            *after = (long long)eid->valuedouble;
+         printf("    %-19s %-28s %-12s %-18s %-14s %s\n", jstr(event, "created_at"),
+                jstr(event, "work_item_id"), jstr(event, "stage"), jstr(event, "kind"),
+                jstr(event, "actor"), jstr(event, "detail"));
+      }
+      cJSON_Delete(root);
+      fflush(stdout);
+      if (count < 200)
+         return 0;
+   }
+}
+
 static int wf_watch(const char *id)
 {
    char last[128] = "";
+   long long after = 0;
    for (;;)
    {
       cJSON *it = NULL;
@@ -334,12 +382,20 @@ static int wf_watch(const char *id)
          printf("  %-12s stage=%s\n", state, stage);
          snprintf(last, sizeof last, "%s", cur);
       }
+      if (wf_events_since(id, &after, 0) != 0)
+      {
+         fprintf(stderr, "workflow status: event stream unavailable\n");
+         cJSON_Delete(it);
+         return 1;
+      }
       int active = strcmp(state, "active") == 0;
       cJSON_Delete(it);
       if (!active)
          return 0;
 #ifndef _WIN32
       sleep(2);
+#else
+      Sleep(2000);
 #endif
    }
 }
@@ -527,27 +583,12 @@ static int cmd_status(int argc, char **argv, int json_output)
 
    if (events && !json_output)
    {
-      char path[256];
-      snprintf(path, sizeof path, "/v1/workflow/items/%s/events", id);
-      int est = 0;
-      char *resp = aimee_client_request("GET", path, NULL, &est);
-      if (resp && est == 200)
+      long long after = 0;
+      if (wf_events_since(id, &after, 1) != 0)
       {
-         cJSON *eo = cJSON_Parse(resp);
-         cJSON *arr = eo ? cJSON_GetObjectItemCaseSensitive(eo, "events") : NULL;
-         if (cJSON_IsArray(arr))
-         {
-            printf("\n  events:\n");
-            cJSON *e = NULL;
-            cJSON_ArrayForEach(e, arr)
-            {
-               printf("    %-19s %-12s %-10s %s\n", jstr(e, "created_at"), jstr(e, "stage"),
-                      jstr(e, "kind"), jstr(e, "detail"));
-            }
-         }
-         cJSON_Delete(eo);
+         fprintf(stderr, "workflow status: event stream unavailable\n");
+         return 1;
       }
-      free(resp);
    }
    return 0;
 }

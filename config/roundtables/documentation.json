@@ -1,13 +1,16 @@
 {
   "name": "documentation",
   "seats": [
+    {"model": "sol", "persona": "reviewer"},
+    {"model": "sol", "persona": "qa"},
+    {"model": "opus-ui", "persona": "reviewer"},
+    {"model": "opus-ui", "persona": "qa"},
     {"model": "antigravity", "persona": "reviewer"},
-    {"model": "antigravity", "persona": "qa"},
-    {"model": "antigravity", "persona": "architect", "optional": true}
+    {"model": "antigravity", "persona": "qa"}
   ],
-  "chairman": "antigravity",
-  "chairman_fallback": "antigravity",
+  "chairman": "fable",
+  "chairman_fallback": "sol",
   "chairman_enabled": true,
-  "min_successful": 2,
-  "discussion": false
+  "min_successful": 6,
+  "discussion": true
 }

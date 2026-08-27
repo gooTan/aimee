@@ -22,6 +22,25 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestRecordEventAppendsOperationalEvent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_observe", Repo: "repo", ProposalPath: "observe", WorkflowName: "build", StartStage: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(ctx, "wi_observe", "plan", "model_dispatch", "fable", "role=draft status=running"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.Events(ctx, "wi_observe", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := events[len(events)-1]
+	if got.Kind != "model_dispatch" || got.Actor != "fable" || got.Detail != "role=draft status=running" {
+		t.Fatalf("operational event=%+v", got)
+	}
+}
+
 func TestOpenMigratesPreGoWorkflowSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -1177,5 +1196,29 @@ func TestGateIterationCapSurvivesTheAuthorsReentry(t *testing.T) {
 	}
 	if parkedAt != 2 {
 		t.Fatalf("gate parked at loop %d, want 2 (cap of 3); the author's re-entry reset the counter", parkedAt)
+	}
+}
+
+func TestEventsTreeIncludesDescendantsInGlobalOrder(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "root", Repo: "r", ProposalPath: "p", WorkflowName: "build", StartStage: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "child", ParentID: "root", Repo: "r", ProposalPath: "p-child", WorkflowName: "slice", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(ctx, "child", "impl", "model_dispatch", "muse", "status=running"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(ctx, "root", "plan", "model_complete", "fable", "status=complete"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.EventsTree(ctx, "root", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 || events[2].WorkItemID != "child" || events[2].Actor != "muse" || events[3].WorkItemID != "root" || events[3].Actor != "fable" {
+		t.Fatalf("events=%+v", events)
 	}
 }

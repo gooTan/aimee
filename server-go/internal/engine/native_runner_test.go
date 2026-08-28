@@ -1726,13 +1726,13 @@ func TestImplementationKindRoutesBeforeDispatch(t *testing.T) {
 }
 
 type mutateFallbackAgents struct {
-	mu       sync.Mutex
-	requests []DelegateRequest
-	avail    delegate.AvailabilityClass
-	started  bool
-	costs    []float64
-	unknowns []bool
-	errs     []error
+	mu           sync.Mutex
+	requests     []DelegateRequest
+	avail        delegate.AvailabilityClass
+	started      bool
+	costs        []float64
+	unknowns     []bool
+	errs         []error
 	agents       []string
 	participants []string
 }

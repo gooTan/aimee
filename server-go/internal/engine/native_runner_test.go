@@ -785,8 +785,8 @@ func TestContextBriefBlocksFailedMandatoryPrecondition(t *testing.T) {
 	if result.Status != StepChanges || !strings.Contains(result.Detail, "routing-e2e-20260824-l1") {
 		t.Fatalf("result=%+v, want repairable scout changes for failed mandatory precondition", result)
 	}
-	if len(agents.requests) != 3 {
-		t.Fatalf("requests=%d, want corrective scout attempts only", len(agents.requests))
+	if len(agents.requests) != 1 {
+		t.Fatalf("requests=%d, want blocked scout to stop without corrective retries", len(agents.requests))
 	}
 	if strings.Contains(agents.requests[len(agents.requests)-1].Prompt, "ORIGINAL REQUEST") {
 		t.Fatalf("blocked scout was routed to planner instead of scout repair: %q", agents.requests[len(agents.requests)-1].Prompt)
@@ -1780,9 +1780,9 @@ func TestFableDirectFallbackUsesSol(t *testing.T) {
 	}
 	agents := &mutateFallbackAgents{
 		avail:  delegate.AvailabilityClassQuotaRateLimit,
-		costs:  []float64{1.5, 2.5},
-		errs:   []error{errors.New("You've hit your session limit")},
-		agents: []string{"fable", "sol"},
+		costs:  []float64{1.5, 0.5, 2.5},
+		errs:   []error{errors.New("You've hit your session limit"), errors.New("You've hit your session limit")},
+		agents: []string{"fable", "fable", "sol"},
 	}
 	runner := &NativeRunner{db: store, agents: agents}
 	result, err := runner.delegate(t.Context(), StepRequest{
@@ -1792,10 +1792,10 @@ func TestFableDirectFallbackUsesSol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != "ok" || result.CostUSD != 4 || result.CostUnknown {
+	if result.Response != "ok" || result.CostUSD != 4.5 || result.CostUnknown {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(agents.requests) != 2 || agents.requests[0].Delegate != "" || agents.requests[1].Delegate != "sol" {
+	if len(agents.requests) != 3 || agents.requests[0].Delegate != "" || agents.requests[1] != agents.requests[0] || agents.requests[2].Delegate != "sol" {
 		t.Fatalf("requests=%+v", agents.requests)
 	}
 	events, err := store.Events(t.Context(), "wi_fable_fallback", 0, 20)

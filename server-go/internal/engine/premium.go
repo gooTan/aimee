@@ -135,6 +135,14 @@ type ContextPrecondition struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+type ContextBriefBlockedError struct {
+	Reason string
+}
+
+func (e *ContextBriefBlockedError) Error() string {
+	return "context brief is blocked: " + e.Reason
+}
+
 // maxContextBriefBytes bounds what a premium planner can be sent. 32 KiB holds
 // a thorough brief for a large change while making a pasted repository listing
 // or raw log dump fail loudly at the gate instead of silently costing money.
@@ -172,7 +180,7 @@ func validateContextBrief(doc []byte) error {
 		if strings.TrimSpace(brief.BlockedReason) == "" {
 			return errors.New("context brief blocked_reason is required when status is blocked")
 		}
-		return fmt.Errorf("context brief is blocked: %s", strings.TrimSpace(brief.BlockedReason))
+		return &ContextBriefBlockedError{Reason: strings.TrimSpace(brief.BlockedReason)}
 	}
 	for _, precondition := range brief.MandatoryPreconditions {
 		preconditionStatus := strings.ToLower(strings.TrimSpace(precondition.Status))
@@ -186,7 +194,7 @@ func validateContextBrief(doc []byte) error {
 			return fmt.Errorf("context brief mandatory precondition %q status must be satisfied or failed", precondition.ID)
 		}
 		if preconditionStatus == "failed" {
-			return fmt.Errorf("context brief mandatory precondition %q failed: %s", precondition.ID, strings.TrimSpace(precondition.Detail))
+			return &ContextBriefBlockedError{Reason: fmt.Sprintf("mandatory precondition %q failed: %s", precondition.ID, strings.TrimSpace(precondition.Detail))}
 		}
 	}
 	if strings.TrimSpace(brief.Summary) == "" {

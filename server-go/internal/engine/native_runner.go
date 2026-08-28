@@ -318,11 +318,15 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 	started := time.Now()
 	result, err := r.agents.Delegate(ctx, request)
 	if shouldRetrySameSeat(request, result, err) {
+		primaryAvailability := delegateAvailability(result, err)
 		primaryCost, primaryUnknown := delegateAttemptCost(result, err)
 		r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_retry",
 			firstNonempty(result.Agent, request.Delegate),
-			"same-seat reason="+string(delegateAvailability(result, err)))
+			"same-seat reason="+string(primaryAvailability))
 		result, err = r.agents.Delegate(ctx, request)
+		if err != nil && !result.ResponseStarted && delegateAvailability(result, err) == delegateapi.AvailabilityClassNone {
+			result.AvailabilityClass = primaryAvailability
+		}
 		result.CostUSD += primaryCost
 		result.CostUnknown = result.CostUnknown || primaryUnknown
 	}
@@ -415,16 +419,23 @@ func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requ
 				ResponseStarted:   results[i].ResponseStarted,
 			}
 			if shouldRetrySameSeat(requests[i], candidate, results[i].Err) {
+				primaryAvailability := groupAvailability(results[i])
+				primaryCost := results[i].CostUSD
+				primaryUnknown := results[i].CostUnknown
 				r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_retry",
 					firstNonempty(results[i].Participant, requests[i].Delegate),
-					"same-seat reason="+string(groupAvailability(results[i])))
+					"same-seat reason="+string(primaryAvailability))
 				retry, retryErr := r.agents.Delegate(ctx, requests[i])
+				retryAvailability := retry.AvailabilityClass
+				if retryErr != nil && retryAvailability == "" && !retry.ResponseStarted {
+					retryAvailability = primaryAvailability
+				}
 				results[i] = DelegateGroupResult{
 					Participant:       retry.Participant,
 					Response:          retry.Response,
-					CostUSD:           retry.CostUSD,
-					CostUnknown:       retry.CostUnknown,
-					AvailabilityClass: retry.AvailabilityClass,
+					CostUSD:           primaryCost + retry.CostUSD,
+					CostUnknown:       primaryUnknown || retry.CostUnknown,
+					AvailabilityClass: retryAvailability,
 					ResponseStarted:   retry.ResponseStarted,
 					ToolEvents:        retry.ToolEvents,
 					Err:               retryErr,
@@ -818,6 +829,10 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		content, validationErr = extractJSONObject(result.Response)
 		if validationErr == nil {
 			validationErr = validate(content)
+			var blocked *ContextBriefBlockedError
+			if brief && errors.As(validationErr, &blocked) {
+				return StepResult{Status: StepChanges, Detail: validationErr.Error(), CostUSD: cost, CostUnknown: costUnknown}, nil
+			}
 		}
 		if validationErr == nil {
 			break

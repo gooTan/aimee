@@ -550,6 +550,9 @@ func AvailabilityClassOf(err error) AvailabilityClass {
 	if errors.Is(err, ErrDelegateCapacity) {
 		return AvailabilityClassCapacity
 	}
+	if strings.Contains(err.Error(), "aimee_err=rate_limit") {
+		return AvailabilityClassQuotaRateLimit
+	}
 	return AvailabilityClassNone
 }
 

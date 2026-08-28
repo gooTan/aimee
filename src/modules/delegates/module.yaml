@@ -112,7 +112,8 @@
     "server-go/modules/delegates/worktreeplan_stage.go",
     "server-go/modules/delegates/launchargs_stage.go",
     "server-go/modules/delegates/containername.go",
-    "server-go/modules/delegates/proxyguard.go"
+    "server-go/modules/delegates/proxyguard.go",
+    "server-go/modules/delegates/tool_events.go"
   ],
   "go_tests": [
     "server-go/modules/delegates/delegates_test.go",
@@ -161,7 +162,8 @@
     "server-go/modules/delegates/worktreeplan_stage_test.go",
     "server-go/modules/delegates/launchargs_stage_test.go",
     "server-go/modules/delegates/containername_test.go",
-    "server-go/modules/delegates/proxyguard_test.go"
+    "server-go/modules/delegates/proxyguard_test.go",
+    "server-go/modules/delegates/tool_events_test.go"
   ],
   "tests": [
     "src/tests/test_aimee_ir_rescue.c",

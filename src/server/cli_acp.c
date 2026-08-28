@@ -167,17 +167,24 @@ static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
          return line;
       }
 
-      /* Grow buffer if needed */
-      if (p->buf_len + 1 >= p->buf_cap)
+      if (p->buf_len > ACP_LINE_MAX)
       {
-         if (p->buf_cap >= ACP_LINE_MAX)
+         p->frame_overflow = 1;
+         return NULL;
+      }
+
+      /* Grow buffer if needed. The limit is payload bytes, not the trailing
+       * newline or the NUL stored in the returned copy. */
+      if (p->buf_len >= p->buf_cap)
+      {
+         if (p->buf_cap >= ACP_LINE_MAX + 1)
          {
             p->frame_overflow = 1;
             return NULL;
          }
          size_t new_cap = p->buf_cap * 2;
-         if (new_cap > ACP_LINE_MAX)
-            new_cap = ACP_LINE_MAX;
+         if (new_cap > ACP_LINE_MAX + 1)
+            new_cap = ACP_LINE_MAX + 1;
          char *nb = realloc(p->buf, new_cap);
          if (!nb)
             return NULL;
@@ -202,7 +209,7 @@ static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
       if (sel <= 0)
          return NULL; /* timeout or error */
 
-      ssize_t r = read(p->out_fd, p->buf + p->buf_len, p->buf_cap - p->buf_len - 1);
+      ssize_t r = read(p->out_fd, p->buf + p->buf_len, p->buf_cap - p->buf_len);
       if (r <= 0)
          return NULL; /* EOF or error */
       p->buf_len += (size_t)r;

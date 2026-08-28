@@ -11,7 +11,7 @@
 #include "wfe_iface.h"
 
 /* The parent "build" spine: author.proposal -> branch.open(base:trunk) -> prep(understand,
- * brief:true emits validated ContextBrief as intent) -> author.plan (proposal: prep.out)
+ * brief:true emits validated schema_version 2 ContextBrief as intent) -> author.plan (proposal: prep.out)
  * -> roundtable(plan+proposal) -> split -> foreach.workflow -> freeze -> acceptance
  * roundtable -> document -> freeze -> documentation roundtable -> PR(base:trunk).
  * The final pr.open is TERMINAL (opened against the repo trunk, never merged). */

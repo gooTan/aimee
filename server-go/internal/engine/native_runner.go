@@ -329,6 +329,7 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 		}
 		result.CostUSD += primaryCost
 		result.CostUnknown = result.CostUnknown || primaryUnknown
+		fillRetryIdentity(&result, request)
 	}
 	if err != nil && (request.Delegate == "fable" || result.Agent == "fable") && !request.ReplayOnly {
 		availability := result.AvailabilityClass
@@ -374,6 +375,15 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 		}
 	}
 	return result, err
+}
+
+func fillRetryIdentity(result *DelegateResult, request DelegateRequest) {
+	if result.Participant == "" {
+		result.Participant = request.Participant
+	}
+	if result.Agent == "" {
+		result.Agent = request.Delegate
+	}
 }
 
 func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requests []DelegateRequest) []DelegateGroupResult {
@@ -430,6 +440,7 @@ func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requ
 				if retryErr != nil && retryAvailability == "" && !retry.ResponseStarted {
 					retryAvailability = primaryAvailability
 				}
+				fillRetryIdentity(&retry, requests[i])
 				results[i] = DelegateGroupResult{
 					Participant:       retry.Participant,
 					Response:          retry.Response,

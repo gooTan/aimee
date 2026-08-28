@@ -517,6 +517,84 @@ static void test_effort_handshake(void)
    printf("PASS: empty effort sends no id-5 and reaches prompt\n");
 }
 
+#define TEST_ACP_LINE_MAX (16 * 1024 * 1024)
+
+static void do_line_bound_case(size_t payload_len, int expect_ok)
+{
+   char fpath[256];
+   snprintf(fpath, sizeof(fpath), "%s/aimee-fake-acp-bound-XXXXXX", platform_tmpdir());
+   int fd = mkstemp(fpath);
+   assert(fd >= 0);
+   FILE *f = fdopen(fd, "w");
+   assert(f != NULL);
+   fprintf(
+       f,
+       "#!/bin/sh\n"
+       "PAYLOAD_LEN=%zu\n"
+       "while IFS= read -r line; do\n"
+       "  case \"$line\" in\n"
+       "    *initialize*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
+       "      ;;\n"
+       "    *session/new*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-bound\"}}\\n'\n"
+       "      ;;\n"
+       "    *session/prompt*)\n"
+       "      awk -v n=\"$PAYLOAD_LEN\" 'BEGIN { msg=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"method\\\":\\\"session/update\\\",\\\"params\\\":{\\\"sessionId\\\":\\\"sess-bound\\\",\\\"update\\\":{\\\"sessionUpdate\\\":\\\"agent_message_chunk\\\",\\\"content\\\":{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"ok\\\"}}}}\"; printf \"%%s\", msg; for (i = length(msg); i < n; i++) printf \" \"; printf \"\\n\"; printf \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":{\\\"stopReason\\\":\\\"end_turn\\\"}}\\n\" }'\n"
+       "      ;;\n"
+       "  esac\n"
+       "done\n",
+       payload_len);
+   fclose(f);
+   chmod(fpath, 0700);
+
+   char cwdbuf[256];
+   snprintf(cwdbuf, sizeof(cwdbuf), "%s/acp_cwd_bound_XXXXXX", platform_tmpdir());
+   char *cwd = mkdtemp(cwdbuf);
+   assert(cwd != NULL);
+
+   agent_t agent;
+   memset(&agent, 0, sizeof(agent));
+   snprintf(agent.name, sizeof(agent.name), "fake-acp-bound");
+   snprintf(agent.backend, sizeof(agent.backend), "%s", AGENT_BACKEND_PROVIDER_CLI);
+   snprintf(agent.cli_kind, sizeof(agent.cli_kind), "acp");
+   snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "%s", fpath);
+   agent.timeout_ms = 10000;
+   agent.cli_idle_timeout_ms = 10000;
+
+   const provider_cli_adapter_t *acp = provider_cli_adapter_get("acp");
+   assert(acp != NULL);
+   provider_cli_cfg_t cfg = {.agent = &agent, .cwd = cwd, .user_prompt = "hi"};
+   agent_result_t out;
+   memset(&out, 0, sizeof(out));
+   int rc = acp->execute(&cfg, &out);
+
+   if (expect_ok)
+   {
+      assert(rc == 0);
+      assert(out.success == 1);
+      assert(out.response != NULL);
+      assert(strcmp(out.response, "ok") == 0);
+   }
+   else
+   {
+      assert(rc != 0);
+      assert(strstr(out.error, "ACP frame exceeds limit") != NULL);
+   }
+
+   free(out.response);
+   unlink(fpath);
+   rmdir(cwd);
+}
+
+static void test_acp_line_payload_bound(void)
+{
+   do_line_bound_case(TEST_ACP_LINE_MAX, 1);
+   printf("PASS: ACP frame with exactly 16 MiB payload plus newline is accepted\n");
+   do_line_bound_case(TEST_ACP_LINE_MAX + 1, 0);
+   printf("PASS: ACP frame above 16 MiB payload is rejected with overflow error\n");
+}
+
 static void test_large_session_update_frame_completes(void)
 {
    char fpath[256];
@@ -600,6 +678,7 @@ int main(void)
    test_serve_write_denied_when_read_only();
    test_serve_permission_denied_when_read_only();
    test_effort_handshake();
+   test_acp_line_payload_bound();
    test_large_session_update_frame_completes();
    printf("ALL PASS\n");
    return 0;

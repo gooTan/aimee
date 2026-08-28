@@ -748,7 +748,7 @@ func TestStructuredCorrectiveSynthesisIncludesCompleteInvalidResponse(t *testing
 }
 
 func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
-	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"status":"ready","summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`}}
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`}}
 	runner := &NativeRunner{agents: agents}
 	result, err := runner.structured(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
@@ -770,7 +770,7 @@ func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
 }
 
 func TestContextBriefBlocksFailedMandatoryPrecondition(t *testing.T) {
-	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"status":"ready","summary":"scope","acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed","detail":"memory route unavailable"}]}`}}
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed","detail":"memory route unavailable"}]}`}}
 	runner := &NativeRunner{agents: agents}
 	result, err := runner.structured(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
@@ -1733,7 +1733,8 @@ type mutateFallbackAgents struct {
 	costs    []float64
 	unknowns []bool
 	errs     []error
-	agents   []string
+	agents       []string
+	participants []string
 }
 
 func TestSameSeatRetryForPreResponseAvailabilityPreservesRequest(t *testing.T) {
@@ -1761,11 +1762,89 @@ func TestSameSeatRetryForPreResponseAvailabilityPreservesRequest(t *testing.T) {
 	if result.Response != "ok" {
 		t.Fatalf("result=%+v", result)
 	}
+	if result.Participant != "seat-qa" || result.Agent != "antigravity" {
+		t.Fatalf("retry identity=%+v, want seat-qa/antigravity", result)
+	}
 	if len(agents.requests) != 2 {
 		t.Fatalf("requests=%d, want one same-seat retry", len(agents.requests))
 	}
 	if agents.requests[0] != agents.requests[1] || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
 		t.Fatalf("retry changed participant/persona/delegate: %+v", agents.requests)
+	}
+}
+
+func TestSameSeatRetryPreservesExplicitRetryIdentity(t *testing.T) {
+	agents := &mutateFallbackAgents{
+		avail:        delegate.AvailabilityClassProviderUnavailable,
+		errs:         []error{errors.New("antigravity unavailable before response")},
+		agents:       []string{"antigravity", "retry-agent"},
+		participants: []string{"", "retry-seat"},
+	}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_same_seat_retry_explicit"},
+		Node:     wfe.Node{ID: "analysis"},
+	}, DelegateRequest{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Participant != "retry-seat" || result.Agent != "retry-agent" {
+		t.Fatalf("retry identity=%+v, want explicit retry-seat/retry-agent", result)
+	}
+}
+
+func TestDelegateGroupSameSeatRetryFillsMissingIdentity(t *testing.T) {
+	agents := &groupRetryIdentityAgents{}
+	runner := &NativeRunner{agents: agents}
+	results := runner.delegateGroup(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_group_retry_identity"},
+		Node:     wfe.Node{ID: "review"},
+	}, []DelegateRequest{{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"}})
+	if len(results) != 1 {
+		t.Fatalf("results=%d, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Fatalf("retry failed: %v", results[0].Err)
+	}
+	if results[0].Response != "ok" || results[0].Participant != "seat-qa" {
+		t.Fatalf("group retry result=%+v, want response ok and participant seat-qa", results[0])
+	}
+	if len(agents.requests) != 2 || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
+		t.Fatalf("group retry requests=%+v", agents.requests)
+	}
+}
+
+type groupRetryIdentityAgents struct {
+	requests            []DelegateRequest
+	explicitParticipant string
+}
+
+func (a *groupRetryIdentityAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	a.requests = append(a.requests, requests...)
+	return []DelegateGroupResult{{
+		Participant:       requests[0].Participant,
+		AvailabilityClass: delegate.AvailabilityClassProviderUnavailable,
+		Err:               errors.New("antigravity unavailable before response"),
+	}}
+}
+
+func (a *groupRetryIdentityAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
+	a.requests = append(a.requests, request)
+	return DelegateResult{Response: "ok", Participant: a.explicitParticipant, Agent: "antigravity"}, nil
+}
+
+func TestDelegateGroupSameSeatRetryPreservesExplicitRetryIdentity(t *testing.T) {
+	agents := &groupRetryIdentityAgents{explicitParticipant: "retry-seat"}
+	runner := &NativeRunner{agents: agents}
+	results := runner.delegateGroup(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_group_retry_explicit_identity"},
+		Node:     wfe.Node{ID: "review"},
+	}, []DelegateRequest{{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"}})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("results=%+v", results)
+	}
+	if results[0].Participant != "retry-seat" {
+		t.Fatalf("group retry participant=%q, want explicit retry-seat", results[0].Participant)
 	}
 }
 
@@ -1837,11 +1916,15 @@ func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) 
 	if idx < len(a.agents) {
 		agent = a.agents[idx]
 	}
-	result := DelegateResult{Agent: agent, AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
+	participant := ""
+	if idx < len(a.participants) {
+		participant = a.participants[idx]
+	}
+	result := DelegateResult{Agent: agent, Participant: participant, AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
 	if err != nil {
 		return result, err
 	}
-	return DelegateResult{Response: "ok", Agent: agent, CostUSD: cost, CostUnknown: unknown}, nil
+	return DelegateResult{Response: "ok", Agent: agent, Participant: participant, CostUSD: cost, CostUnknown: unknown}, nil
 }
 
 func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {

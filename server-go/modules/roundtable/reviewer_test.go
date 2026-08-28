@@ -202,6 +202,34 @@ func TestSeatFailureDetailIsRedacted(t *testing.T) {
 	}
 }
 
+func TestSeatBusReportsToolEventsWithPhase(t *testing.T) {
+	var events []ModelEvent
+	bus := seatBus{
+		observer: func(e ModelEvent) { events = append(events, e) },
+	}
+	run := panel.Run{ID: "wi_tool_round", Stage: "gate"}
+	seat := panel.SeatRequest{Role: "review", Persona: "security", Selector: "sol", Tools: true, DurableSlot: "panel:x:discussion:1:seat:0"}
+	bus.emitToolEvents(run, seat, "sol", []delegate.ToolEvent{
+		{ToolName: "Grep", CallID: "call-1", Status: "started"},
+		{ToolName: "Grep", CallID: "call-1", Status: "completed", ElapsedMS: 80},
+	})
+	var foundStart, foundComplete bool
+	for _, ev := range events {
+		if ev.Kind == delegate.ToolEventStart && strings.Contains(ev.Detail, "tool=Grep") && strings.Contains(ev.Detail, "phase=discussion") {
+			foundStart = true
+		}
+		if ev.Kind == delegate.ToolEventComplete && strings.Contains(ev.Detail, "call_id=call-1") && strings.Contains(ev.Detail, "phase=discussion") {
+			foundComplete = true
+		}
+		if strings.Contains(ev.Detail, "supersecret") {
+			t.Fatalf("secret leaked: %+v", ev)
+		}
+	}
+	if !foundStart || !foundComplete {
+		t.Fatalf("tool events not reported with phase: %+v", events)
+	}
+}
+
 type errorString string
 
 func (e errorString) Error() string { return string(e) }

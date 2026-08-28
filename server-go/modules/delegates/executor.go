@@ -910,12 +910,38 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	}
 	output := &limitedBuffer{remaining: maxExecutorOutput}
 	monitor := newTurnMonitor(agent.CLIKind, request.MaxTurns, runCancel, output)
-	cmd.Stdout, cmd.Stderr = output, output
-	if request.MaxTurns > 0 {
-		cmd.Stdout = monitor
+	// Tool-call observability reuses the existing structured stream signal.
+	// For provider-CLI adapters the stream itself is the tool-call signal:
+	//   claude:  assistant tool_use blocks (started only — no completion)
+	//   codex:   item.completed tool items (completed only)
+	//   agy:     tool_call/tool_result events when present, else item.completed
+	//   acp:     session/update tool_call / tool_call_update (both phases)
+	// Raw arguments/results are never stored; only name/call_id/status/elapsed.
+	// If the protocol lacks a phase, the honest normalized behavior is a single
+	// event for the phase that is exposed, documented here and in tests.
+	col := newToolCollector()
+	col.setWorkflow(request.Workflow)
+	kindLower := strings.ToLower(strings.TrimSpace(agent.CLIKind))
+	var stdoutWriter io.Writer = output
+	// Build the stacked writer: tool collector sees the raw NDJSON before the
+	// turn monitor counts it, so neither parser misses a line.
+	if kindLower == "claude" || kindLower == "claude-code" || kindLower == "codex" || kindLower == "agy" {
+		tw := &toolEventStreamWriter{kind: kindLower, col: col, underlying: output}
+		if request.MaxTurns > 0 {
+			// monitor wraps output; tool writer wraps monitor so both see the stream.
+			tw.underlying = monitor
+			stdoutWriter = tw
+		} else {
+			stdoutWriter = tw
+		}
+	} else if request.MaxTurns > 0 {
+		stdoutWriter = monitor
 	}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
 		result.ResponseStarted = outputResponseStarted(agent.CLIKind, output.BytesCopy())
+		result.ToolEvents = col.result()
 		if monitor.Exceeded() {
 			detail := fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
 			result.Error = detail
@@ -940,10 +966,12 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	}
 	response := finalOutput(agent.CLIKind, output.BytesCopy())
 	if response == "" {
+		result.ToolEvents = col.result()
 		return fail(errors.New("delegate CLI returned no final response"), "delegate CLI returned no final response")
 	}
 	result.Status, result.Response = "done", response
 	result.ResponseStarted = true
+	result.ToolEvents = col.result()
 	return result
 }
 

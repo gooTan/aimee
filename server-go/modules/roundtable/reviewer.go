@@ -270,6 +270,28 @@ func seatFailureCategory(err error) string {
 	}
 }
 
+func (s seatBus) emitToolEvents(run panel.Run, seat panel.SeatRequest, actor string, events []delegate.ToolEvent) {
+	if s.observer == nil || len(events) == 0 || run.ID == "" {
+		return
+	}
+	wf := &delegate.WorkflowContext{
+		WorkItemID: run.ID,
+		Stage:      run.Stage,
+		Model:      seat.Selector,
+		Role:       seat.Role,
+		Persona:    seat.Persona,
+		Phase:      seatPhase(seat.DurableSlot),
+	}
+	if actor != "" {
+		wf.Model = actor
+	}
+	for _, ev := range events {
+		kind := delegate.ToolEventKind(ev.Status)
+		detail := delegate.FormatToolDetail(wf, ev, 0)
+		s.observer(ModelEvent{WorkItemID: run.ID, Stage: run.Stage, Kind: kind, Actor: actor, Detail: detail})
+	}
+}
+
 func (s seatBus) Group(ctx context.Context, run panel.Run, seats []panel.SeatRequest) []panel.SeatResult {
 	out := make([]panel.SeatResult, len(seats))
 	if len(seats) == 0 {
@@ -287,6 +309,11 @@ func (s seatBus) Group(ctx context.Context, run panel.Run, seats []panel.SeatReq
 		}
 	}
 	for i, call := range s.client.DelegateGroup(ctx, requests) {
+		actor := call.Participant
+		if actor == "" {
+			actor = seatActor(seats[i])
+		}
+		s.emitToolEvents(run, seats[i], actor, call.ToolEvents)
 		out[i] = seatResult(call.Participant, call.Response, call.CostUSD, call.CostUnknown, call.AvailabilityClass, call.Err, call.ResponseStarted)
 		finishes[i](out[i])
 	}
@@ -298,6 +325,14 @@ func (s seatBus) One(ctx context.Context, run panel.Run, seat panel.SeatRequest)
 	request := s.request(run, seat)
 	request.MaxCostUSD = run.CostLimitUSD
 	result, err := s.client.Delegate(ctx, request)
+	actor := result.Participant
+	if actor == "" {
+		actor = seatActor(seat)
+		if result.Agent != "" {
+			actor = result.Agent
+		}
+	}
+	s.emitToolEvents(run, seat, actor, result.ToolEvents)
 	out := seatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, result.AvailabilityClass, err, result.ResponseStarted)
 	finish(out)
 	return out

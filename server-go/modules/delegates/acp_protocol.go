@@ -124,6 +124,15 @@ func (s *acpTurnState) Error() string {
 // acpTurnConsume consumes one newline-delimited JSON line into the turn state.
 // It implements the exact semantics of src/server/cli_acp.c:acp_turn_consume.
 func acpTurnConsume(line string, st *acpTurnState) error {
+	return acpTurnConsumeWithCollector(line, st, nil)
+}
+
+// acpTurnConsumeWithCollector is the observability-aware variant that also
+// extracts safe per-tool-call telemetry via col. It reuses the existing
+// tool_call/current_tool signal: the same session/update tool_call lines
+// already counted by st.toolCalls are now also normalized into ToolEvents.
+// Raw tool arguments, results, and hidden reasoning are never stored.
+func acpTurnConsumeWithCollector(line string, st *acpTurnState, col *toolEventCollector) error {
 	if st == nil {
 		return errors.New("nil turn state")
 	}
@@ -165,6 +174,9 @@ func acpTurnConsume(line string, st *acpTurnState) error {
 						Content       json.RawMessage `json:"content"`
 						Title         *string         `json:"title"`
 						Name          *string         `json:"name"`
+						ToolCallID    *string         `json:"toolCallId"`
+						Status        *string         `json:"status"`
+						ToolName      *string         `json:"toolName"`
 					}
 					if err := json.Unmarshal(p.Update, &upd); err == nil {
 						kind := ""
@@ -175,6 +187,31 @@ func acpTurnConsume(line string, st *acpTurnState) error {
 						}
 						if kind == "tool_call" || kind == "tool_call_update" {
 							st.toolCalls++
+							if col != nil {
+								toolName := ""
+								if upd.Title != nil && *upd.Title != "" {
+									toolName = *upd.Title
+								} else if upd.ToolName != nil && *upd.ToolName != "" {
+									toolName = *upd.ToolName
+								} else if upd.Name != nil && *upd.Name != "" {
+									toolName = *upd.Name
+								} else {
+									toolName = "tool"
+								}
+								callID := ""
+								if upd.ToolCallID != nil {
+									callID = *upd.ToolCallID
+								}
+								status := ""
+								if upd.Status != nil {
+									status = *upd.Status
+								} else if kind == "tool_call" {
+									status = "in_progress"
+								} else {
+									status = "completed"
+								}
+								parseACPToolEvent(kind, toolName, callID, status, col)
+							}
 						} else if len(upd.Content) > 0 {
 							var asString string
 							if err := json.Unmarshal(upd.Content, &asString); err == nil {
@@ -193,6 +230,9 @@ func acpTurnConsume(line string, st *acpTurnState) error {
 			}
 		case "tool/call":
 			st.toolCalls++
+			if col != nil {
+				col.recordStart("tool", "", "")
+			}
 		default:
 		}
 		return nil

@@ -58,6 +58,7 @@ type DelegateResult struct {
 	Partial           bool
 	AvailabilityClass AvailabilityClass
 	ResponseStarted   bool
+	ToolEvents        []ToolEvent
 }
 
 type AgentClient interface {
@@ -71,6 +72,7 @@ type DelegateGroupResult struct {
 	CostUnknown       bool
 	AvailabilityClass AvailabilityClass
 	ResponseStarted   bool
+	ToolEvents        []ToolEvent
 	Err               error
 }
 
@@ -135,7 +137,9 @@ func (e *DelegateExecutionError) Error() string { return e.Err.Error() }
 func (e *DelegateExecutionError) Unwrap() error { return e.Err }
 
 // Invocation is the complete delegate-owned wire request. Workflow replay,
-// durable-slot, work-item and retry fields intentionally have no JSON mapping.
+// durable-slot, work-item and retry fields intentionally have no JSON mapping
+// except for the explicit workflow_context envelope, which is the safe
+// observability carrier for workflow-scoped tool telemetry.
 type Invocation struct {
 	Version  int    `json:"version"`
 	Role     string `json:"role"`
@@ -148,6 +152,33 @@ type Invocation struct {
 	// ExecutionTimeoutMS is an optional delegate-owned run bound. Zero means
 	// unbounded; explicit caller context deadlines still propagate here.
 	ExecutionTimeoutMS int64 `json:"execution_timeout_ms,omitempty"`
+	// Workflow carries safe workflow identity for tool-call observability.
+	// It is the only workflow-scoped field that may cross the delegate wire;
+	// all other workflow fields (durability, retry, cost) remain caller-local.
+	Workflow *WorkflowContext `json:"workflow_context,omitempty"`
+}
+
+// WorkflowContext is the minimal safe workflow identity that may cross the
+// delegate wire to tag per-tool telemetry. It never carries prompts, tool
+// arguments, results, or credentials.
+type WorkflowContext struct {
+	WorkItemID string `json:"work_item_id"`
+	Stage      string `json:"stage"`
+	Model      string `json:"model,omitempty"`
+	Role       string `json:"role,omitempty"`
+	Persona    string `json:"persona,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+}
+
+// ToolEvent is a safe, normalized per-tool-call telemetry record. It never
+// carries raw tool arguments, results, prompts, or credentials — only the
+// tool name, call identifier, status, and elapsed duration.
+type ToolEvent struct {
+	ToolName  string `json:"tool_name"`
+	CallID    string `json:"call_id,omitempty"`
+	Status    string `json:"status"` // started, completed, error
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	Phase     string `json:"phase,omitempty"`
 }
 
 type InvocationResult struct {
@@ -160,6 +191,7 @@ type InvocationResult struct {
 	CostKnown         bool              `json:"cost_known"`
 	AvailabilityClass AvailabilityClass `json:"availability_class,omitempty"`
 	ResponseStarted   bool              `json:"response_started"`
+	ToolEvents        []ToolEvent       `json:"tool_events,omitempty"`
 }
 
 // GroupPlan carries only delegate-selection inputs. Participant continuity is
@@ -200,6 +232,22 @@ type BusClient struct {
 
 func NewBusClient(caller *bus.ConcurrentModuleCaller, deadline time.Duration) (*BusClient, error) {
 	return NewClient(caller, deadline)
+}
+
+func durablePhase(slot string) string {
+	switch {
+	case strings.Contains(slot, ":chairman"):
+		return "chairman"
+	case strings.Contains(slot, ":discussion:"):
+		return "discussion"
+	case strings.Contains(slot, ":analysis"):
+		return "analysis"
+	default:
+		if slot != "" {
+			return "analysis"
+		}
+		return ""
+	}
 }
 
 func NewClient(caller StageCaller, deadline time.Duration) (*BusClient, error) {
@@ -254,6 +302,18 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		Model: request.Delegate, Prompt: request.Prompt, Workdir: request.Workdir,
 		Tools: request.Tools, MaxTurns: request.MaxTurnsCap,
 		ExecutionTimeoutMS: executionTimeoutMS}
+	if request.WorkItemID != "" || request.Stage != "" {
+		wire.Workflow = &WorkflowContext{
+			WorkItemID: request.WorkItemID,
+			Stage:      request.Stage,
+			Model:      request.Delegate,
+			Role:       request.Role,
+			Persona:    request.Persona,
+		}
+		if request.DurableSlot != "" {
+			wire.Workflow.Phase = durablePhase(request.DurableSlot)
+		}
+	}
 	body, err := json.Marshal(wire)
 	if err != nil {
 		return DelegateResult{}, err
@@ -308,7 +368,7 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if participant == "" {
 			participant = result.Agent
 		}
-		return DelegateResult{Agent: result.Agent, Participant: participant, AvailabilityClass: availability, ResponseStarted: responseStarted}, &DelegateExecutionError{Err: failure,
+		return DelegateResult{Agent: result.Agent, Participant: participant, AvailabilityClass: availability, ResponseStarted: responseStarted, ToolEvents: result.ToolEvents}, &DelegateExecutionError{Err: failure,
 			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD,
 			AvailabilityClass: availability, ResponseStarted: responseStarted}
 	}
@@ -319,7 +379,7 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 	responseStarted := result.ResponseStarted || strings.TrimSpace(result.Response) != ""
 	return DelegateResult{Response: result.Response, Agent: result.Agent, Participant: participant,
 		CostUSD: result.CostUSD, CostUnknown: !result.CostKnown,
-		AvailabilityClass: AvailabilityClassNone, ResponseStarted: responseStarted}, nil
+		AvailabilityClass: AvailabilityClassNone, ResponseStarted: responseStarted, ToolEvents: result.ToolEvents}, nil
 }
 
 func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
@@ -381,7 +441,7 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 			result, err := c.Delegate(ctx, planned[i])
 			out[i] = DelegateGroupResult{Participant: result.Participant, Response: result.Response,
 				CostUSD: result.CostUSD, CostUnknown: result.CostUnknown,
-				AvailabilityClass: result.AvailabilityClass, ResponseStarted: result.ResponseStarted, Err: err}
+				AvailabilityClass: result.AvailabilityClass, ResponseStarted: result.ResponseStarted, ToolEvents: result.ToolEvents, Err: err}
 			done <- i
 		}(i)
 	}

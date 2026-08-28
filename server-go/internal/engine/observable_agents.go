@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	delegateapi "github.com/JBailes/aimee/server-go/delegate"
@@ -52,6 +53,93 @@ func (o observableAgents) record(request DelegateRequest, kind, actor, detail st
 	_ = o.db.RecordEvent(context.Background(), request.WorkItemID, request.Stage, kind, actor, detail)
 }
 
+func durablePhase(slot string) string {
+	switch {
+	case strings.Contains(slot, ":chairman"):
+		return "chairman"
+	case strings.Contains(slot, ":discussion:"):
+		return "discussion"
+	case strings.Contains(slot, ":analysis"):
+		return "analysis"
+	default:
+		if slot != "" {
+			return "analysis"
+		}
+		return ""
+	}
+}
+
+func (o observableAgents) recordToolEvents(request DelegateRequest, result DelegateResult) {
+	if len(result.ToolEvents) == 0 || request.WorkItemID == "" || o.db == nil {
+		return
+	}
+	wf := &delegateapi.WorkflowContext{
+		WorkItemID: request.WorkItemID,
+		Stage:      request.Stage,
+		Model:      request.Delegate,
+		Role:       request.Role,
+		Persona:    request.Persona,
+		Phase:      durablePhase(request.DurableSlot),
+	}
+	actor := result.Agent
+	if actor == "" {
+		actor = modelActor(request)
+	}
+	// Deduplicate by stable kind+detail identity so a live-emitted tool event
+	// (already persisted via internal/model-events before the delegate returned)
+	// is not duplicated by the fallback batch path.
+	existing := map[string]struct{}{}
+	if evs, err := o.db.Events(context.Background(), request.WorkItemID, 0, 1000); err == nil {
+		for _, e := range evs {
+			existing[e.Kind+"\x00"+e.Detail] = struct{}{}
+		}
+	}
+	for _, ev := range result.ToolEvents {
+		kind := delegateapi.ToolEventKind(ev.Status)
+		detail := delegateapi.FormatToolDetail(wf, ev, 0)
+		key := kind + "\x00" + detail
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		o.record(request, kind, actor, detail)
+		existing[key] = struct{}{}
+	}
+}
+
+func (o observableAgents) recordToolEventsGroup(request DelegateRequest, result DelegateGroupResult) {
+	if len(result.ToolEvents) == 0 || request.WorkItemID == "" || o.db == nil {
+		return
+	}
+	wf := &delegateapi.WorkflowContext{
+		WorkItemID: request.WorkItemID,
+		Stage:      request.Stage,
+		Model:      request.Delegate,
+		Role:       request.Role,
+		Persona:    request.Persona,
+		Phase:      durablePhase(request.DurableSlot),
+	}
+	actor := result.Participant
+	if actor == "" {
+		actor = modelActor(request)
+	}
+	existing := map[string]struct{}{}
+	if evs, err := o.db.Events(context.Background(), request.WorkItemID, 0, 1000); err == nil {
+		for _, e := range evs {
+			existing[e.Kind+"\x00"+e.Detail] = struct{}{}
+		}
+	}
+	for _, ev := range result.ToolEvents {
+		kind := delegateapi.ToolEventKind(ev.Status)
+		detail := delegateapi.FormatToolDetail(wf, ev, 0)
+		key := kind + "\x00" + detail
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		o.record(request, kind, actor, detail)
+		existing[key] = struct{}{}
+	}
+}
+
 func (o observableAgents) observe(request DelegateRequest) func(string, string, string) {
 	actor := modelActor(request)
 	started := time.Now()
@@ -94,6 +182,9 @@ func (o observableAgents) Delegate(ctx context.Context, request DelegateRequest)
 	if actor == "" {
 		actor = modelActor(request)
 	}
+	// Persist per-tool-call telemetry before the terminal model_* event so the
+	// lifecycle timeline shows tool activity inside the model turn.
+	o.recordToolEvents(request, result)
 	if err != nil {
 		availability := result.AvailabilityClass
 		if availability == "" {
@@ -128,6 +219,7 @@ func (o observableAgents) DelegateGroup(ctx context.Context, requests []Delegate
 			continue
 		}
 		result := results[i]
+		o.recordToolEventsGroup(requests[i], result)
 		if result.Err != nil {
 			availability := result.AvailabilityClass
 			if availability == "" {

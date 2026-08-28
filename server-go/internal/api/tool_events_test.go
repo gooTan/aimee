@@ -213,3 +213,46 @@ func TestInternalModelEventsDeduplicatesUnboundedConcurrentPosts(t *testing.T) {
 		t.Fatalf("target event count = %d, want 1", count)
 	}
 }
+
+func TestInternalModelEventsRetainsDistinctActorAndInvocation(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_identity_api", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	// Same call_id with distinct actors must be retained (actor is part of dedup identity)
+	bodyActor1 := `{"work_item_id":"wi_identity_api","stage":"impl","kind":"model_tool_start","actor":"codex","detail":"model=codex role=code persona=engineer invocation=inv-1 tool=Bash call_id=c1 status=started"}`
+	bodyActor2 := `{"work_item_id":"wi_identity_api","stage":"impl","kind":"model_tool_start","actor":"claude","detail":"model=codex role=code persona=engineer invocation=inv-1 tool=Bash call_id=c1 status=started"}`
+	for _, body := range []string{bodyActor1, bodyActor2} {
+		req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("actor distinct post %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	// Same actor but distinct invocation must be retained (invocation in detail)
+	bodyInv2 := `{"work_item_id":"wi_identity_api","stage":"impl","kind":"model_tool_start","actor":"codex","detail":"model=codex role=code persona=engineer invocation=inv-2 tool=Bash call_id=c1 status=started"}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(bodyInv2))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("invocation distinct post %d %s", rec.Code, rec.Body.String())
+	}
+	// Duplicate delivery for same actor+invocation must remain idempotent
+	reqDup := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(bodyActor1))
+	recDup := httptest.NewRecorder()
+	server.ServeHTTP(recDup, reqDup)
+	if recDup.Code != http.StatusNoContent {
+		t.Fatalf("duplicate post %d %s", recDup.Code, recDup.Body.String())
+	}
+	events, _ := store.Events(t.Context(), "wi_identity_api", 0, 20)
+	toolCount := 0
+	for _, e := range events {
+		if e.Kind == "model_tool_start" && strings.Contains(e.Detail, "call_id=c1") {
+			toolCount++
+		}
+	}
+	if toolCount != 3 {
+		t.Fatalf("expected 3 distinct tool events (2 actors + 2 invocations minus duplicate), got %d: %+v", toolCount, events)
+	}
+}

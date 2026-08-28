@@ -134,3 +134,38 @@ func TestObservableAgentsDoesNotPersistRawToolArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestObservableAgentsRetainsDistinctActorsAndInvocations(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_identity", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	ev := delegateapi.ToolEvent{ToolName: "Bash", CallID: "c1", Status: "started"}
+	agents := observableAgents{next: toolTestAgents{events: []delegateapi.ToolEvent{ev}, agent: "codex"}, db: store}
+	// First turn inv-1 with actor codex
+	_, _ = agents.Delegate(t.Context(), DelegateRequest{WorkItemID: "wi_identity", Stage: "impl", Delegate: "codex", Role: "code", Persona: "engineer", ExecutionVersion: "inv-1"})
+	// Same call_id but distinct actor (claude) same invocation — must be retained via actor
+	agents2 := observableAgents{next: toolTestAgents{events: []delegateapi.ToolEvent{ev}, agent: "claude"}, db: store}
+	_, _ = agents2.Delegate(t.Context(), DelegateRequest{WorkItemID: "wi_identity", Stage: "impl", Delegate: "claude", Role: "review", Persona: "qa", ExecutionVersion: "inv-1"})
+	// Same actor but distinct invocation — must be retained via invocation in detail
+	_, _ = agents.Delegate(t.Context(), DelegateRequest{WorkItemID: "wi_identity", Stage: "impl", Delegate: "codex", Role: "code", Persona: "engineer", ExecutionVersion: "inv-2"})
+	// Duplicate delivery for same actor+invocation should remain idempotent (live+batch)
+	_, _ = agents.Delegate(t.Context(), DelegateRequest{WorkItemID: "wi_identity", Stage: "impl", Delegate: "codex", Role: "code", Persona: "engineer", ExecutionVersion: "inv-1"})
+	evs, _ := store.Events(t.Context(), "wi_identity", 0, 30)
+	toolCount := 0
+	for _, e := range evs {
+		if e.Kind == "model_tool_start" && strings.Contains(e.Detail, "call_id=c1") {
+			toolCount++
+			if !strings.Contains(e.Detail, "invocation=") {
+				t.Fatalf("invocation missing in detail: %+v", e)
+			}
+		}
+	}
+	if toolCount != 3 {
+		t.Fatalf("expected 3 distinct tool events (distinct actor + distinct invocation), got %d: %+v", toolCount, evs)
+	}
+}

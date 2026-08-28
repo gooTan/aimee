@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-var toolDetailKeys = [...]string{"model", "role", "persona", "phase", "tool", "call_id", "status", "elapsed"}
+var toolDetailKeys = [...]string{"model", "role", "persona", "phase", "invocation", "tool", "call_id", "status", "elapsed"}
 
 // ValidateToolEventDetail accepts only the bounded key=value format emitted by
 // FormatToolDetail and returns its canonical representation for persistence.

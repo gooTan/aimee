@@ -281,6 +281,7 @@ func (s seatBus) emitToolEvents(run panel.Run, seat panel.SeatRequest, actor str
 		Role:       seat.Role,
 		Persona:    seat.Persona,
 		Phase:      seatPhase(seat.DurableSlot),
+		Invocation: run.ExecutionVersion,
 	}
 	if actor != "" {
 		wf.Model = actor

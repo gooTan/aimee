@@ -61,10 +61,44 @@ func TestToolEventKind(t *testing.T) {
 	}
 }
 
+func TestFormatToolDetailIncludesInvocation(t *testing.T) {
+	wf := &WorkflowContext{Model: "codex", Role: "code", Persona: "engineer", Invocation: "2026-08-28 19:37:06"}
+	ev := ToolEvent{ToolName: "Bash", CallID: "call-123", Status: "started"}
+	detail := FormatToolDetail(wf, ev, 0)
+	if !strings.Contains(detail, "invocation=") {
+		t.Fatalf("invocation missing: %q", detail)
+	}
+	if strings.Contains(detail, " ") && strings.Contains(detail, "19:37:06") {
+		t.Fatalf("invocation not sanitized: %q", detail)
+	}
+	// Distinct invocations with same call_id must produce distinct details
+	wf2 := &WorkflowContext{Model: "codex", Role: "code", Persona: "engineer", Invocation: "inv-2"}
+	detail2 := FormatToolDetail(wf2, ev, 0)
+	if detail == detail2 {
+		t.Fatalf("distinct invocations produced same detail: %q", detail)
+	}
+	// Validation must accept invocation and canonicalize
+	canonical, ok := ValidateToolEventDetail(ToolEventStart, detail)
+	if !ok || canonical != detail {
+		t.Fatalf("validate invocation detail = %q ok=%v canonical=%q", detail, ok, canonical)
+	}
+}
+
+func TestValidateToolEventDetailAllowsInvocationButKeepsSafeKeys(t *testing.T) {
+	good := "model=codex role=code persona=engineer invocation=inv-1 tool=Bash call_id=c1 status=started"
+	if _, ok := ValidateToolEventDetail(ToolEventStart, good); !ok {
+		t.Fatalf("good invocation detail rejected: %q", good)
+	}
+	bad := "model=codex invocation=inv-1 tool=Bash call_id=c1 status=started raw=secret"
+	if _, ok := ValidateToolEventDetail(ToolEventStart, bad); ok {
+		t.Fatalf("unsafe key should be rejected: %q", bad)
+	}
+}
+
 func TestBusWireIncludesWorkflowContextSafely(t *testing.T) {
 	caller := &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "done", Response: "ok"}}
 	client, _ := NewClient(caller, 0)
-	_, err := client.Delegate(nil, DelegateRequest{Role: "code", Persona: "engineer", Prompt: "work", WorkItemID: "wi-1", Stage: "impl", Delegate: "codex", DurableSlot: "slot:analysis:1"})
+	_, err := client.Delegate(nil, DelegateRequest{Role: "code", Persona: "engineer", Prompt: "work", WorkItemID: "wi-1", Stage: "impl", Delegate: "codex", DurableSlot: "slot:analysis:1", ExecutionVersion: "2026-08-28 19:37:06"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +122,9 @@ func TestBusWireIncludesWorkflowContextSafely(t *testing.T) {
 	}
 	if wf["phase"] != "analysis" {
 		t.Fatalf("phase = %v want analysis", wf["phase"])
+	}
+	if wf["invocation"] != "2026-08-28 19:37:06" {
+		t.Fatalf("invocation = %v want ExecutionVersion", wf["invocation"])
 	}
 	// Never include prompts or args.
 	if _, ok := wf["prompt"]; ok {

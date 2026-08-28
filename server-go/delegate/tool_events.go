@@ -37,6 +37,9 @@ func FormatToolDetail(workflow *WorkflowContext, tool ToolEvent, elapsed time.Du
 		if workflow.Phase != "" {
 			fmt.Fprintf(&b, "phase=%s ", sanitizeValue(workflow.Phase))
 		}
+		if workflow.Invocation != "" {
+			fmt.Fprintf(&b, "invocation=%s ", sanitizeValue(workflow.Invocation))
+		}
 	}
 	if tool.ToolName != "" {
 		fmt.Fprintf(&b, "tool=%s ", sanitizeValue(tool.ToolName))

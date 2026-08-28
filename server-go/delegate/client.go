@@ -160,7 +160,10 @@ type Invocation struct {
 
 // WorkflowContext is the minimal safe workflow identity that may cross the
 // delegate wire to tag per-tool telemetry. It never carries prompts, tool
-// arguments, results, or credentials.
+// arguments, results, or credentials. Invocation is the stable per-turn
+// identity (the delegate's ExecutionVersion / UpdatedAt) that distinguishes
+// identical provider call IDs across separate turns while keeping duplicate
+// transport delivery for the same turn idempotent.
 type WorkflowContext struct {
 	WorkItemID string `json:"work_item_id"`
 	Stage      string `json:"stage"`
@@ -168,6 +171,7 @@ type WorkflowContext struct {
 	Role       string `json:"role,omitempty"`
 	Persona    string `json:"persona,omitempty"`
 	Phase      string `json:"phase,omitempty"`
+	Invocation string `json:"invocation,omitempty"`
 }
 
 // ToolEvent is a safe, normalized per-tool-call telemetry record. It never
@@ -309,6 +313,7 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 			Model:      request.Delegate,
 			Role:       request.Role,
 			Persona:    request.Persona,
+			Invocation: request.ExecutionVersion,
 		}
 		if request.DurableSlot != "" {
 			wire.Workflow.Phase = durablePhase(request.DurableSlot)

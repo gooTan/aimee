@@ -80,6 +80,7 @@ func (o observableAgents) recordToolEvents(request DelegateRequest, result Deleg
 		Role:       request.Role,
 		Persona:    request.Persona,
 		Phase:      durablePhase(request.DurableSlot),
+		Invocation: request.ExecutionVersion,
 	}
 	actor := result.Agent
 	if actor == "" {
@@ -103,6 +104,7 @@ func (o observableAgents) recordToolEventsGroup(request DelegateRequest, result 
 		Role:       request.Role,
 		Persona:    request.Persona,
 		Phase:      durablePhase(request.DurableSlot),
+		Invocation: request.ExecutionVersion,
 	}
 	actor := result.Participant
 	if actor == "" {

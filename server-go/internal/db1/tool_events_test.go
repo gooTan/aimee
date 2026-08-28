@@ -139,3 +139,66 @@ func TestRecordToolEventIfAbsentIsUnboundedAndAtomic(t *testing.T) {
 		t.Fatalf("concurrent event count = %d, want 1", count)
 	}
 }
+
+func TestRecordToolEventIfAbsentDistinguishesActorAndInvocation(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_tool_identity", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	// Same provider call_id and detail except actor/invocation — must be retained
+	// separately. Duplicate delivery for the same actor+invocation must stay idempotent.
+	baseDetail := "model=codex role=code persona=engineer invocation=inv-1 tool=Bash call_id=c1 status=started"
+	otherInvocationDetail := "model=codex role=code persona=engineer invocation=inv-2 tool=Bash call_id=c1 status=started"
+	// First insert with actor codex / inv-1
+	if ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_identity", "impl", "model_tool_start", "codex", baseDetail); err != nil || !ok {
+		t.Fatalf("first actor/invocation insert = %v %v", ok, err)
+	}
+	// Same call_id + same invocation but different actor must not dedup
+	if ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_identity", "impl", "model_tool_start", "claude", baseDetail); err != nil || !ok {
+		t.Fatalf("distinct actor should be retained: %v %v", ok, err)
+	}
+	// Same actor but different invocation must not dedup
+	if ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_identity", "impl", "model_tool_start", "codex", otherInvocationDetail); err != nil || !ok {
+		t.Fatalf("distinct invocation should be retained: %v %v", ok, err)
+	}
+	// Duplicate transport delivery for the same actor+invocation must be idempotent
+	if ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_identity", "impl", "model_tool_start", "codex", baseDetail); err != nil || ok {
+		t.Fatalf("duplicate same actor/invocation should be idempotent: %v %v", ok, err)
+	}
+	if ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_identity", "impl", "model_tool_start", "codex", otherInvocationDetail); err != nil || ok {
+		t.Fatalf("duplicate same actor/other invocation should be idempotent on re-delivery: %v %v", ok, err)
+	}
+	events, err := store.Events(ctx, "wi_tool_identity", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 { // create + 3 distinct tool events
+		t.Fatalf("expected 3 tool events, got %d: %+v", len(events)-1, events)
+	}
+	// Verify that live+batch duplicate for same invocation still dedups concurrently
+	const workers = 10
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	dupCount := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_identity", "impl", "model_tool_start", "codex", baseDetail)
+			if err != nil {
+				t.Errorf("concurrent dup: %v", err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				dupCount++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if dupCount != 0 {
+		t.Fatalf("concurrent duplicate same invocation should not insert: %d", dupCount)
+	}
+}

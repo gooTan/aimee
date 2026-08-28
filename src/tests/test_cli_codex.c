@@ -283,12 +283,22 @@ static void test_spawn_failure_captures_stderr_and_exit_status(void)
    assert(strstr(out.error, "status 42") != NULL);
    assert(strstr(out.error, "approval_policy=\"never\"") != NULL);
    assert(strstr(out.error, "sandbox_mode=\"read-only\"") != NULL);
+   assert(
+       strstr(
+           out.error,
+           "plugins.\"aimee@local\".mcp_servers.aimee.default_tools_approval_mode=\"approve\"") !=
+       NULL);
    assert(strstr(out.error, "fixture-stderr-message") != NULL);
 
    agent.write_capable = 1;
    rc = agent_execute_cli_codex(&agent, NULL, "hello", &out);
    assert(rc == -1);
    assert(strstr(out.error, "sandbox_mode=\"workspace-write\"") != NULL);
+   assert(
+       strstr(
+           out.error,
+           "plugins.\"aimee@local\".mcp_servers.aimee.default_tools_approval_mode=\"approve\"") !=
+       NULL);
    unlink(path);
 }
 

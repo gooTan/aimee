@@ -33,6 +33,8 @@ int agent_request_cancelled(void) __attribute__((weak));
 #define CLI_CODEX_SANDBOX_READ_ONLY_CONFIG       "sandbox_mode=\"read-only\""
 #define CLI_CODEX_SANDBOX_WORKSPACE_WRITE_CONFIG "sandbox_mode=\"workspace-write\""
 #define CLI_CODEX_SANDBOX_DANGER_CONFIG          "sandbox_mode=\"danger-full-access\""
+#define CLI_CODEX_AIMEE_MCP_APPROVAL_CONFIG                                                        \
+   "plugins.\"aimee@local\".mcp_servers.aimee.default_tools_approval_mode=\"approve\""
 
 /* Reasons cli_codex_read_line can return NULL — propagated into the
  * stall message so operators can tell EOF (codex exited) from an idle
@@ -324,8 +326,8 @@ static int cli_codex_spawn(cli_codex_t *c, const char *cli_cmd, const char *cwd,
       const char *sandbox = (sandbox_config && sandbox_config[0])
                                 ? sandbox_config
                                 : CLI_CODEX_SANDBOX_READ_ONLY_CONFIG;
-      execlp(cmd, cmd, "app-server", "-c", CLI_CODEX_APPROVAL_POLICY_CONFIG, "-c", sandbox,
-             (char *)NULL);
+      execlp(cmd, cmd, "app-server", "-c", CLI_CODEX_APPROVAL_POLICY_CONFIG, "-c", sandbox, "-c",
+             CLI_CODEX_AIMEE_MCP_APPROVAL_CONFIG, (char *)NULL);
       _exit(127);
    }
    /* Parent */

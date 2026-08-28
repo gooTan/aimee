@@ -272,9 +272,14 @@ func (t *acpTransport) close() {
 
 func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.CancelFunc, closeCommand func(), cmd *exec.Cmd, agent agentEntry, request delegatecontract.Invocation, prompt string) delegatecontract.InvocationResult {
 	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed", Agent: agent.Name}
+	col := newToolCollector()
+	col.setWorkflow(request.Workflow)
+	col.setContext(ctx)
+	defer col.close()
 	var transport *acpTransport
 	fail := func(err error, detail string, started bool) delegatecontract.InvocationResult {
 		result.ResponseStarted = started
+		result.ToolEvents = col.result()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Error = delegatecontract.ErrDelegateExecutionDeadline.Error()
 			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, started)
@@ -410,7 +415,7 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 			}
 			continue
 		}
-		if err := acpTurnConsume(line, &state); err != nil {
+		if err := acpTurnConsumeWithCollector(line, &state, col); err != nil {
 			return fail(err, err.Error(), strings.TrimSpace(state.Text()) != "")
 		}
 		if state.Done() {
@@ -422,6 +427,7 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 			result.ResponseStarted = true
 			result.Error = ""
 			result.AvailabilityClass = ""
+			result.ToolEvents = col.result()
 			return result
 		}
 	}

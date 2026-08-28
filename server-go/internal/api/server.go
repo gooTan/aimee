@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	delegateapi "github.com/JBailes/aimee/server-go/delegate"
 	appconfig "github.com/JBailes/aimee/server-go/internal/config"
 	"github.com/JBailes/aimee/server-go/internal/db1"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
@@ -284,9 +285,28 @@ func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
 		return
 	}
-	allowed := event.Kind == "model_dispatch" || event.Kind == "model_heartbeat" || event.Kind == "model_complete" || event.Kind == "model_error" || event.Kind == "model_fallback"
+	allowed := event.Kind == "model_dispatch" || event.Kind == "model_heartbeat" || event.Kind == "model_complete" || event.Kind == "model_error" || event.Kind == "model_fallback" ||
+		event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error"
 	if !allowed || event.WorkItemID == "" || event.Stage == "" || event.Actor == "" || len(event.Detail) > 4096 {
 		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+		return
+	}
+	if event.Kind == delegateapi.ToolEventStart || event.Kind == delegateapi.ToolEventComplete || event.Kind == delegateapi.ToolEventError {
+		var ok bool
+		event.Detail, ok = delegateapi.ValidateToolEventDetail(event.Kind, event.Detail)
+		if !ok {
+			writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+			return
+		}
+	}
+	// Deduplicate tool events by their stable database identity. The insert is
+	// atomic so live and batch posts cannot race or miss events beyond a page.
+	if event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error" {
+		if _, err := s.db.RecordToolEventIfAbsent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if err := s.db.RecordEvent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {

@@ -18,41 +18,27 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(EXPORTER)
 
 
-EXPECTED_OVERRIDES = {
-    "config": "https://github.com/gooTan/aimee-module-config.git",
-    "delegates": "https://github.com/gooTan/aimee-module-delegates.git",
-    "git": "https://github.com/gooTan/aimee-module-git.git",
-    "protocols": "https://github.com/gooTan/aimee-module-protocols.git",
-    "workflows": "https://github.com/gooTan/aimee-module-workflows.git",
-    "roundtable": "https://github.com/gooTan/aimee-module-roundtable.git",
-    "vault": "https://github.com/gooTan/aimee-module-vault.git",
-}
+EXPECTED_OVERRIDES: dict[str, str] = {}
 
 
 class ExportCModuleOriginsTest(unittest.TestCase):
     def test_override_set_is_exact(self) -> None:
         self.assertEqual(EXPORTER.MODULE_ORIGIN_OVERRIDES, EXPECTED_OVERRIDES)
 
-    def test_module_remote_uses_overrides(self) -> None:
-        for module_id, expected in EXPECTED_OVERRIDES.items():
+    def test_module_remote_is_canonical_for_all_modules(self) -> None:
+        # No per-module overrides: every module derives from the single canonical root.
+        for module_id in ("config", "delegates", "git", "protocols", "workflows", "roundtable", "vault",
+                          "audit", "memory", "sandbox", "economizer"):
             with self.subTest(module=module_id):
-                self.assertEqual(EXPORTER.module_remote(module_id), expected)
+                self.assertEqual(
+                    EXPORTER.module_remote(module_id),
+                    f"{EXPORTER.REMOTE_ROOT}/aimee-module-{module_id}.git",
+                )
 
-    def test_module_remote_falls_back_to_rakuen(self) -> None:
-        self.assertEqual(
-            EXPORTER.module_remote("audit"),
-            f"{EXPORTER.REMOTE_ROOT}/aimee-module-audit.git",
-        )
-        self.assertEqual(
-            EXPORTER.module_remote("memory"),
-            f"{EXPORTER.REMOTE_ROOT}/aimee-module-memory.git",
-        )
-
-    def test_core_remote_root_remains_rakuen(self) -> None:
-        self.assertEqual(EXPORTER.REMOTE_ROOT, "https://github.com/RakuenSoftware")
-        # Core repository itself must not be moved.
+    def test_core_and_module_root_is_gooTan(self) -> None:
+        self.assertEqual(EXPORTER.REMOTE_ROOT, "https://github.com/gooTan")
         self.assertEqual(f"{EXPORTER.REMOTE_ROOT}/aimee-core-c.git",
-                         "https://github.com/RakuenSoftware/aimee-core-c.git")
+                         "https://github.com/gooTan/aimee-core-c.git")
 
     def test_roundtable_shared_sources_include_preset_configs(self) -> None:
         expected = {

@@ -27,16 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 INVENTORY = ROOT / "tests/baselines/modules/canonical-inventory.yaml"
 LOCK = ROOT / "dependencies/aimee-repositories.lock.json"
 CORE_VERSION_FILE = ROOT / "src/core/VERSION"
-REMOTE_ROOT = "https://github.com/RakuenSoftware"
-MODULE_ORIGIN_OVERRIDES = {
-    "config": "https://github.com/gooTan/aimee-module-config.git",
-    "delegates": "https://github.com/gooTan/aimee-module-delegates.git",
-    "git": "https://github.com/gooTan/aimee-module-git.git",
-    "protocols": "https://github.com/gooTan/aimee-module-protocols.git",
-    "workflows": "https://github.com/gooTan/aimee-module-workflows.git",
-    "roundtable": "https://github.com/gooTan/aimee-module-roundtable.git",
-    "vault": "https://github.com/gooTan/aimee-module-vault.git",
-}
+REMOTE_ROOT = "https://github.com/gooTan"
+MODULE_ORIGIN_OVERRIDES: dict[str, str] = {}
 
 
 def module_remote(module_id: str) -> str:
@@ -470,7 +462,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: RakuenSoftware/aimee-core-c
+          repository: gooTan/aimee-core-c
           ref: v{version}
           path: _aimee-core
       - run: cmake -S _aimee-core -B _core-build -DCMAKE_BUILD_TYPE=Release

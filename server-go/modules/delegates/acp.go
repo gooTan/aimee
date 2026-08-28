@@ -274,6 +274,8 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed", Agent: agent.Name}
 	col := newToolCollector()
 	col.setWorkflow(request.Workflow)
+	col.setContext(ctx)
+	defer col.close()
 	var transport *acpTransport
 	fail := func(err error, detail string, started bool) delegatecontract.InvocationResult {
 		result.ResponseStarted = started

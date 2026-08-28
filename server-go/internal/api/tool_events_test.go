@@ -49,6 +49,52 @@ func TestInternalModelEventsRejectsRawPayload(t *testing.T) {
 	}
 }
 
+func TestInternalModelEventsRejectsUnsafeToolDetailsFromDirectCallers(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_tool_unsafe", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, detail := range []string{
+		"model=codex tool=Bash call_id=c1 status=started command=cat_secret",
+		"model=codex tool=Bash call_id=c1 status=started prompt=system_secret",
+		"model=codex tool=Bash call_id=c1 status=started args=password=secret",
+		"model=codex tool=Bash call_id=c1 status=started reasoning=hidden",
+		"model=codex tool=Bash call_id=c1 status=started call_id=c2",
+		"model=codex tool=Bash call_id=c1 status=started status=completed",
+		"model=codex tool=Bash call_id=c1 status=started tool=Bash%20secret",
+	} {
+		body := `{"work_item_id":"wi_tool_unsafe","stage":"impl","kind":"model_tool_start","actor":"codex","detail":"` + detail + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("unsafe detail %q status=%d body=%s", detail, rec.Code, rec.Body.String())
+		}
+	}
+	events, err := store.Events(t.Context(), "wi_tool_unsafe", 0, 20)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("unsafe details persisted: events=%+v err=%v", events, err)
+	}
+}
+
+func TestInternalModelEventsCanonicalizesToolDetail(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_tool_canonical", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"work_item_id":"wi_tool_canonical","stage":"impl","kind":"model_tool_complete","actor":"codex","detail":"status=completed call_id=c1 tool=Bash model=codex elapsed=100ms"}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("canonical detail status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := store.Events(t.Context(), "wi_tool_canonical", 0, 20)
+	if err != nil || len(events) != 2 || events[1].Detail != "model=codex tool=Bash call_id=c1 status=completed elapsed=100ms" {
+		t.Fatalf("canonical detail events=%+v err=%v", events, err)
+	}
+}
+
 func TestEventsTreeIncludesToolEventsForWFEWatch(t *testing.T) {
 	_, store, _ := newTestServer(t)
 	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_watch", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "plan"}); err != nil {

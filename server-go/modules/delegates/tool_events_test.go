@@ -3,12 +3,20 @@ package delegates
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	delegatecontract "github.com/JBailes/aimee/server-go/delegate"
+	internalapi "github.com/JBailes/aimee/server-go/internal/api"
+	"github.com/JBailes/aimee/server-go/internal/db1"
+	"github.com/JBailes/aimee/server-go/internal/wfe"
 )
 
 func TestParseClaudeToolStartEmitsStartedOnly(t *testing.T) {
@@ -80,6 +88,21 @@ func TestParseACPToolEventsStartAndComplete(t *testing.T) {
 	// Elapsed should be measured between start and complete.
 	if evs[1].ElapsedMS < 0 {
 		t.Fatalf("elapsed negative: %+v", evs[1])
+	}
+}
+
+func TestACPAnonymousToolCallsGetDistinctMonotonicIDs(t *testing.T) {
+	col := newToolCollector()
+	parseACPToolEvent("tool_call", "Read", "", "in_progress", col)
+	parseACPToolEvent("tool_call", "Read", "", "in_progress", col)
+	parseACPToolEvent("tool_call_update", "Read", "", "completed", col)
+	parseACPToolEvent("tool_call_update", "Read", "", "completed", col)
+	evs := col.result()
+	if len(evs) != 4 {
+		t.Fatalf("anonymous ACP events = %+v", evs)
+	}
+	if evs[0].CallID != "acp-synthetic-1" || evs[1].CallID != "acp-synthetic-2" || evs[2].CallID != evs[0].CallID || evs[3].CallID != evs[1].CallID {
+		t.Fatalf("anonymous ACP call IDs = %+v", evs)
 	}
 }
 
@@ -203,73 +226,86 @@ func TestToolCollectorLivePreservesSafeMetadata(t *testing.T) {
 }
 
 func TestToolCollectorLiveViaHTTPSocketIsVisibleBeforeBatch(t *testing.T) {
-	// Integration-like test for the true live path: the collector's default
-	// HTTP poster (over the WFE Unix socket) must make the tool event
-	// observable before the delegate turn completes, and batch must be
-	// fallback-only so history has no duplicate.
+	// Exercise the real parser -> collector -> Unix socket -> API -> DB path
+	// while the provider turn is blocked after writing its structured event.
 	dir := t.TempDir()
 	socket := dir + "/aimee-wfe-http.sock"
-	// Minimal WFE HTTP handler that records to an in-memory slice, mimicking
-	// the real internal/model-events endpoint's safe validation and dedup.
-	var mu strings.Builder
-	_ = mu
-	type recorded struct {
-		kind   string
-		detail string
-	}
-	var recordedEvents []recorded
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var ev struct {
-			WorkItemID string `json:"work_item_id"`
-			Stage      string `json:"stage"`
-			Kind       string `json:"kind"`
-			Actor      string `json:"actor"`
-			Detail     string `json:"detail"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
-			http.Error(w, "bad", http.StatusBadRequest)
-			return
-		}
-		// Only safe kinds and bounded detail are accepted, matching api/server.go.
-		if ev.WorkItemID == "" || ev.Stage == "" || ev.Actor == "" || len(ev.Detail) > 4096 {
-			http.Error(w, "bad", http.StatusBadRequest)
-			return
-		}
-		// Dedup by stable identity (kind+detail) like the real handler.
-		for _, e := range recordedEvents {
-			if e.kind == ev.Kind && e.detail == ev.Detail {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-		recordedEvents = append(recordedEvents, recorded{kind: ev.Kind, detail: ev.Detail})
-		w.WriteHeader(http.StatusNoContent)
-	})
 	l, err := net.Listen("unix", socket)
 	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skipf("Unix sockets unavailable in this test sandbox: %v", err)
+		}
 		t.Fatal(err)
 	}
 	defer l.Close()
-	srv := &http.Server{Handler: handler}
-	go srv.Serve(l)
+	store, err := db1.Open(filepath.Join(dir, "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(dir, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := internalapi.New(store, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_live_http", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: server}
+	go func() { _ = srv.Serve(l) }()
 	defer srv.Close()
 	t.Setenv("AIMEE_WFE_HTTP_SOCKET", socket)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	wf := &delegatecontract.WorkflowContext{WorkItemID: "wi_live_http", Stage: "impl", Model: "codex", Role: "code", Persona: "engineer"}
 	col := newToolCollector()
 	col.setWorkflow(wf)
-	// This parse should trigger a live HTTP POST before returning, and the
-	// collector's batch must be empty (fallback-only).
-	parseClaudeToolStart(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"call_http","input":{"command":"ls"}}]}}`, col)
-	if len(recordedEvents) != 1 || !strings.Contains(recordedEvents[0].detail, "tool=Bash") || !strings.Contains(recordedEvents[0].detail, "call_id=call_http") {
-		t.Fatalf("live HTTP not observed: %+v", recordedEvents)
+	col.setContext(ctx)
+	defer col.close()
+	writer := &toolEventStreamWriter{kind: "claude", col: col, underlying: io.Discard}
+	release := make(chan struct{})
+	parsed := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		_, _ = writer.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"call_http","input":{"command":"ls"}}]}}` + "\n"))
+		close(parsed)
+		<-release
+		close(done)
+	}()
+	<-parsed
+	var liveFound bool
+	for i := 0; i < 100; i++ {
+		events, queryErr := store.Events(t.Context(), "wi_live_http", 0, 20)
+		if queryErr != nil {
+			t.Fatal(queryErr)
+		}
+		for _, event := range events {
+			if event.Kind == delegatecontract.ToolEventStart && strings.Contains(event.Detail, "call_id=call_http") {
+				liveFound = true
+				break
+			}
+		}
+		if liveFound {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if len(col.result()) != 0 {
-		t.Fatalf("batch should be empty after live success: %+v", col.result())
+	if !liveFound {
+		t.Fatal("live HTTP event was not observed while provider turn was blocked")
 	}
-	// A second identical event (as batch retry would) must be deduped and not duplicate live.
-	dupBody := `{"work_item_id":"wi_live_http","stage":"impl","kind":"model_tool_start","actor":"codex","detail":"` + recordedEvents[0].detail + `"}`
-	req, _ := http.NewRequest(http.MethodPost, "http://localhost/internal/model-events", strings.NewReader(dupBody))
-	// Simulate batch POST directly to the same handler via HTTP client over socket.
+	close(release)
+	<-done
+	// The same safe event is the batch fallback if delivery was still pending;
+	// persistence dedup keeps the live and batch paths to one history row.
+	detail := delegatecontract.FormatToolDetail(wf, delegatecontract.ToolEvent{ToolName: "Bash", CallID: "call_http", Status: "started"}, 0)
+	dupBody := `{"work_item_id":"wi_live_http","stage":"impl","kind":"model_tool_start","actor":"codex","detail":"` + detail + `"}`
+	req, err := http.NewRequest(http.MethodPost, "http://localhost/internal/model-events", strings.NewReader(dupBody))
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return net.Dial("unix", socket)
 	}}}
@@ -279,8 +315,18 @@ func TestToolCollectorLiveViaHTTPSocketIsVisibleBeforeBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if len(recordedEvents) != 1 {
-		t.Fatalf("duplicate live/batch should not create second event: %+v", recordedEvents)
+	events, err := store.Events(t.Context(), "wi_live_http", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	for _, event := range events {
+		if event.Kind == delegatecontract.ToolEventStart && strings.Contains(event.Detail, "call_id=call_http") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("duplicate live/batch created %d events: %+v", count, events)
 	}
 }
 

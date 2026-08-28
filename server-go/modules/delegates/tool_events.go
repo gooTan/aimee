@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -37,15 +38,24 @@ import (
 // post-turn persistence. Deduplication on the engine side (stable
 // call/event identity) is the second line of defense.
 type toolEventCollector struct {
-	startTimes map[string]time.Time
-	events     []delegatecontract.ToolEvent
-	workflow   *delegatecontract.WorkflowContext
+	startTimes      map[string]time.Time
+	anonymousStarts map[string][]string
+	nextSyntheticID uint64
+	events          []delegatecontract.ToolEvent
+	workflow        *delegatecontract.WorkflowContext
 	// liveFunc is injected for tests; if nil the default HTTP poster is used.
-	liveFunc func(wf *delegatecontract.WorkflowContext, ev delegatecontract.ToolEvent) bool
+	liveFunc  func(wf *delegatecontract.WorkflowContext, ev delegatecontract.ToolEvent) bool
+	stateMu   sync.Mutex
+	liveCtx   context.Context
+	cancel    context.CancelFunc
+	queue     chan delegatecontract.ToolEvent
+	liveWG    sync.WaitGroup
+	delivered map[string]struct{}
+	closed    bool
 }
 
 func newToolCollector() *toolEventCollector {
-	return &toolEventCollector{startTimes: make(map[string]time.Time)}
+	return &toolEventCollector{startTimes: make(map[string]time.Time), anonymousStarts: make(map[string][]string), delivered: make(map[string]struct{})}
 }
 
 func (c *toolEventCollector) setWorkflow(wf *delegatecontract.WorkflowContext) {
@@ -53,6 +63,35 @@ func (c *toolEventCollector) setWorkflow(wf *delegatecontract.WorkflowContext) {
 		return
 	}
 	c.workflow = wf
+}
+
+func (c *toolEventCollector) setContext(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.liveCtx == nil {
+		c.liveCtx, c.cancel = context.WithCancel(ctx)
+	}
+}
+
+func (c *toolEventCollector) close() {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	if !c.closed {
+		c.closed = true
+		if c.cancel != nil {
+			c.cancel()
+		}
+	}
+	c.stateMu.Unlock()
+	c.liveWG.Wait()
 }
 
 // wfeHTTPSocket returns the Unix socket for the WFE internal HTTP endpoint.
@@ -69,7 +108,7 @@ func wfeHTTPSocket() string {
 	return ""
 }
 
-func postToolEventLive(wf *delegatecontract.WorkflowContext, ev delegatecontract.ToolEvent) bool {
+func postToolEventLive(ctx context.Context, wf *delegatecontract.WorkflowContext, ev delegatecontract.ToolEvent) bool {
 	if wf == nil || strings.TrimSpace(wf.WorkItemID) == "" || strings.TrimSpace(wf.Stage) == "" {
 		return false
 	}
@@ -99,13 +138,12 @@ func postToolEventLive(wf *delegatecontract.WorkflowContext, ev delegatecontract
 	}
 	client := &http.Client{
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(dialCtx, "unix", socket)
 			},
 		},
-		Timeout: 400 * time.Millisecond,
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://localhost/internal/model-events", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/internal/model-events", bytes.NewReader(body))
 	if err != nil {
 		return false
 	}
@@ -129,17 +167,56 @@ func (c *toolEventCollector) tryLive(ev delegatecontract.ToolEvent) bool {
 	if c.liveFunc != nil {
 		return c.liveFunc(c.workflow, ev)
 	}
-	return postToolEventLive(c.workflow, ev)
+	c.enqueueLive(ev)
+	return false
+}
+
+const liveQueueCapacity = 64
+
+func (c *toolEventCollector) enqueueLive(ev delegatecontract.ToolEvent) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.closed || c.liveCtx == nil || c.workflow == nil {
+		return
+	}
+	if c.queue == nil {
+		c.queue = make(chan delegatecontract.ToolEvent, liveQueueCapacity)
+		c.liveWG.Add(1)
+		go c.liveLoop(c.liveCtx, c.queue)
+	}
+	select {
+	case c.queue <- ev:
+	default:
+		// The event remains in c.events for the batch fallback.
+	}
+}
+
+func (c *toolEventCollector) liveLoop(ctx context.Context, queue <-chan delegatecontract.ToolEvent) {
+	defer c.liveWG.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-queue:
+			if postToolEventLive(ctx, c.workflow, ev) {
+				key := c.eventKey(ev)
+				c.stateMu.Lock()
+				c.delivered[key] = struct{}{}
+				c.stateMu.Unlock()
+			}
+		}
+	}
+}
+
+func (c *toolEventCollector) eventKey(ev delegatecontract.ToolEvent) string {
+	return delegatecontract.ToolEventKind(ev.Status) + "\x00" + delegatecontract.FormatToolDetail(c.workflow, ev, 0)
 }
 
 func (c *toolEventCollector) add(toolName, callID, status, phase string, elapsed time.Duration) {
 	if c == nil {
 		return
 	}
-	toolName = strings.TrimSpace(toolName)
-	if toolName == "" {
-		toolName = "unknown"
-	}
+	toolName = normalizedToolName(toolName)
 	// Sanitize to 31-char limit mirroring rescueNameMax; truncate.
 	if len(toolName) > 31 {
 		toolName = toolName[:31]
@@ -157,22 +234,66 @@ func (c *toolEventCollector) add(toolName, callID, status, phase string, elapsed
 	if elapsed > 0 {
 		ev.ElapsedMS = elapsed.Milliseconds()
 	}
-	// Attempt live delivery first; on success, batch is fallback-only.
-	if c.tryLive(ev) {
-		return
-	}
+	c.stateMu.Lock()
 	c.events = append(c.events, ev)
+	c.stateMu.Unlock()
+	// Production delivery is asynchronous. The event stays in c.events until
+	// the worker confirms delivery, so a dropped or canceled request is retained.
+	if c.tryLive(ev) {
+		key := c.eventKey(ev)
+		c.stateMu.Lock()
+		filtered := c.events[:0]
+		for _, existing := range c.events {
+			if c.eventKey(existing) != key {
+				filtered = append(filtered, existing)
+			}
+		}
+		c.events = filtered
+		c.stateMu.Unlock()
+	}
+}
+
+func normalizedToolName(toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return "unknown"
+	}
+	if len(toolName) > 31 {
+		return toolName[:31]
+	}
+	return toolName
+}
+
+func (c *toolEventCollector) syntheticCallID() string {
+	c.nextSyntheticID++
+	return fmt.Sprintf("acp-synthetic-%d", c.nextSyntheticID)
+}
+
+func (c *toolEventCollector) anonymousCallID(toolName string) string {
+	ids := c.anonymousStarts[normalizedToolName(toolName)]
+	if len(ids) == 0 {
+		return ""
+	}
+	callID := ids[0]
+	if len(ids) == 1 {
+		delete(c.anonymousStarts, normalizedToolName(toolName))
+	} else {
+		c.anonymousStarts[normalizedToolName(toolName)] = ids[1:]
+	}
+	return callID
 }
 
 func (c *toolEventCollector) recordStart(toolName, callID, phase string) {
 	if c == nil {
 		return
 	}
-	key := callID
-	if key == "" {
-		key = toolName + ":" + phase + ":" + time.Now().Format(time.RFC3339Nano)
+	toolName = normalizedToolName(toolName)
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		callID = c.syntheticCallID()
+		c.anonymousStarts[toolName] = append(c.anonymousStarts[toolName], callID)
 	}
-	c.startTimes[key] = time.Now()
+	c.startTimes[callID] = time.Now()
 	c.add(toolName, callID, "started", phase, 0)
 }
 
@@ -180,18 +301,18 @@ func (c *toolEventCollector) recordComplete(toolName, callID, phase string) {
 	if c == nil {
 		return
 	}
+	toolName = normalizedToolName(toolName)
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		callID = c.anonymousCallID(toolName)
+		if callID == "" {
+			callID = c.syntheticCallID()
+		}
+	}
 	var elapsed time.Duration
-	for k, t := range c.startTimes {
-		if callID != "" && strings.HasPrefix(k, callID) || k == callID {
-			elapsed = time.Since(t)
-			delete(c.startTimes, k)
-			break
-		}
-		if callID == "" && strings.Contains(k, toolName) {
-			elapsed = time.Since(t)
-			delete(c.startTimes, k)
-			break
-		}
+	if t, ok := c.startTimes[callID]; ok {
+		elapsed = time.Since(t)
+		delete(c.startTimes, callID)
 	}
 	if elapsed == 0 {
 		// No matching start — this protocol may only emit completions (codex).
@@ -205,22 +326,35 @@ func (c *toolEventCollector) recordError(toolName, callID, phase string) {
 	if c == nil {
 		return
 	}
-	var elapsed time.Duration
-	if callID != "" {
-		if t, ok := c.startTimes[callID]; ok {
-			elapsed = time.Since(t)
-			delete(c.startTimes, callID)
+	toolName = normalizedToolName(toolName)
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		callID = c.anonymousCallID(toolName)
+		if callID == "" {
+			callID = c.syntheticCallID()
 		}
+	}
+	var elapsed time.Duration
+	if t, ok := c.startTimes[callID]; ok {
+		elapsed = time.Since(t)
+		delete(c.startTimes, callID)
 	}
 	c.add(toolName, callID, "error", phase, elapsed)
 }
 
 func (c *toolEventCollector) result() []delegatecontract.ToolEvent {
-	if c == nil || len(c.events) == 0 {
+	if c == nil {
 		return nil
 	}
-	out := make([]delegatecontract.ToolEvent, len(c.events))
-	copy(out, c.events)
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	var out []delegatecontract.ToolEvent
+	for _, ev := range c.events {
+		if _, ok := c.delivered[c.eventKey(ev)]; ok {
+			continue
+		}
+		out = append(out, ev)
+	}
 	return out
 }
 

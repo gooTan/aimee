@@ -921,6 +921,8 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	// event for the phase that is exposed, documented here and in tests.
 	col := newToolCollector()
 	col.setWorkflow(request.Workflow)
+	col.setContext(runCtx)
+	defer col.close()
 	kindLower := strings.ToLower(strings.TrimSpace(agent.CLIKind))
 	var stdoutWriter io.Writer = output
 	// Build the stacked writer: tool collector sees the raw NDJSON before the

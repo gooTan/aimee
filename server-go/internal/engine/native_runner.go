@@ -963,7 +963,11 @@ func isAvailabilityFallback(class delegateapi.AvailabilityClass) bool {
 func delegateAttemptCost(result DelegateResult, err error) (float64, bool) {
 	var exec *delegateapi.DelegateExecutionError
 	if errors.As(err, &exec) {
-		return exec.CostUSD, !exec.CostKnown
+		cost := exec.CostUSD
+		if result.CostUSD != 0 || result.CostUnknown {
+			cost = result.CostUSD
+		}
+		return cost, !exec.CostKnown || result.CostUnknown
 	}
 	return result.CostUSD, result.CostUnknown
 }
@@ -1110,6 +1114,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	baseHead, baseHeadErr := gitText(ctx, workdir, "rev-parse", "HEAD")
 	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: delegate, Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 	if err != nil {
+		primaryCost, primaryUnknown := delegateAttemptCost(result, err)
 		effectiveAvail := result.AvailabilityClass
 		if effectiveAvail == "" {
 			effectiveAvail = delegateapi.AvailabilityClassOf(err)
@@ -1122,7 +1127,6 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 			}
 		}
 		if !docs && delegate == "muse" && !req.ReplayOnly && !effectiveStarted && isAvailabilityFallback(effectiveAvail) {
-			primaryCost, primaryUnknown := delegateAttemptCost(result, err)
 			r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "model_fallback", "muse", "to=luna reason="+string(effectiveAvail))
 			lunaResult, lunaErr := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: "luna", Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 			if lunaErr != nil {

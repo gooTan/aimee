@@ -2,7 +2,9 @@ package db1
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -74,5 +76,66 @@ func TestToolEventsNeverStoreRawArguments(t *testing.T) {
 		if strings.Contains(e.Detail, "supersecret") || strings.Contains(e.Detail, "prompt:") {
 			t.Fatalf("unsafe detail: %+v", e)
 		}
+	}
+}
+
+func TestRecordToolEventIfAbsentIsUnboundedAndAtomic(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_tool_dedup", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 1001; i++ {
+		if err := store.RecordEvent(ctx, "wi_tool_dedup", "impl", "model_tool_start", "codex", "model=codex tool=Bash call_id=old-"+strconv.Itoa(i)+" status=started"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	detail := "model=codex tool=Bash call_id=target status=started"
+	inserted, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_dedup", "impl", "model_tool_start", "codex", detail)
+	if err != nil || !inserted {
+		t.Fatalf("first insert = %v, %v", inserted, err)
+	}
+	inserted, err = store.RecordToolEventIfAbsent(ctx, "wi_tool_dedup", "impl", "model_tool_start", "codex", detail)
+	if err != nil || inserted {
+		t.Fatalf("duplicate insert = %v, %v", inserted, err)
+	}
+
+	const workers = 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	insertCount := 0
+	concurrentDetail := "model=codex tool=Read call_id=concurrent status=started"
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := store.RecordToolEventIfAbsent(ctx, "wi_tool_dedup", "impl", "model_tool_start", "codex", concurrentDetail)
+			if err != nil {
+				t.Errorf("concurrent insert: %v", err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				insertCount++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if insertCount != 1 {
+		t.Fatalf("concurrent inserts = %d, want 1", insertCount)
+	}
+	events, err := store.Events(ctx, "wi_tool_dedup", 0, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Detail == concurrentDetail {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("concurrent event count = %d, want 1", count)
 	}
 }

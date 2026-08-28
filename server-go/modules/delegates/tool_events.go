@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	delegatecontract "github.com/JBailes/aimee/server-go/delegate"
@@ -40,7 +41,6 @@ import (
 type toolEventCollector struct {
 	startTimes      map[string]time.Time
 	anonymousStarts map[string][]string
-	nextSyntheticID uint64
 	events          []delegatecontract.ToolEvent
 	workflow        *delegatecontract.WorkflowContext
 	// liveFunc is injected for tests; if nil the default HTTP poster is used.
@@ -264,9 +264,10 @@ func normalizedToolName(toolName string) string {
 	return toolName
 }
 
+var nextSyntheticCallID atomic.Uint64
+
 func (c *toolEventCollector) syntheticCallID() string {
-	c.nextSyntheticID++
-	return fmt.Sprintf("acp-synthetic-%d", c.nextSyntheticID)
+	return "acp-synthetic-" + strconv.FormatUint(nextSyntheticCallID.Add(1), 10)
 }
 
 func (c *toolEventCollector) anonymousCallID(toolName string) string {

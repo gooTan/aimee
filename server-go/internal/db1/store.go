@@ -555,6 +555,28 @@ VALUES (?, ?, ?, ?, ?)`, workItemID, stage, kind, actor, detail)
 	return nil
 }
 
+// RecordToolEventIfAbsent atomically appends a tool event when its durable
+// identity is not already present. The NOT EXISTS predicate is evaluated by
+// SQLite as part of the insert, so live and batch writers cannot race between
+// a read and a write, and the lookup is not artificially bounded.
+func (s *Store) RecordToolEventIfAbsent(ctx context.Context, workItemID, stage, kind, actor, detail string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail)
+SELECT ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+  SELECT 1 FROM lifecycle_event
+  WHERE work_item_id = ? AND stage = ? AND kind = ? AND detail = ?
+)`, workItemID, stage, kind, actor, detail, workItemID, stage, kind, detail)
+	if err != nil {
+		return false, fmt.Errorf("record lifecycle tool event: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check lifecycle tool event insert: %w", err)
+	}
+	return rows > 0, nil
+}
+
 func (s *Store) Events(ctx context.Context, workItemID string, after int64, limit int) ([]Event, error) {
 	return s.events(ctx, workItemID, after, limit, false)
 }

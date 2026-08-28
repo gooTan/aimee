@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/JBailes/aimee/server-go/internal/db1"
@@ -168,5 +170,46 @@ func TestInternalModelEventsDeduplicatesLiveBatch(t *testing.T) {
 	events2, _ := store.Events(t.Context(), "wi_dedup", 0, 20)
 	if len(events2) != 3 {
 		t.Fatalf("distinct tool event should persist: %+v", events2)
+	}
+}
+
+func TestInternalModelEventsDeduplicatesUnboundedConcurrentPosts(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_dedup_large", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 1001; i++ {
+		if err := store.RecordEvent(t.Context(), "wi_dedup_large", "impl", "model_tool_start", "codex", "model=codex tool=Bash call_id=old-"+strconv.Itoa(i)+" status=started"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := `{"work_item_id":"wi_dedup_large","stage":"impl","kind":"model_tool_start","actor":"codex","detail":"model=codex tool=Bash call_id=target status=started"}`
+	const workers = 20
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("concurrent post status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		}()
+	}
+	wg.Wait()
+	events, err := store.Events(t.Context(), "wi_dedup_large", 0, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if strings.Contains(event.Detail, "call_id=target") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("target event count = %d, want 1", count)
 	}
 }

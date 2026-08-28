@@ -85,24 +85,10 @@ func (o observableAgents) recordToolEvents(request DelegateRequest, result Deleg
 	if actor == "" {
 		actor = modelActor(request)
 	}
-	// Deduplicate by stable kind+detail identity so a live-emitted tool event
-	// (already persisted via internal/model-events before the delegate returned)
-	// is not duplicated by the fallback batch path.
-	existing := map[string]struct{}{}
-	if evs, err := o.db.Events(context.Background(), request.WorkItemID, 0, 1000); err == nil {
-		for _, e := range evs {
-			existing[e.Kind+"\x00"+e.Detail] = struct{}{}
-		}
-	}
 	for _, ev := range result.ToolEvents {
 		kind := delegateapi.ToolEventKind(ev.Status)
 		detail := delegateapi.FormatToolDetail(wf, ev, 0)
-		key := kind + "\x00" + detail
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		o.record(request, kind, actor, detail)
-		existing[key] = struct{}{}
+		_, _ = o.db.RecordToolEventIfAbsent(context.Background(), request.WorkItemID, request.Stage, kind, actor, detail)
 	}
 }
 
@@ -122,21 +108,10 @@ func (o observableAgents) recordToolEventsGroup(request DelegateRequest, result 
 	if actor == "" {
 		actor = modelActor(request)
 	}
-	existing := map[string]struct{}{}
-	if evs, err := o.db.Events(context.Background(), request.WorkItemID, 0, 1000); err == nil {
-		for _, e := range evs {
-			existing[e.Kind+"\x00"+e.Detail] = struct{}{}
-		}
-	}
 	for _, ev := range result.ToolEvents {
 		kind := delegateapi.ToolEventKind(ev.Status)
 		detail := delegateapi.FormatToolDetail(wf, ev, 0)
-		key := kind + "\x00" + detail
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		o.record(request, kind, actor, detail)
-		existing[key] = struct{}{}
+		_, _ = o.db.RecordToolEventIfAbsent(context.Background(), request.WorkItemID, request.Stage, kind, actor, detail)
 	}
 }
 

@@ -91,7 +91,7 @@ func TestParseACPToolEventsStartAndComplete(t *testing.T) {
 	}
 }
 
-func TestACPAnonymousToolCallsGetDistinctMonotonicIDs(t *testing.T) {
+func TestACPAnonymousToolCallsGetDistinctIDsAcrossCollectors(t *testing.T) {
 	col := newToolCollector()
 	parseACPToolEvent("tool_call", "Read", "", "in_progress", col)
 	parseACPToolEvent("tool_call", "Read", "", "in_progress", col)
@@ -101,8 +101,13 @@ func TestACPAnonymousToolCallsGetDistinctMonotonicIDs(t *testing.T) {
 	if len(evs) != 4 {
 		t.Fatalf("anonymous ACP events = %+v", evs)
 	}
-	if evs[0].CallID != "acp-synthetic-1" || evs[1].CallID != "acp-synthetic-2" || evs[2].CallID != evs[0].CallID || evs[3].CallID != evs[1].CallID {
+	if evs[0].CallID == evs[1].CallID || evs[2].CallID != evs[0].CallID || evs[3].CallID != evs[1].CallID {
 		t.Fatalf("anonymous ACP call IDs = %+v", evs)
+	}
+	col2 := newToolCollector()
+	parseACPToolEvent("tool_call", "Read", "", "in_progress", col2)
+	if got := col2.result()[0].CallID; got == evs[0].CallID {
+		t.Fatalf("separate collectors reused synthetic call ID %q", got)
 	}
 }
 
@@ -124,6 +129,21 @@ func TestACPProtocolToolCollectorIntegration(t *testing.T) {
 	evs := col.result()
 	if len(evs) != 2 || evs[1].Status != "completed" || evs[1].CallID != "tool-1" {
 		t.Fatalf("second event = %+v", evs)
+	}
+}
+
+func TestAntigravityToolStreamParserEmitsToolEvents(t *testing.T) {
+	col := newToolCollector()
+	writer := &toolEventStreamWriter{kind: "agy", col: col, underlying: io.Discard}
+	_, err := writer.Write([]byte(
+		`{"event":"tool_call","tool":"bash","id":"agy-call-1"}` + "\n" +
+			`{"event":"tool_result","tool":"bash","id":"agy-call-1"}` + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := col.result()
+	if len(evs) != 2 || evs[0].Status != "started" || evs[1].Status != "completed" || evs[1].CallID != "agy-call-1" {
+		t.Fatalf("antigravity events = %+v", evs)
 	}
 }
 

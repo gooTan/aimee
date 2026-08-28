@@ -299,20 +299,15 @@ func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Deduplicate tool events by stable kind+detail so a live-emitted event
-	// (posted as the structured provider/ACP event is parsed, before the
-	// delegate finishes) is not duplicated by the fallback batch. The delegate
-	// module already makes batch fallback-only, but the API is the second
-	// line for roundtable and any retry that posts the same safe detail.
+	// Deduplicate tool events by their stable database identity. The insert is
+	// atomic so live and batch posts cannot race or miss events beyond a page.
 	if event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error" {
-		if evs, err := s.db.Events(r.Context(), event.WorkItemID, 0, 1000); err == nil {
-			for _, e := range evs {
-				if e.Kind == event.Kind && e.Detail == event.Detail && e.Stage == event.Stage {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-			}
+		if _, err := s.db.RecordToolEventIfAbsent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 	if err := s.db.RecordEvent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

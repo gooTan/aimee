@@ -37,8 +37,8 @@ static const struct
      * {dir, ref, suffix, workspace, mode, max_spend_usd} — the same vocabulary
      * as a `watch-dir` trigger_rules stanza, composed in the graph instead. */
     {WFE_BLK_TRIGGER_WATCH_DIR, "trigger.watch-dir", WFE_ART_PROPOSAL, 0, {WFE_ART_NONE}},
-    /* author.plan also accepts intent: understand brief:true emits the validated schema_version 2 ContextBrief as
-     * intent for the native build planner. */
+    /* author.plan also accepts intent: understand brief:true emits the validated schema_version 2
+     * ContextBrief as intent for the native build planner. */
     {WFE_BLK_AUTHOR_PLAN,
      "author.plan",
      WFE_ART_PLAN,

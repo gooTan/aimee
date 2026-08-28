@@ -40,9 +40,9 @@
 
 #define ACP_FS_READ_CAP (16 * 1024 * 1024) /* max bytes served from a single fs/read */
 
-#define ACP_LINE_MAX (16 * 1024 * 1024)
+#define ACP_LINE_MAX             (16 * 1024 * 1024)
 #define ACP_FRAME_OVERFLOW_ERROR "acp adapter: ACP frame exceeds limit"
-#define ACP_ARG_MAX  64
+#define ACP_ARG_MAX              64
 
 typedef struct
 {
@@ -790,9 +790,8 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
                sid_esc ? sid_esc : "\"\"", model_esc ? model_esc : "\"\"");
       free(sid_esc);
       free(model_esc);
-      int status = acp_write_line(&p, msg) == 0
-                       ? acp_read_request_status(&p, 4, util_now_ms() + 10000)
-                       : 0;
+      int status =
+          acp_write_line(&p, msg) == 0 ? acp_read_request_status(&p, 4, util_now_ms() + 10000) : 0;
       if (acp_fail_on_frame_overflow(&p, out) != 0)
          return -1;
       if (status != 1)
@@ -821,9 +820,8 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
                sid_esc ? sid_esc : "\"\"", eff_esc ? eff_esc : "\"\"");
       free(sid_esc);
       free(eff_esc);
-      int status = acp_write_line(&p, msg) == 0
-                       ? acp_read_request_status(&p, 5, util_now_ms() + 10000)
-                       : 0;
+      int status =
+          acp_write_line(&p, msg) == 0 ? acp_read_request_status(&p, 5, util_now_ms() + 10000) : 0;
       if (acp_fail_on_frame_overflow(&p, out) != 0)
          return -1;
       if (status != 1)

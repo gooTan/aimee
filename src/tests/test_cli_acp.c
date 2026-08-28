@@ -527,24 +527,31 @@ static void do_line_bound_case(size_t payload_len, int expect_ok)
    assert(fd >= 0);
    FILE *f = fdopen(fd, "w");
    assert(f != NULL);
-   fprintf(
-       f,
-       "#!/bin/sh\n"
-       "PAYLOAD_LEN=%zu\n"
-       "while IFS= read -r line; do\n"
-       "  case \"$line\" in\n"
-       "    *initialize*)\n"
-       "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
-       "      ;;\n"
-       "    *session/new*)\n"
-       "      printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-bound\"}}\\n'\n"
-       "      ;;\n"
-       "    *session/prompt*)\n"
-       "      awk -v n=\"$PAYLOAD_LEN\" 'BEGIN { msg=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"method\\\":\\\"session/update\\\",\\\"params\\\":{\\\"sessionId\\\":\\\"sess-bound\\\",\\\"update\\\":{\\\"sessionUpdate\\\":\\\"agent_message_chunk\\\",\\\"content\\\":{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"ok\\\"}}}}\"; printf \"%%s\", msg; for (i = length(msg); i < n; i++) printf \" \"; printf \"\\n\"; printf \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":{\\\"stopReason\\\":\\\"end_turn\\\"}}\\n\" }'\n"
-       "      ;;\n"
-       "  esac\n"
-       "done\n",
-       payload_len);
+   fprintf(f,
+           "#!/bin/sh\n"
+           "PAYLOAD_LEN=%zu\n"
+           "while IFS= read -r line; do\n"
+           "  case \"$line\" in\n"
+           "    *initialize*)\n"
+           "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
+           "      ;;\n"
+           "    *session/new*)\n"
+           "      printf "
+           "'{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-bound\"}}\\n'\n"
+           "      ;;\n"
+           "    *session/prompt*)\n"
+           "      awk -v n=\"$PAYLOAD_LEN\" 'BEGIN { "
+           "msg=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"method\\\":\\\"session/"
+           "update\\\",\\\"params\\\":{\\\"sessionId\\\":\\\"sess-bound\\\",\\\"update\\\":{"
+           "\\\"sessionUpdate\\\":\\\"agent_message_chunk\\\",\\\"content\\\":{\\\"type\\\":"
+           "\\\"text\\\",\\\"text\\\":\\\"ok\\\"}}}}\"; printf \"%%s\", msg; for (i = length(msg); "
+           "i < n; i++) printf \" \"; printf \"\\n\"; printf "
+           "\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":{\\\"stopReason\\\":\\\"end_"
+           "turn\\\"}}\\n\" }'\n"
+           "      ;;\n"
+           "  esac\n"
+           "done\n",
+           payload_len);
    fclose(f);
    chmod(fpath, 0700);
 
@@ -603,22 +610,28 @@ static void test_large_session_update_frame_completes(void)
    assert(fd >= 0);
    FILE *f = fdopen(fd, "w");
    assert(f != NULL);
-   fprintf(
-       f,
-       "#!/bin/sh\n"
-       "while IFS= read -r line; do\n"
-       "  case \"$line\" in\n"
-       "    *initialize*)\n"
-       "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
-       "      ;;\n"
-       "    *session/new*)\n"
-       "      printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-large\"}}\\n'\n"
-       "      ;;\n"
-       "    *session/prompt*)\n"
-       "      awk 'BEGIN { printf \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"method\\\":\\\"session/update\\\",\\\"params\\\":{\\\"sessionId\\\":\\\"sess-large\\\",\\\"update\\\":{\\\"sessionUpdate\\\":\\\"agent_message_chunk\\\",\\\"content\\\":{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"\"; for (i = 0; i < 300 * 1024; i++) printf \"x\"; printf \"\\\"}}}}\\n\"; printf \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":{\\\"stopReason\\\":\\\"end_turn\\\"}}\\n\" }'\n"
-       "      ;;\n"
-       "  esac\n"
-       "done\n");
+   fprintf(f, "#!/bin/sh\n"
+              "while IFS= read -r line; do\n"
+              "  case \"$line\" in\n"
+              "    *initialize*)\n"
+              "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
+              "      ;;\n"
+              "    *session/new*)\n"
+              "      printf "
+              "'{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-large\"}}\\n'\n"
+              "      ;;\n"
+              "    *session/prompt*)\n"
+              "      awk 'BEGIN { printf "
+              "\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"method\\\":\\\"session/"
+              "update\\\",\\\"params\\\":{\\\"sessionId\\\":\\\"sess-large\\\",\\\"update\\\":{"
+              "\\\"sessionUpdate\\\":\\\"agent_message_chunk\\\",\\\"content\\\":{\\\"type\\\":"
+              "\\\"text\\\",\\\"text\\\":\\\"\"; for (i = 0; i < 300 * 1024; i++) printf \"x\"; "
+              "printf \"\\\"}}}}\\n\"; printf "
+              "\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":{\\\"stopReason\\\":"
+              "\\\"end_turn\\\"}}\\n\" }'\n"
+              "      ;;\n"
+              "  esac\n"
+              "done\n");
    fclose(f);
    chmod(fpath, 0700);
 

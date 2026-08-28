@@ -40,8 +40,9 @@
 
 #define ACP_FS_READ_CAP (16 * 1024 * 1024) /* max bytes served from a single fs/read */
 
-#define ACP_LINE_MAX (256 * 1024)
-#define ACP_ARG_MAX  64
+#define ACP_LINE_MAX             (16 * 1024 * 1024)
+#define ACP_FRAME_OVERFLOW_ERROR "acp adapter: ACP frame exceeds limit"
+#define ACP_ARG_MAX              64
 
 typedef struct
 {
@@ -51,6 +52,7 @@ typedef struct
    char *buf;
    size_t buf_len;
    size_t buf_cap;
+   int frame_overflow;
 } acp_proc_t;
 
 static void acp_proc_close(acp_proc_t *p)
@@ -143,7 +145,7 @@ static int acp_write_line(acp_proc_t *p, const char *msg)
 }
 
 /* Read one newline-terminated line. Returns malloc'd string (caller frees) or NULL on
- * timeout/error/EOF. */
+ * timeout/error/EOF/overflow. p->frame_overflow is set when the line exceeds ACP_LINE_MAX. */
 static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
 {
    for (;;)
@@ -165,12 +167,24 @@ static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
          return line;
       }
 
-      /* Grow buffer if needed */
-      if (p->buf_len + 1 >= p->buf_cap)
+      if (p->buf_len > ACP_LINE_MAX)
       {
-         if (p->buf_cap >= ACP_LINE_MAX)
+         p->frame_overflow = 1;
+         return NULL;
+      }
+
+      /* Grow buffer if needed. The limit is payload bytes, not the trailing
+       * newline or the NUL stored in the returned copy. */
+      if (p->buf_len >= p->buf_cap)
+      {
+         if (p->buf_cap >= ACP_LINE_MAX + 1)
+         {
+            p->frame_overflow = 1;
             return NULL;
+         }
          size_t new_cap = p->buf_cap * 2;
+         if (new_cap > ACP_LINE_MAX + 1)
+            new_cap = ACP_LINE_MAX + 1;
          char *nb = realloc(p->buf, new_cap);
          if (!nb)
             return NULL;
@@ -195,11 +209,20 @@ static char *acp_read_line(acp_proc_t *p, long long deadline_ms)
       if (sel <= 0)
          return NULL; /* timeout or error */
 
-      ssize_t r = read(p->out_fd, p->buf + p->buf_len, p->buf_cap - p->buf_len - 1);
+      ssize_t r = read(p->out_fd, p->buf + p->buf_len, p->buf_cap - p->buf_len);
       if (r <= 0)
          return NULL; /* EOF or error */
       p->buf_len += (size_t)r;
    }
+}
+
+static int acp_fail_on_frame_overflow(acp_proc_t *p, agent_result_t *out)
+{
+   if (!p->frame_overflow)
+      return 0;
+   snprintf(out->error, sizeof(out->error), "%s", ACP_FRAME_OVERFLOW_ERROR);
+   acp_proc_close(p);
+   return -1;
 }
 
 /* Drain and discard the subprocess response for a given JSON-RPC id. */
@@ -722,6 +745,8 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       }
       /* drain the response without strict check — capabilities vary by agent */
       acp_drain_response(&p, 1, util_now_ms() + 5000);
+      if (acp_fail_on_frame_overflow(&p, out) != 0)
+         return -1;
    }
 
    /* 2. session/new: create a session rooted at the delegate worktree; capture
@@ -745,6 +770,8 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
       /* A sessionId is preferred but not fatal if absent (some agents are
        * single-session and ignore it); proceed either way. */
       acp_read_session_id(&p, 2, acp_session, sizeof(acp_session), util_now_ms() + 10000);
+      if (acp_fail_on_frame_overflow(&p, out) != 0)
+         return -1;
    }
 
    /* 2b. Model pinning. aimee's doctrine for a pinned agent is exact-or-fail:
@@ -763,8 +790,11 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
                sid_esc ? sid_esc : "\"\"", model_esc ? model_esc : "\"\"");
       free(sid_esc);
       free(model_esc);
-      if (acp_write_line(&p, msg) != 0 ||
-          acp_read_request_status(&p, 4, util_now_ms() + 10000) != 1)
+      int status =
+          acp_write_line(&p, msg) == 0 ? acp_read_request_status(&p, 4, util_now_ms() + 10000) : 0;
+      if (acp_fail_on_frame_overflow(&p, out) != 0)
+         return -1;
+      if (status != 1)
       {
          snprintf(out->error, sizeof(out->error),
                   "acp adapter: agent did not accept pinned model '%s' (session/set_model)",
@@ -790,8 +820,11 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
                sid_esc ? sid_esc : "\"\"", eff_esc ? eff_esc : "\"\"");
       free(sid_esc);
       free(eff_esc);
-      if (acp_write_line(&p, msg) != 0 ||
-          acp_read_request_status(&p, 5, util_now_ms() + 10000) != 1)
+      int status =
+          acp_write_line(&p, msg) == 0 ? acp_read_request_status(&p, 5, util_now_ms() + 10000) : 0;
+      if (acp_fail_on_frame_overflow(&p, out) != 0)
+         return -1;
+      if (status != 1)
       {
          snprintf(
              out->error, sizeof(out->error),
@@ -867,7 +900,9 @@ static int acp_adapter_execute(const provider_cli_cfg_t *cfg, agent_result_t *ou
 
    if (!st.done && !st.text)
    {
-      snprintf(out->error, sizeof(out->error), "acp adapter: no response (timeout or EOF)");
+      snprintf(out->error, sizeof(out->error), "%s",
+               p.frame_overflow ? ACP_FRAME_OVERFLOW_ERROR
+                                : "acp adapter: no response (timeout or EOF)");
       free(st.text);
       return -1;
    }

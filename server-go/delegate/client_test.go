@@ -201,7 +201,7 @@ func TestClassifyAvailability(t *testing.T) {
 		want  AvailabilityClass
 	}{
 		{name: "quota diagnostic", err: errors.New("provider quota exceeded")},
-		{name: "rate limit diagnostic", err: errors.New("aimee_err=rate_limit")},
+		{name: "rate limit diagnostic", err: errors.New("aimee_err=rate_limit"), want: AvailabilityClassQuotaRateLimit},
 		{name: "capacity", err: ErrDelegateCapacity, want: AvailabilityClassCapacity},
 		{name: "capacity deadline diagnostic", err: errors.New("aimee_err=capacity_deadline"), want: AvailabilityClassCapacity},
 		{name: "authentication diagnostic", err: errors.New("authentication failed")},
@@ -222,7 +222,7 @@ func TestClassifyAvailability(t *testing.T) {
 }
 
 func TestClassifyProviderAvailabilityRecognizesClaudeSessionLimit(t *testing.T) {
-	if got := ClassifyProviderAvailability(errors.New("You've hit your session limit · resets 1:20am"), false); got != AvailabilityClassQuotaRateLimit {
+	if got := ClassifyProviderAvailability(errors.New("provider quota exceeded: You've hit your session limit · resets 1:20am"), false); got != AvailabilityClassQuotaRateLimit {
 		t.Fatalf("class=%q, want %q", got, AvailabilityClassQuotaRateLimit)
 	}
 }

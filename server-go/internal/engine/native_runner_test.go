@@ -748,7 +748,7 @@ func TestStructuredCorrectiveSynthesisIncludesCompleteInvalidResponse(t *testing
 }
 
 func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
-	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"]}`}}
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`}}
 	runner := &NativeRunner{agents: agents}
 	result, err := runner.structured(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
@@ -766,6 +766,35 @@ func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
 	request := agents.requests[0]
 	if request.Delegate != "luna" || request.Role != "search" || !request.Tools || request.Persona != "architect" {
 		t.Fatalf("scout dispatch=%+v, want pinned Luna search with read-only tools", request)
+	}
+}
+
+func TestContextBriefBlocksFailedMandatoryPrecondition(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed","detail":"memory route unavailable"}]}`}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "scout", Params: map[string]any{
+			"brief": true, "delegate": "luna",
+		}},
+		Proposal: "inspect the relevant implementation before planning",
+	}, "intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepChanges || !strings.Contains(result.Detail, "routing-e2e-20260824-l1") {
+		t.Fatalf("result=%+v, want repairable scout changes for failed mandatory precondition", result)
+	}
+	if len(agents.requests) != 1 {
+		t.Fatalf("requests=%d, want blocked scout to stop without corrective retries", len(agents.requests))
+	}
+	if strings.Contains(agents.requests[len(agents.requests)-1].Prompt, "ORIGINAL REQUEST") {
+		t.Fatalf("blocked scout was routed to planner instead of scout repair: %q", agents.requests[len(agents.requests)-1].Prompt)
+	}
+	for _, request := range agents.requests {
+		if request.Role != "search" || request.Delegate != "luna" || !request.Tools {
+			t.Fatalf("repair attempt left scout path: %+v", request)
+		}
 	}
 }
 
@@ -1697,14 +1726,126 @@ func TestImplementationKindRoutesBeforeDispatch(t *testing.T) {
 }
 
 type mutateFallbackAgents struct {
-	mu       sync.Mutex
-	requests []DelegateRequest
-	avail    delegate.AvailabilityClass
-	started  bool
-	costs    []float64
-	unknowns []bool
-	errs     []error
-	agents   []string
+	mu           sync.Mutex
+	requests     []DelegateRequest
+	avail        delegate.AvailabilityClass
+	started      bool
+	costs        []float64
+	unknowns     []bool
+	errs         []error
+	agents       []string
+	participants []string
+}
+
+func TestSameSeatRetryForPreResponseAvailabilityPreservesRequest(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_same_seat_retry", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "analysis"}); err != nil {
+		t.Fatal(err)
+	}
+	agents := &mutateFallbackAgents{
+		avail:  delegate.AvailabilityClassProviderUnavailable,
+		errs:   []error{errors.New("antigravity unavailable before response")},
+		agents: []string{"antigravity", "antigravity"},
+	}
+	runner := &NativeRunner{db: store, agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_same_seat_retry"},
+		Node:     wfe.Node{ID: "analysis"},
+	}, DelegateRequest{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "ok" {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Participant != "seat-qa" || result.Agent != "antigravity" {
+		t.Fatalf("retry identity=%+v, want seat-qa/antigravity", result)
+	}
+	if len(agents.requests) != 2 {
+		t.Fatalf("requests=%d, want one same-seat retry", len(agents.requests))
+	}
+	if agents.requests[0] != agents.requests[1] || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
+		t.Fatalf("retry changed participant/persona/delegate: %+v", agents.requests)
+	}
+}
+
+func TestSameSeatRetryPreservesExplicitRetryIdentity(t *testing.T) {
+	agents := &mutateFallbackAgents{
+		avail:        delegate.AvailabilityClassProviderUnavailable,
+		errs:         []error{errors.New("antigravity unavailable before response")},
+		agents:       []string{"antigravity", "retry-agent"},
+		participants: []string{"", "retry-seat"},
+	}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_same_seat_retry_explicit"},
+		Node:     wfe.Node{ID: "analysis"},
+	}, DelegateRequest{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Participant != "retry-seat" || result.Agent != "retry-agent" {
+		t.Fatalf("retry identity=%+v, want explicit retry-seat/retry-agent", result)
+	}
+}
+
+func TestDelegateGroupSameSeatRetryFillsMissingIdentity(t *testing.T) {
+	agents := &groupRetryIdentityAgents{}
+	runner := &NativeRunner{agents: agents}
+	results := runner.delegateGroup(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_group_retry_identity"},
+		Node:     wfe.Node{ID: "review"},
+	}, []DelegateRequest{{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"}})
+	if len(results) != 1 {
+		t.Fatalf("results=%d, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Fatalf("retry failed: %v", results[0].Err)
+	}
+	if results[0].Response != "ok" || results[0].Participant != "seat-qa" {
+		t.Fatalf("group retry result=%+v, want response ok and participant seat-qa", results[0])
+	}
+	if len(agents.requests) != 2 || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
+		t.Fatalf("group retry requests=%+v", agents.requests)
+	}
+}
+
+type groupRetryIdentityAgents struct {
+	requests            []DelegateRequest
+	explicitParticipant string
+}
+
+func (a *groupRetryIdentityAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	a.requests = append(a.requests, requests...)
+	return []DelegateGroupResult{{
+		Participant:       requests[0].Participant,
+		AvailabilityClass: delegate.AvailabilityClassProviderUnavailable,
+		Err:               errors.New("antigravity unavailable before response"),
+	}}
+}
+
+func (a *groupRetryIdentityAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
+	a.requests = append(a.requests, request)
+	return DelegateResult{Response: "ok", Participant: a.explicitParticipant, Agent: "antigravity"}, nil
+}
+
+func TestDelegateGroupSameSeatRetryPreservesExplicitRetryIdentity(t *testing.T) {
+	agents := &groupRetryIdentityAgents{explicitParticipant: "retry-seat"}
+	runner := &NativeRunner{agents: agents}
+	results := runner.delegateGroup(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_group_retry_explicit_identity"},
+		Node:     wfe.Node{ID: "review"},
+	}, []DelegateRequest{{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"}})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("results=%+v", results)
+	}
+	if results[0].Participant != "retry-seat" {
+		t.Fatalf("group retry participant=%q, want explicit retry-seat", results[0].Participant)
+	}
 }
 
 func TestFableDirectFallbackUsesSol(t *testing.T) {
@@ -1718,9 +1859,9 @@ func TestFableDirectFallbackUsesSol(t *testing.T) {
 	}
 	agents := &mutateFallbackAgents{
 		avail:  delegate.AvailabilityClassQuotaRateLimit,
-		costs:  []float64{1.5, 2.5},
-		errs:   []error{errors.New("You've hit your session limit")},
-		agents: []string{"fable", "sol"},
+		costs:  []float64{1.5, 0.5, 2.5},
+		errs:   []error{errors.New("You've hit your session limit"), errors.New("You've hit your session limit")},
+		agents: []string{"fable", "fable", "sol"},
 	}
 	runner := &NativeRunner{db: store, agents: agents}
 	result, err := runner.delegate(t.Context(), StepRequest{
@@ -1730,10 +1871,10 @@ func TestFableDirectFallbackUsesSol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != "ok" || result.CostUSD != 4 || result.CostUnknown {
+	if result.Response != "ok" || result.CostUSD != 4.5 || result.CostUnknown {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(agents.requests) != 2 || agents.requests[0].Delegate != "" || agents.requests[1].Delegate != "sol" {
+	if len(agents.requests) != 3 || agents.requests[0].Delegate != "" || agents.requests[1] != agents.requests[0] || agents.requests[2].Delegate != "sol" {
 		t.Fatalf("requests=%+v", agents.requests)
 	}
 	events, err := store.Events(t.Context(), "wi_fable_fallback", 0, 20)
@@ -1775,11 +1916,15 @@ func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) 
 	if idx < len(a.agents) {
 		agent = a.agents[idx]
 	}
-	result := DelegateResult{Agent: agent, AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
+	participant := ""
+	if idx < len(a.participants) {
+		participant = a.participants[idx]
+	}
+	result := DelegateResult{Agent: agent, Participant: participant, AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
 	if err != nil {
 		return result, err
 	}
-	return DelegateResult{Response: "ok", CostUSD: cost, CostUnknown: unknown}, nil
+	return DelegateResult{Response: "ok", Agent: agent, Participant: participant, CostUSD: cost, CostUnknown: unknown}, nil
 }
 
 func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {
@@ -1813,9 +1958,13 @@ func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {
 			agents := &mutateFallbackAgents{
 				avail:    class,
 				started:  false,
-				costs:    []float64{1.5, 2.5},
-				unknowns: []bool{false, false},
-				errs:     []error{errors.New("muse unavailable"), errors.New("luna also unavailable")},
+				costs:    []float64{1.5, 2.5, 3.5},
+				unknowns: []bool{false, false, false},
+				errs: []error{
+					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable"), CostUSD: 1.5, CostKnown: true, AvailabilityClass: class},
+					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable on same-seat retry"), CostUSD: 2.5, CostKnown: true, AvailabilityClass: class},
+					errors.New("luna also unavailable"),
+				},
 			}
 			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
 			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
@@ -1839,24 +1988,27 @@ func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {
 			agents.mu.Lock()
 			reqs := append([]DelegateRequest(nil), agents.requests...)
 			agents.mu.Unlock()
-			if len(reqs) != 2 {
-				t.Fatalf("requests=%d, want 2 for class %q", len(reqs), class)
+			if len(reqs) != 3 {
+				t.Fatalf("requests=%d, want 3 for class %q", len(reqs), class)
 			}
 			if reqs[0].Delegate != "muse" || reqs[0].Persona != "engineer" {
 				t.Fatalf("primary dispatch=%+v, want muse/engineer", reqs[0])
 			}
-			if reqs[1].Delegate != "luna" || reqs[1].Persona != "engineer" {
-				t.Fatalf("fallback dispatch=%+v, want luna/engineer", reqs[1])
+			if reqs[1].Delegate != "muse" || reqs[1].Persona != "engineer" {
+				t.Fatalf("same-seat retry dispatch=%+v, want muse/engineer", reqs[1])
 			}
-			if reqs[0].Prompt != reqs[1].Prompt || reqs[0].Workdir != reqs[1].Workdir || reqs[0].Role != reqs[1].Role || reqs[0].Tools != reqs[1].Tools {
-				t.Fatalf("luna request not identical except delegate: primary=%+v fallback=%+v", reqs[0], reqs[1])
+			if reqs[2].Delegate != "luna" || reqs[2].Persona != "engineer" {
+				t.Fatalf("fallback dispatch=%+v, want luna/engineer", reqs[2])
+			}
+			if reqs[0].Prompt != reqs[2].Prompt || reqs[0].Workdir != reqs[2].Workdir || reqs[0].Role != reqs[2].Role || reqs[0].Tools != reqs[2].Tools {
+				t.Fatalf("luna request not identical except delegate: primary=%+v fallback=%+v", reqs[0], reqs[2])
 			}
 			var execErr *delegate.DelegateExecutionError
 			if !errors.As(err, &execErr) {
 				t.Fatalf("fallback error is not DelegateExecutionError: %v", err)
 			}
-			if execErr.CostUSD != 4.0 {
-				t.Fatalf("combined cost=%v, want 4.0 (1.5+2.5)", execErr.CostUSD)
+			if execErr.CostUSD != 7.5 {
+				t.Fatalf("combined cost=%v, want 7.5 (1.5+2.5+3.5)", execErr.CostUSD)
 			}
 			if execErr.CostKnown == false {
 				t.Fatalf("combined cost should be known when both attempts known")
@@ -1877,7 +2029,7 @@ func TestMuseFallbackNotTriggered(t *testing.T) {
 		{name: "unclassified", kind: "general", avail: delegate.AvailabilityClassNone, started: false, replay: false, wantCalls: 1},
 		{name: "response-started", kind: "general", avail: delegate.AvailabilityClassCapacity, started: true, replay: false, wantCalls: 1},
 		{name: "replay-only", kind: "general", avail: delegate.AvailabilityClassCapacity, started: false, replay: true, wantCalls: 1},
-		{name: "ui-opus", kind: "ui", avail: delegate.AvailabilityClassCapacity, started: false, replay: false, wantCalls: 1},
+		{name: "ui-opus", kind: "ui", avail: delegate.AvailabilityClassCapacity, started: false, replay: false, wantCalls: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1902,7 +2054,7 @@ func TestMuseFallbackNotTriggered(t *testing.T) {
 				avail:   tc.avail,
 				started: tc.started,
 				costs:   []float64{1.0},
-				errs:    []error{errors.New("primary failed")},
+				errs:    []error{errors.New("primary failed"), errors.New("same-seat retry failed")},
 			}
 			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
 			id := "wi_nofallback_" + tc.name
@@ -1947,9 +2099,10 @@ func TestMuseFallbackCostUnknownPropagates(t *testing.T) {
 		unknowns    []bool
 		execPrimary bool
 	}{
-		{name: "primary-result-unknown", unknowns: []bool{true, false}},
-		{name: "luna-result-unknown", unknowns: []bool{false, true}},
-		{name: "primary-exec-zero-unknown", unknowns: []bool{false, false}, execPrimary: true},
+		{name: "primary-result-unknown", unknowns: []bool{true, false, false}},
+		{name: "same-seat-result-unknown", unknowns: []bool{false, true, false}},
+		{name: "luna-result-unknown", unknowns: []bool{false, false, true}},
+		{name: "primary-exec-zero-unknown", unknowns: []bool{false, false, false}, execPrimary: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, _ := setupSliceRepo(t)
@@ -1970,15 +2123,17 @@ func TestMuseFallbackCostUnknownPropagates(t *testing.T) {
 				t.Fatal(err)
 			}
 			var errs []error
+			retryErr := &delegate.DelegateExecutionError{Err: errors.New("muse unavailable on same-seat retry"), CostUSD: 2.3, CostKnown: true, AvailabilityClass: delegate.AvailabilityClassCapacity}
 			if tc.execPrimary {
 				errs = []error{
 					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable"), CostUSD: 0, CostKnown: false, AvailabilityClass: delegate.AvailabilityClassCapacity},
+					retryErr,
 					errors.New("luna also unavailable"),
 				}
 			} else {
-				errs = []error{errors.New("muse unavailable"), errors.New("luna also unavailable")}
+				errs = []error{errors.New("muse unavailable"), retryErr, errors.New("luna also unavailable")}
 			}
-			costs := []float64{1.2, 2.3}
+			costs := []float64{1.2, 2.3, 3.4}
 			if tc.execPrimary {
 				costs[0] = 0
 			}
@@ -2010,7 +2165,7 @@ func TestMuseFallbackCostUnknownPropagates(t *testing.T) {
 			if execErr.CostKnown {
 				t.Fatalf("CostKnown=true for %q, want false when either attempt unknown", tc.name)
 			}
-			if !errors.Is(execErr.Err, errs[1]) {
+			if !errors.Is(execErr.Err, errs[len(errs)-1]) {
 				t.Fatalf("fallback Err does not preserve lunaErr for errors.Is: %v", execErr.Err)
 			}
 		})

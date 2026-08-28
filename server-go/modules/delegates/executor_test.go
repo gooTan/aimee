@@ -373,6 +373,43 @@ func TestRegistryExecutorClassifiesClaudeRateLimitPreambleBeforeResponse(t *test
 	}
 }
 
+func TestRegistryExecutorClassifiesAgyZeroFinalBeforeResponse(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "agy")
+	body := "#!/bin/sh\nprintf '%s\n' " + `'{"event":"error","message":"provider not configured before response"}'` + "\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "antigravity", "cli_kind": "agy", "cli_cmd": script, "roles": []string{"review"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "review", Persona: "qa", Prompt: "inspect", Tools: true, Workdir: workdir})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassProviderCLIUnavailable || result.ResponseStarted || strings.TrimSpace(result.Error) == "" {
+		t.Fatalf("agy zero-final failure was not typed and observable: %+v", result)
+	}
+}
+
+func TestProviderAvailabilityDoesNotTreatLocalDiskQuotaAsProviderQuota(t *testing.T) {
+	if got := delegatecontract.ClassifyProviderAvailability(errors.New("write /tmp/cache: Disk quota exceeded"), false); got != delegatecontract.AvailabilityClassNone {
+		t.Fatalf("local disk quota class=%q, want none", got)
+	}
+	if got := delegatecontract.ClassifyProviderAvailability(errors.New("provider quota exceeded"), false); got != delegatecontract.AvailabilityClassQuotaRateLimit {
+		t.Fatalf("provider quota class=%q, want quota_rate_limit", got)
+	}
+}
+
 func TestPlanGroupPreservesDiversityEligibilityAndCapacity(t *testing.T) {
 	home := t.TempDir()
 	registry := map[string]any{"agents": []map[string]any{

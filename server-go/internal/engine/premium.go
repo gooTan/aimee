@@ -114,16 +114,33 @@ func normalizeEscalation(class string) string {
 // requirements, and artifact references. Full repository listings, raw logs,
 // and complete diffs do not fit this schema and are rejected by size.
 type ContextBrief struct {
-	SchemaVersion      int      `json:"schema_version"`
-	Summary            string   `json:"summary"`
-	Files              []string `json:"files,omitempty"`
-	Interfaces         []string `json:"interfaces,omitempty"`
-	Constraints        []string `json:"constraints,omitempty"`
-	Decisions          []string `json:"decisions,omitempty"`
-	Risks              []string `json:"risks,omitempty"`
-	OpenQuestions      []string `json:"open_questions,omitempty"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	Artifacts          []string `json:"artifacts,omitempty"`
+	SchemaVersion          int                   `json:"schema_version"`
+	Status                 string                `json:"status"`
+	Summary                string                `json:"summary"`
+	Files                  []string              `json:"files,omitempty"`
+	Interfaces             []string              `json:"interfaces,omitempty"`
+	Constraints            []string              `json:"constraints,omitempty"`
+	Decisions              []string              `json:"decisions,omitempty"`
+	Risks                  []string              `json:"risks,omitempty"`
+	OpenQuestions          []string              `json:"open_questions,omitempty"`
+	AcceptanceCriteria     []string              `json:"acceptance_criteria"`
+	Artifacts              []string              `json:"artifacts,omitempty"`
+	MandatoryPreconditions []ContextPrecondition `json:"mandatory_preconditions,omitempty"`
+	BlockedReason          string                `json:"blocked_reason,omitempty"`
+}
+
+type ContextPrecondition struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type ContextBriefBlockedError struct {
+	Reason string
+}
+
+func (e *ContextBriefBlockedError) Error() string {
+	return "context brief is blocked: " + e.Reason
 }
 
 // maxContextBriefBytes bounds what a premium planner can be sent. 32 KiB holds
@@ -133,9 +150,10 @@ const maxContextBriefBytes = 32 * 1024
 
 func contextBriefPrompt(proposal string) string {
 	return "Prepare a concise ContextBrief for a senior planning reviewer. Return only JSON shaped " +
-		`{"schema_version":1,"summary":"...","files":["path or path:symbol"],"interfaces":["..."],"constraints":["..."],"decisions":["..."],"risks":["..."],"open_questions":["..."],"acceptance_criteria":["..."],"artifacts":["..."]}. ` +
+		`{"schema_version":2,"status":"ready|blocked","summary":"...","files":["path or path:symbol"],"interfaces":["..."],"constraints":["..."],"decisions":["..."],"risks":["..."],"open_questions":["..."],"acceptance_criteria":["..."],"artifacts":["..."],"mandatory_preconditions":[{"id":"...","status":"satisfied|failed","detail":"..."}],"blocked_reason":"..."}. ` +
+		"Use status=ready only when every mandatory precondition needed to plan is satisfied. Use status=blocked and name each failed mandatory precondition when required context, memory, access, or retrieval is unavailable. " +
 		"List only the files, symbols, interfaces, constraints, prior decisions, risks, open questions, acceptance requirements, and artifact references that are relevant to this task. " +
-		"Never include full repository listings, raw logs, complete diffs, or conversation history. The whole brief must stay under 32768 bytes.\n\nTASK:\n" + proposal
+		"Never include full repository listings, raw logs, complete diffs, or conversation history. The whole brief must stay under 32768 bytes. You may use Aimee memory search through the available tools when prior decisions or memory keys are required.\n\nTASK:\n" + proposal
 }
 
 func validateContextBrief(doc []byte) error {
@@ -148,8 +166,36 @@ func validateContextBrief(doc []byte) error {
 	if err := decoder.Decode(&brief); err != nil {
 		return fmt.Errorf("context brief is not valid JSON of the ContextBrief shape: %w", err)
 	}
-	if brief.SchemaVersion != 1 {
-		return errors.New("context brief schema_version must be 1")
+	if brief.SchemaVersion != 2 {
+		return errors.New("context brief schema_version must be 2")
+	}
+	status := strings.ToLower(strings.TrimSpace(brief.Status))
+	if status == "" {
+		return errors.New("context brief status is required")
+	}
+	if status != "ready" && status != "blocked" {
+		return errors.New("context brief status must be ready or blocked")
+	}
+	if status == "blocked" {
+		if strings.TrimSpace(brief.BlockedReason) == "" {
+			return errors.New("context brief blocked_reason is required when status is blocked")
+		}
+		return &ContextBriefBlockedError{Reason: strings.TrimSpace(brief.BlockedReason)}
+	}
+	for _, precondition := range brief.MandatoryPreconditions {
+		preconditionStatus := strings.ToLower(strings.TrimSpace(precondition.Status))
+		if strings.TrimSpace(precondition.ID) == "" {
+			return errors.New("context brief mandatory_preconditions id is required")
+		}
+		if preconditionStatus == "" {
+			return fmt.Errorf("context brief mandatory precondition %q status is required", precondition.ID)
+		}
+		if preconditionStatus != "satisfied" && preconditionStatus != "failed" {
+			return fmt.Errorf("context brief mandatory precondition %q status must be satisfied or failed", precondition.ID)
+		}
+		if preconditionStatus == "failed" {
+			return &ContextBriefBlockedError{Reason: fmt.Sprintf("mandatory precondition %q failed: %s", precondition.ID, strings.TrimSpace(precondition.Detail))}
+		}
 	}
 	if strings.TrimSpace(brief.Summary) == "" {
 		return errors.New("context brief summary is required")

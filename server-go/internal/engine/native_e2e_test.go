@@ -28,10 +28,10 @@ func (a *e2eAgents) Delegate(_ context.Context, request DelegateRequest) (Delega
 		return DelegateResult{Response: fmt.Sprintf(`{"run_id":%q,"artifact_hash":%q,"artifact_stage":%q,"original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`,
 			request.WorkItemID, request.ArtifactHash, request.ArtifactStage)}, nil
 	case "search":
-		return DelegateResult{Response: `{"schema_version":1,"summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
+		return DelegateResult{Response: `{"schema_version":2,"status":"ready","summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
 	case "draft":
 		if strings.Contains(request.Prompt, "Prepare a concise ContextBrief") {
-			return DelegateResult{Response: `{"schema_version":1,"summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
+			return DelegateResult{Response: `{"schema_version":2,"status":"ready","summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
 		}
 		if strings.Contains(request.Prompt, "PACKET PLAN") || strings.Contains(request.Prompt, "Decompose the complete approved plan") {
 			return DelegateResult{Response: `{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"implement feature","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature exists"],"implementation_kind":"general"}]}`}, nil

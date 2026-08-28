@@ -269,6 +269,35 @@ func boundOrUnset(d time.Duration) string {
 
 func (e *DelegateLimitError) Unwrap() error { return e.Err }
 
+func delegateAvailability(result DelegateResult, err error) delegateapi.AvailabilityClass {
+	availability := result.AvailabilityClass
+	if availability == "" {
+		availability = delegateapi.AvailabilityClassOf(err)
+	}
+	return availability
+}
+
+func shouldRetrySameSeat(request DelegateRequest, result DelegateResult, err error) bool {
+	if err == nil || request.ReplayOnly {
+		return false
+	}
+	if !isAvailabilityFallback(delegateAvailability(result, err)) {
+		return false
+	}
+	if result.ResponseStarted {
+		return false
+	}
+	var execution *delegateapi.DelegateExecutionError
+	return !errors.As(err, &execution) || !execution.ResponseStarted
+}
+
+func groupAvailability(result DelegateGroupResult) delegateapi.AvailabilityClass {
+	if result.AvailabilityClass != "" {
+		return result.AvailabilityClass
+	}
+	return delegateapi.AvailabilityClassOf(result.Err)
+}
+
 func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request DelegateRequest) (DelegateResult, error) {
 	r.applyDelegateAlias(step.WorkItem.ID, &request)
 	if err := r.admitPremium(ctx, step, request); err != nil {
@@ -288,6 +317,20 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 	}
 	started := time.Now()
 	result, err := r.agents.Delegate(ctx, request)
+	if shouldRetrySameSeat(request, result, err) {
+		primaryAvailability := delegateAvailability(result, err)
+		primaryCost, primaryUnknown := delegateAttemptCost(result, err)
+		r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_retry",
+			firstNonempty(result.Agent, request.Delegate),
+			"same-seat reason="+string(primaryAvailability))
+		result, err = r.agents.Delegate(ctx, request)
+		if err != nil && !result.ResponseStarted && delegateAvailability(result, err) == delegateapi.AvailabilityClassNone {
+			result.AvailabilityClass = primaryAvailability
+		}
+		result.CostUSD += primaryCost
+		result.CostUnknown = result.CostUnknown || primaryUnknown
+		fillRetryIdentity(&result, request)
+	}
 	if err != nil && (request.Delegate == "fable" || result.Agent == "fable") && !request.ReplayOnly {
 		availability := result.AvailabilityClass
 		if availability == "" {
@@ -334,6 +377,15 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 	return result, err
 }
 
+func fillRetryIdentity(result *DelegateResult, request DelegateRequest) {
+	if result.Participant == "" {
+		result.Participant = request.Participant
+	}
+	if result.Agent == "" {
+		result.Agent = request.Delegate
+	}
+}
+
 func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requests []DelegateRequest) []DelegateGroupResult {
 	if len(requests) == 0 {
 		return nil
@@ -365,7 +417,43 @@ func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requ
 		}
 	}
 	if group, ok := r.agents.(DelegateGroupClient); ok {
-		return group.DelegateGroup(ctx, requests)
+		results := group.DelegateGroup(ctx, requests)
+		for i := range results {
+			if i >= len(requests) {
+				continue
+			}
+			candidate := DelegateResult{
+				Agent:             results[i].Participant,
+				Participant:       results[i].Participant,
+				AvailabilityClass: results[i].AvailabilityClass,
+				ResponseStarted:   results[i].ResponseStarted,
+			}
+			if shouldRetrySameSeat(requests[i], candidate, results[i].Err) {
+				primaryAvailability := groupAvailability(results[i])
+				primaryCost := results[i].CostUSD
+				primaryUnknown := results[i].CostUnknown
+				r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_retry",
+					firstNonempty(results[i].Participant, requests[i].Delegate),
+					"same-seat reason="+string(primaryAvailability))
+				retry, retryErr := r.agents.Delegate(ctx, requests[i])
+				retryAvailability := retry.AvailabilityClass
+				if retryErr != nil && retryAvailability == "" && !retry.ResponseStarted {
+					retryAvailability = primaryAvailability
+				}
+				fillRetryIdentity(&retry, requests[i])
+				results[i] = DelegateGroupResult{
+					Participant:       retry.Participant,
+					Response:          retry.Response,
+					CostUSD:           primaryCost + retry.CostUSD,
+					CostUnknown:       primaryUnknown || retry.CostUnknown,
+					AvailabilityClass: retryAvailability,
+					ResponseStarted:   retry.ResponseStarted,
+					ToolEvents:        retry.ToolEvents,
+					Err:               retryErr,
+				}
+			}
+		}
+		return results
 	}
 	// Roundtable never reconstructs grouped delegation or participant identity.
 	// A resource plane without the generic group contract is unavailable to it.
@@ -752,6 +840,10 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 		content, validationErr = extractJSONObject(result.Response)
 		if validationErr == nil {
 			validationErr = validate(content)
+			var blocked *ContextBriefBlockedError
+			if brief && errors.As(validationErr, &blocked) {
+				return StepResult{Status: StepChanges, Detail: validationErr.Error(), CostUSD: cost, CostUnknown: costUnknown}, nil
+			}
 		}
 		if validationErr == nil {
 			break
@@ -897,7 +989,11 @@ func isAvailabilityFallback(class delegateapi.AvailabilityClass) bool {
 func delegateAttemptCost(result DelegateResult, err error) (float64, bool) {
 	var exec *delegateapi.DelegateExecutionError
 	if errors.As(err, &exec) {
-		return exec.CostUSD, !exec.CostKnown
+		cost := exec.CostUSD
+		if result.CostUSD != 0 || result.CostUnknown {
+			cost = result.CostUSD
+		}
+		return cost, !exec.CostKnown || result.CostUnknown
 	}
 	return result.CostUSD, result.CostUnknown
 }
@@ -1044,6 +1140,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 	baseHead, baseHeadErr := gitText(ctx, workdir, "rev-parse", "HEAD")
 	result, err := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: delegate, Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 	if err != nil {
+		primaryCost, primaryUnknown := delegateAttemptCost(result, err)
 		effectiveAvail := result.AvailabilityClass
 		if effectiveAvail == "" {
 			effectiveAvail = delegateapi.AvailabilityClassOf(err)
@@ -1056,7 +1153,6 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 			}
 		}
 		if !docs && delegate == "muse" && !req.ReplayOnly && !effectiveStarted && isAvailabilityFallback(effectiveAvail) {
-			primaryCost, primaryUnknown := delegateAttemptCost(result, err)
 			r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "model_fallback", "muse", "to=luna reason="+string(effectiveAvail))
 			lunaResult, lunaErr := r.delegate(ctx, req, DelegateRequest{Role: "code", Persona: persona, Delegate: "luna", Prompt: prompt, Workdir: workdir, Tools: true, AcceptPartial: true})
 			if lunaErr != nil {

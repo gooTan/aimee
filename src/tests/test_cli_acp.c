@@ -517,6 +517,68 @@ static void test_effort_handshake(void)
    printf("PASS: empty effort sends no id-5 and reaches prompt\n");
 }
 
+static void test_large_session_update_frame_completes(void)
+{
+   char fpath[256];
+   snprintf(fpath, sizeof(fpath), "%s/aimee-fake-acp-large-XXXXXX", platform_tmpdir());
+   int fd = mkstemp(fpath);
+   assert(fd >= 0);
+   FILE *f = fdopen(fd, "w");
+   assert(f != NULL);
+   fprintf(
+       f,
+       "#!/bin/sh\n"
+       "while IFS= read -r line; do\n"
+       "  case \"$line\" in\n"
+       "    *initialize*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\n"
+       "      ;;\n"
+       "    *session/new*)\n"
+       "      printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-large\"}}\\n'\n"
+       "      ;;\n"
+       "    *session/prompt*)\n"
+       "      awk 'BEGIN { printf \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"method\\\":\\\"session/update\\\",\\\"params\\\":{\\\"sessionId\\\":\\\"sess-large\\\",\\\"update\\\":{\\\"sessionUpdate\\\":\\\"agent_message_chunk\\\",\\\"content\\\":{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"\"; for (i = 0; i < 300 * 1024; i++) printf \"x\"; printf \"\\\"}}}}\\n\"; printf \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":{\\\"stopReason\\\":\\\"end_turn\\\"}}\\n\" }'\n"
+       "      ;;\n"
+       "  esac\n"
+       "done\n");
+   fclose(f);
+   chmod(fpath, 0700);
+
+   char cwdbuf[256];
+   snprintf(cwdbuf, sizeof(cwdbuf), "%s/acp_cwd_large_XXXXXX", platform_tmpdir());
+   char *cwd = mkdtemp(cwdbuf);
+   assert(cwd != NULL);
+
+   agent_t agent;
+   memset(&agent, 0, sizeof(agent));
+   snprintf(agent.name, sizeof(agent.name), "fake-acp-large");
+   snprintf(agent.backend, sizeof(agent.backend), "%s", AGENT_BACKEND_PROVIDER_CLI);
+   snprintf(agent.cli_kind, sizeof(agent.cli_kind), "acp");
+   snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "%s", fpath);
+   agent.timeout_ms = 5000;
+   agent.cli_idle_timeout_ms = 5000;
+
+   const provider_cli_adapter_t *acp = provider_cli_adapter_get("acp");
+   assert(acp != NULL);
+   provider_cli_cfg_t cfg = {.agent = &agent, .cwd = cwd, .user_prompt = "hi"};
+   agent_result_t out;
+   memset(&out, 0, sizeof(out));
+   int rc = acp->execute(&cfg, &out);
+
+   assert(rc == 0);
+   assert(out.success == 1);
+   assert(out.response != NULL);
+   assert(strlen(out.response) == 300 * 1024);
+   assert(out.response[0] == 'x');
+   assert(out.response[(300 * 1024) - 1] == 'x');
+   assert(strspn(out.response, "x") == 300 * 1024);
+
+   free(out.response);
+   unlink(fpath);
+   rmdir(cwd);
+   printf("PASS: ~300 KiB session/update frame completes with intact response\n");
+}
+
 int main(void)
 {
    test_acp_adapter_registered();
@@ -538,6 +600,7 @@ int main(void)
    test_serve_write_denied_when_read_only();
    test_serve_permission_denied_when_read_only();
    test_effort_handshake();
+   test_large_session_update_frame_completes();
    printf("ALL PASS\n");
    return 0;
 }

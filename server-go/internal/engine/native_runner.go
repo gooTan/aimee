@@ -269,6 +269,35 @@ func boundOrUnset(d time.Duration) string {
 
 func (e *DelegateLimitError) Unwrap() error { return e.Err }
 
+func delegateAvailability(result DelegateResult, err error) delegateapi.AvailabilityClass {
+	availability := result.AvailabilityClass
+	if availability == "" {
+		availability = delegateapi.AvailabilityClassOf(err)
+	}
+	return availability
+}
+
+func shouldRetrySameSeat(request DelegateRequest, result DelegateResult, err error) bool {
+	if err == nil || request.ReplayOnly {
+		return false
+	}
+	if !isAvailabilityFallback(delegateAvailability(result, err)) {
+		return false
+	}
+	if result.ResponseStarted {
+		return false
+	}
+	var execution *delegateapi.DelegateExecutionError
+	return !errors.As(err, &execution) || !execution.ResponseStarted
+}
+
+func groupAvailability(result DelegateGroupResult) delegateapi.AvailabilityClass {
+	if result.AvailabilityClass != "" {
+		return result.AvailabilityClass
+	}
+	return delegateapi.AvailabilityClassOf(result.Err)
+}
+
 func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request DelegateRequest) (DelegateResult, error) {
 	r.applyDelegateAlias(step.WorkItem.ID, &request)
 	if err := r.admitPremium(ctx, step, request); err != nil {
@@ -288,6 +317,15 @@ func (r *NativeRunner) delegate(ctx context.Context, step StepRequest, request D
 	}
 	started := time.Now()
 	result, err := r.agents.Delegate(ctx, request)
+	if shouldRetrySameSeat(request, result, err) {
+		primaryCost, primaryUnknown := delegateAttemptCost(result, err)
+		r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_retry",
+			firstNonempty(result.Agent, request.Delegate),
+			"same-seat reason="+string(delegateAvailability(result, err)))
+		result, err = r.agents.Delegate(ctx, request)
+		result.CostUSD += primaryCost
+		result.CostUnknown = result.CostUnknown || primaryUnknown
+	}
 	if err != nil && (request.Delegate == "fable" || result.Agent == "fable") && !request.ReplayOnly {
 		availability := result.AvailabilityClass
 		if availability == "" {
@@ -365,7 +403,35 @@ func (r *NativeRunner) delegateGroup(ctx context.Context, step StepRequest, requ
 		}
 	}
 	if group, ok := r.agents.(DelegateGroupClient); ok {
-		return group.DelegateGroup(ctx, requests)
+		results := group.DelegateGroup(ctx, requests)
+		for i := range results {
+			if i >= len(requests) {
+				continue
+			}
+			candidate := DelegateResult{
+				Agent:             results[i].Participant,
+				Participant:       results[i].Participant,
+				AvailabilityClass: results[i].AvailabilityClass,
+				ResponseStarted:   results[i].ResponseStarted,
+			}
+			if shouldRetrySameSeat(requests[i], candidate, results[i].Err) {
+				r.recordModelEvent(step.WorkItem.ID, step.Node.ID, "model_retry",
+					firstNonempty(results[i].Participant, requests[i].Delegate),
+					"same-seat reason="+string(groupAvailability(results[i])))
+				retry, retryErr := r.agents.Delegate(ctx, requests[i])
+				results[i] = DelegateGroupResult{
+					Participant:       retry.Participant,
+					Response:          retry.Response,
+					CostUSD:           retry.CostUSD,
+					CostUnknown:       retry.CostUnknown,
+					AvailabilityClass: retry.AvailabilityClass,
+					ResponseStarted:   retry.ResponseStarted,
+					ToolEvents:        retry.ToolEvents,
+					Err:               retryErr,
+				}
+			}
+		}
+		return results
 	}
 	// Roundtable never reconstructs grouped delegation or participant identity.
 	// A resource plane without the generic group contract is unavailable to it.

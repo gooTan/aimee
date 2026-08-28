@@ -748,7 +748,7 @@ func TestStructuredCorrectiveSynthesisIncludesCompleteInvalidResponse(t *testing
 }
 
 func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
-	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"]}`}}
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"status":"ready","summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`}}
 	runner := &NativeRunner{agents: agents}
 	result, err := runner.structured(t.Context(), StepRequest{
 		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
@@ -766,6 +766,35 @@ func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
 	request := agents.requests[0]
 	if request.Delegate != "luna" || request.Role != "search" || !request.Tools || request.Persona != "architect" {
 		t.Fatalf("scout dispatch=%+v, want pinned Luna search with read-only tools", request)
+	}
+}
+
+func TestContextBriefBlocksFailedMandatoryPrecondition(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":1,"status":"ready","summary":"scope","acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed","detail":"memory route unavailable"}]}`}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "scout", Params: map[string]any{
+			"brief": true, "delegate": "luna",
+		}},
+		Proposal: "inspect the relevant implementation before planning",
+	}, "intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepChanges || !strings.Contains(result.Detail, "routing-e2e-20260824-l1") {
+		t.Fatalf("result=%+v, want repairable scout changes for failed mandatory precondition", result)
+	}
+	if len(agents.requests) != 3 {
+		t.Fatalf("requests=%d, want corrective scout attempts only", len(agents.requests))
+	}
+	if strings.Contains(agents.requests[len(agents.requests)-1].Prompt, "ORIGINAL REQUEST") {
+		t.Fatalf("blocked scout was routed to planner instead of scout repair: %q", agents.requests[len(agents.requests)-1].Prompt)
+	}
+	for _, request := range agents.requests {
+		if request.Role != "search" || request.Delegate != "luna" || !request.Tools {
+			t.Fatalf("repair attempt left scout path: %+v", request)
+		}
 	}
 }
 
@@ -1707,6 +1736,39 @@ type mutateFallbackAgents struct {
 	agents   []string
 }
 
+func TestSameSeatRetryForPreResponseAvailabilityPreservesRequest(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_same_seat_retry", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "analysis"}); err != nil {
+		t.Fatal(err)
+	}
+	agents := &mutateFallbackAgents{
+		avail:  delegate.AvailabilityClassProviderUnavailable,
+		errs:   []error{errors.New("antigravity unavailable before response")},
+		agents: []string{"antigravity", "antigravity"},
+	}
+	runner := &NativeRunner{db: store, agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_same_seat_retry"},
+		Node:     wfe.Node{ID: "analysis"},
+	}, DelegateRequest{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "ok" {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(agents.requests) != 2 {
+		t.Fatalf("requests=%d, want one same-seat retry", len(agents.requests))
+	}
+	if agents.requests[0] != agents.requests[1] || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
+		t.Fatalf("retry changed participant/persona/delegate: %+v", agents.requests)
+	}
+}
+
 func TestFableDirectFallbackUsesSol(t *testing.T) {
 	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
 	if err != nil {
@@ -1779,7 +1841,7 @@ func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) 
 	if err != nil {
 		return result, err
 	}
-	return DelegateResult{Response: "ok", CostUSD: cost, CostUnknown: unknown}, nil
+	return DelegateResult{Response: "ok", Agent: agent, CostUSD: cost, CostUnknown: unknown}, nil
 }
 
 func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {

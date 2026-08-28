@@ -60,7 +60,7 @@ func TestNormalizeEscalationAcceptsOnlyDecisionClasses(t *testing.T) {
 }
 
 func TestValidateContextBrief(t *testing.T) {
-	valid := `{"schema_version":1,"summary":"do the thing","files":["a.go"],"acceptance_criteria":["it works"]}`
+	valid := `{"schema_version":1,"status":"ready","summary":"do the thing","files":["a.go"],"acceptance_criteria":["it works"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`
 	if err := validateContextBrief([]byte(valid)); err != nil {
 		t.Fatalf("valid brief rejected: %v", err)
 	}
@@ -69,10 +69,13 @@ func TestValidateContextBrief(t *testing.T) {
 		doc  string
 	}{
 		{name: "not json", doc: "hello"},
-		{name: "wrong version", doc: `{"schema_version":2,"summary":"x","acceptance_criteria":["y"]}`},
-		{name: "no summary", doc: `{"schema_version":1,"summary":" ","acceptance_criteria":["y"]}`},
-		{name: "no acceptance", doc: `{"schema_version":1,"summary":"x","acceptance_criteria":[]}`},
-		{name: "unknown field smuggling", doc: `{"schema_version":1,"summary":"x","acceptance_criteria":["y"],"raw_diff":"..."}`},
+		{name: "wrong version", doc: `{"schema_version":2,"status":"ready","summary":"x","acceptance_criteria":["y"]}`},
+		{name: "no summary", doc: `{"schema_version":1,"status":"ready","summary":" ","acceptance_criteria":["y"]}`},
+		{name: "no acceptance", doc: `{"schema_version":1,"status":"ready","summary":"x","acceptance_criteria":[]}`},
+		{name: "unknown field smuggling", doc: `{"schema_version":1,"status":"ready","summary":"x","acceptance_criteria":["y"],"raw_diff":"..."}`},
+		{name: "no status", doc: `{"schema_version":1,"summary":"x","acceptance_criteria":["y"]}`},
+		{name: "blocked", doc: `{"schema_version":1,"status":"blocked","summary":"x","acceptance_criteria":["y"],"blocked_reason":"memory unavailable"}`},
+		{name: "failed precondition", doc: `{"schema_version":1,"status":"ready","summary":"x","acceptance_criteria":["y"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed"}]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -81,7 +84,7 @@ func TestValidateContextBrief(t *testing.T) {
 			}
 		})
 	}
-	oversized := `{"schema_version":1,"summary":"x","acceptance_criteria":["y"],"files":["` +
+	oversized := `{"schema_version":1,"status":"ready","summary":"x","acceptance_criteria":["y"],"files":["` +
 		strings.Repeat("a", maxContextBriefBytes) + `"]}`
 	if err := validateContextBrief([]byte(oversized)); err == nil ||
 		!strings.Contains(err.Error(), "cap") {

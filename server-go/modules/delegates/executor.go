@@ -662,6 +662,41 @@ func (m *turnMonitor) Exceeded() bool {
 	return m.exceeded
 }
 
+func preResponseFailureDetail(kind string, output []byte, err error) string {
+	if final := finalOutput(kind, output); strings.TrimSpace(final) != "" {
+		return final
+	}
+	if detail := streamErrorDetail(kind, output); detail != "" {
+		return detail
+	}
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return detail
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func streamErrorDetail(kind string, output []byte) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
+	var detail string
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		if kind == "agy" && item["event"] == "error" {
+			if value, ok := item["message"].(string); ok {
+				detail = value
+			}
+		}
+	}
+	return strings.TrimSpace(detail)
+}
+
 func finalOutput(kind string, output []byte) string {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	if kind == "" || kind == "generic" {
@@ -727,7 +762,11 @@ func outputResponseStarted(kind string, output []byte) bool {
 			}
 		case "agy":
 			if item["event"] == "result" {
-				return true
+				if nested, ok := item["result"].(map[string]any); ok {
+					if value, ok := nested["response"].(string); ok && strings.TrimSpace(value) != "" {
+						return true
+					}
+				}
 			}
 		}
 	}
@@ -958,18 +997,25 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, result.ResponseStarted)
 			return result
 		}
-		detail := strings.TrimSpace(output.String())
-		if detail == "" {
-			detail = err.Error()
-		}
+		detail := preResponseFailureDetail(agent.CLIKind, output.BytesCopy(), err)
 		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
 		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
 		return result
 	}
-	response := finalOutput(agent.CLIKind, output.BytesCopy())
+	outputBytes := output.BytesCopy()
+	response := finalOutput(agent.CLIKind, outputBytes)
 	if response == "" {
+		result.ResponseStarted = outputResponseStarted(agent.CLIKind, outputBytes)
 		result.ToolEvents = col.result()
-		return fail(errors.New("delegate CLI returned no final response"), "delegate CLI returned no final response")
+		detail := preResponseFailureDetail(agent.CLIKind, outputBytes, errors.New("delegate CLI returned no final response"))
+		if detail == "" {
+			detail = "delegate CLI returned no final response"
+		} else {
+			detail = "delegate CLI returned no final response: " + detail
+		}
+		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
+		return result
 	}
 	result.Status, result.Response = "done", response
 	result.ResponseStarted = true

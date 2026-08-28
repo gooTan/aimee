@@ -574,6 +574,9 @@ func ClassifyProviderAvailability(err error, responseStarted bool) AvailabilityC
 		return AvailabilityClassCapacity
 	}
 	detail := strings.ToLower(err.Error())
+	if strings.Contains(detail, "disk quota exceeded") || strings.Contains(detail, "no space left on device") {
+		return AvailabilityClassNone
+	}
 	if strings.Contains(detail, "capacity deadline") || strings.Contains(detail, "capacity-deadline") ||
 		strings.Contains(detail, "aimee_err=capacity_deadline") {
 		return AvailabilityClassCapacityDeadline
@@ -582,10 +585,10 @@ func ClassifyProviderAvailability(err error, responseStarted bool) AvailabilityC
 		strings.Contains(detail, "capacity unavailable") || strings.Contains(detail, "capacity saturated") {
 		return AvailabilityClassCapacity
 	}
-	if strings.Contains(detail, "quota") || strings.Contains(detail, "rate limit") ||
-		strings.Contains(detail, "rate-limit") || strings.Contains(detail, "rate_limit") ||
-		strings.Contains(detail, "rate_limited") || strings.Contains(detail, "rate limited") ||
-		strings.Contains(detail, "hit your session limit") ||
+	if strings.Contains(detail, "provider quota") || strings.Contains(detail, "api quota") ||
+		strings.Contains(detail, "aimee_err=rate_limit") || strings.Contains(detail, "rate limit") || strings.Contains(detail, "rate-limit") ||
+		strings.Contains(detail, "rate_limit") || strings.Contains(detail, "rate_limited") ||
+		strings.Contains(detail, "rate limited") || strings.Contains(detail, "hit your session limit") ||
 		strings.Contains(detail, "too many requests") || strings.Contains(detail, "429") ||
 		strings.Contains(detail, "credits exhausted") || strings.Contains(detail, "throttled") {
 		return AvailabilityClassQuotaRateLimit

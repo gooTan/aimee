@@ -67,13 +67,24 @@ func (b *moduleStageBridge) Call(ctx context.Context, _ uint32, stage uint32, _ 
 
 func TestTenOverlappingPanelsCrossGoProducerAdmissionWithoutUnreachable(t *testing.T) {
 	const campaigns = 10
+	home := t.TempDir()
 	workdir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	home := t.TempDir()
-	script := filepath.Join(home, "slow-reviewer")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 2\nprintf done\n"), 0o700); err != nil {
+	scriptFile, err := os.CreateTemp(workdir, ".slow-reviewer-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := scriptFile.Name()
+	t.Cleanup(func() { _ = os.Remove(script) })
+	if _, err := scriptFile.WriteString("#!/bin/sh\nsleep 2\nprintf done\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := scriptFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	registry := map[string]any{"agents": []map[string]any{{

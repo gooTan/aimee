@@ -585,6 +585,29 @@ func (s *Store) Events(ctx context.Context, workItemID string, after int64, limi
 	return s.events(ctx, workItemID, after, limit, false)
 }
 
+// LatestModelActivity returns the newest progress or tool event for one model
+// invocation. Identity is the canonical model/role/persona/phase/invocation
+// prefix shared by those event details.
+func (s *Store) LatestModelActivity(ctx context.Context, workItemID, stage, actor, identity string) (Event, bool, error) {
+	var event Event
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, work_item_id, stage, kind, actor, detail, content_hash, cost_usd, created_at
+FROM lifecycle_event
+WHERE work_item_id=? AND stage=? AND actor=?
+  AND kind IN ('model_progress', 'model_tool_start', 'model_tool_complete', 'model_tool_error')
+  AND (?='' OR instr(detail || ' ', ? || ' ')=1)
+ORDER BY id DESC LIMIT 1`, workItemID, stage, actor, identity, identity).Scan(
+		&event.ID, &event.WorkItemID, &event.Stage, &event.Kind, &event.Actor,
+		&event.Detail, &event.ContentHash, &event.CostUSD, &event.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, false, nil
+	}
+	if err != nil {
+		return Event{}, false, fmt.Errorf("find latest model activity: %w", err)
+	}
+	return event, true, nil
+}
+
 // EventsTree returns one globally ordered cursor across a workflow and all of
 // its slice descendants, so watching a build also shows its implementation.
 func (s *Store) EventsTree(ctx context.Context, workItemID string, after int64, limit int) ([]Event, error) {

@@ -345,7 +345,8 @@ func TestToolCollectorLiveViaHTTPSocketIsVisibleBeforeBatch(t *testing.T) {
 			if event.Kind == delegatecontract.ToolEventStart && strings.Contains(event.Detail, "call_id=call_http") {
 				liveFound = true
 			}
-			if event.Kind == "model_progress" && event.Detail == "status=response_streaming" {
+			if event.Kind == "model_progress" && strings.Contains(event.Detail, "model=codex role=code persona=engineer") &&
+				strings.Contains(event.Detail, "status=response_streaming") {
 				progressFound = true
 			}
 		}

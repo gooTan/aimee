@@ -121,6 +121,53 @@ func TestObservableAgentsRecordsHeartbeatWhileModelRuns(t *testing.T) {
 	}
 }
 
+func TestObservableAgentsHeartbeatReportsStaleSeatActivity(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	agents := observableAgents{
+		next:               blockingObservableAgents{release: release},
+		db:                 store,
+		heartbeatEvery:     time.Millisecond,
+		activityStaleAfter: time.Millisecond,
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = agents.Delegate(t.Context(), DelegateRequest{
+			WorkItemID: "wi", Stage: "review", Delegate: "sol", Role: "review", Persona: "reviewer", ExecutionVersion: "turn-7",
+		})
+		close(done)
+	}()
+	time.Sleep(2 * time.Millisecond)
+	if err := store.RecordEvent(t.Context(), "wi", "review", "model_progress", "sol", "model=sol role=review persona=reviewer invocation=turn-7 status=response_streaming"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(t.Context(), "wi", "review", "model_tool_start", "sol", "model=sol role=qa persona=qa invocation=turn-8 tool=Bash call_id=other status=started"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	close(release)
+	<-done
+	events, err := store.Events(t.Context(), "wi", 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		found = found || event.Kind == "model_heartbeat" && strings.Contains(event.Detail, "status=possibly_stalled") &&
+			strings.Contains(event.Detail, "activity=model_progress") && strings.Contains(event.Detail, "last_activity=")
+	}
+	if !found {
+		t.Fatalf("stale activity heartbeat missing: %+v", events)
+	}
+}
+
 func TestObservableGroupedCompletionUsesModelNotParticipant(t *testing.T) {
 	store, err := db1.Open(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {

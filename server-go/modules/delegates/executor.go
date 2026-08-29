@@ -27,7 +27,7 @@ const maxExecutorDiagnostic = 1024
 
 const (
 	watchdogArgument = "__aimee_delegate_watchdog"
-	watchdogArgvEnv  = "AIMEE_DELEGATE_WATCHDOG_ARGV"
+	watchdogArgvFD   = 4
 )
 
 type Executor interface {
@@ -507,7 +507,7 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 		if !request.Tools {
 			return nil, errors.New("agy CLI cannot guarantee a tools-disabled invocation")
 		}
-		argv = append(argv, "-p", prompt, "--output-format", "stream-json",
+		argv = append(argv, "--input-format", "stream-json", "--output-format", "stream-json",
 			"--disable-slash-commands", "--mode", "plan", "--sandbox",
 			"--dangerously-skip-permissions")
 		if agent.Model != "" {
@@ -883,8 +883,13 @@ func RunWatchdog(args []string) (bool, int) {
 	if len(args) != 2 || args[1] != watchdogArgument {
 		return false, 0
 	}
+	arguments := os.NewFile(watchdogArgvFD, "delegate-watchdog-argv")
+	if arguments == nil {
+		return true, 125
+	}
+	defer arguments.Close()
 	var argv []string
-	if json.Unmarshal([]byte(os.Getenv(watchdogArgvEnv)), &argv) != nil || len(argv) == 0 {
+	if json.NewDecoder(arguments).Decode(&argv) != nil || len(argv) == 0 {
 		return true, 125
 	}
 	control := os.NewFile(3, "delegate-producer-lifecycle")
@@ -970,20 +975,36 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 	if err != nil {
 		return nil, nil, err
 	}
-	encoded, err := json.Marshal(argv)
+	arguments, err := os.CreateTemp("", "aimee-delegate-argv-")
 	if err != nil {
 		_ = controlRead.Close()
 		_ = controlWrite.Close()
 		return nil, nil, err
 	}
+	argumentPath := arguments.Name()
+	if err := json.NewEncoder(arguments).Encode(argv); err != nil {
+		_ = arguments.Close()
+		_ = os.Remove(argumentPath)
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		return nil, nil, err
+	}
+	if _, err := arguments.Seek(0, io.SeekStart); err != nil {
+		_ = arguments.Close()
+		_ = os.Remove(argumentPath)
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		return nil, nil, err
+	}
+	_ = os.Remove(argumentPath)
 	cmd := exec.CommandContext(ctx, executable, watchdogArgument)
-	cmd.Env = append(os.Environ(), watchdogArgvEnv+"="+string(encoded))
-	cmd.ExtraFiles = []*os.File{controlRead}
+	cmd.ExtraFiles = []*os.File{controlRead, arguments}
 	var closeOnce sync.Once
 	closeControl := func() {
 		closeOnce.Do(func() {
 			_ = controlWrite.Close()
 			_ = controlRead.Close()
+			_ = arguments.Close()
 		})
 	}
 	cmd.Cancel = func() error {
@@ -1139,7 +1160,10 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "acp") {
 		return r.executeACP(ctx, runCancel, closeCommand, cmd, agent, request, prompt)
 	}
-	if !strings.EqualFold(strings.TrimSpace(agent.CLIKind), "agy") {
+	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "agy") {
+		input, _ := json.Marshal(map[string]string{"event": "user", "message": prompt})
+		cmd.Stdin = bytes.NewReader(append(input, '\n'))
+	} else {
 		cmd.Stdin = strings.NewReader(prompt)
 	}
 	output := &limitedBuffer{remaining: maxExecutorOutput}

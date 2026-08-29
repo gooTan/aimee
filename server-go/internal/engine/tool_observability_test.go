@@ -9,11 +9,23 @@ import (
 
 	delegateapi "github.com/JBailes/aimee/server-go/delegate"
 	"github.com/JBailes/aimee/server-go/internal/db1"
+	"github.com/JBailes/aimee/server-go/internal/wfe"
 )
 
 type toolTestAgents struct {
 	events []delegateapi.ToolEvent
 	agent  string
+}
+
+type blockingVerifier struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (v blockingVerifier) Verify(context.Context, string) error {
+	close(v.started)
+	<-v.release
+	return nil
 }
 
 func (a toolTestAgents) Delegate(context.Context, DelegateRequest) (DelegateResult, error) {
@@ -82,6 +94,43 @@ func TestObservableAgentsPersistsToolEventsWithSafeDetail(t *testing.T) {
 	}
 	if startedIdx > completedIdx {
 		t.Fatal("started should precede completed")
+	}
+}
+
+func TestVerifierLifecycleRemainsVisibleWhileRunning(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_verify_obs", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	verifier := blockingVerifier{started: make(chan struct{}), release: make(chan struct{})}
+	runner := NativeRunner{db: store, verifier: verifier, verifierHeartbeatEvery: time.Millisecond}
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.verify(t.Context(), StepRequest{WorkItem: db1.WorkItem{ID: "wi_verify_obs"},
+			Node: wfe.Node{ID: "impl"}}, t.TempDir())
+	}()
+	<-verifier.started
+	time.Sleep(5 * time.Millisecond)
+	close(verifier.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.Events(t.Context(), "wi_verify_obs", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var start, heartbeat, complete bool
+	for _, event := range events {
+		start = start || event.Kind == "verify_start" && event.Actor == "verifier"
+		heartbeat = heartbeat || event.Kind == "verify_heartbeat" && strings.Contains(event.Detail, "status=running")
+		complete = complete || event.Kind == "verify_complete" && strings.Contains(event.Detail, "status=complete")
+	}
+	if !start || !heartbeat || !complete {
+		t.Fatalf("verifier lifecycle missing: %+v", events)
 	}
 }
 

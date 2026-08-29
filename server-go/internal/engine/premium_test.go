@@ -122,6 +122,7 @@ func TestAdmitPremiumPlanningLedgerOnlyCountsDraft(t *testing.T) {
 		for _, req := range []DelegateRequest{
 			{Delegate: "fable", Role: "review", Persona: "reviewer"},
 			{Delegate: "sol", Role: "review", Persona: "qa"},
+			{Delegate: "sol", Role: "review", Persona: "reviewer", Tools: true},
 			{Delegate: "fable", Role: "analysis"},
 			{Delegate: "sol", Role: "explain"},
 			{Delegate: "claude:claude-fable-5", Role: "review"},

@@ -959,8 +959,14 @@ func delegatePartialIsNoChange(response string) bool {
 // already satisfies the packet; mechanical verification still runs before the
 // unchanged HEAD can advance. Other partial no-change results remain failures.
 func implementationPartialIsSatisfiedNoChange(response string) bool {
-	return delegatePartialIsNoChange(response) &&
-		strings.Contains(strings.ToLower(response), "task already complete")
+	normalized := strings.ToLower(response)
+	complete := strings.Contains(normalized, "task already complete") ||
+		strings.Contains(normalized, "already satisfies task") ||
+		strings.Contains(normalized, "already fully satisfies the task")
+	unchanged := delegatePartialIsNoChange(response) ||
+		strings.Contains(normalized, "no changes made") ||
+		strings.Contains(normalized, "left the worktree unchanged")
+	return complete && unchanged
 }
 
 func retryDetailForPrompt(detail string) string {

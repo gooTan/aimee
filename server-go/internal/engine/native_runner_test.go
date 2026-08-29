@@ -80,6 +80,25 @@ func TestDefaultVerifyCommandUsesGitVerifyKeyValueSyntax(t *testing.T) {
 	}
 }
 
+func TestImplementationSatisfiedNoChangeAcceptsPromptContract(t *testing.T) {
+	for _, response := range []string{
+		"Worktree already satisfies task — no changes made.",
+		"The current branch already fully satisfies the task; I left the worktree unchanged.",
+	} {
+		if !implementationPartialIsSatisfiedNoChange(response) {
+			t.Fatalf("valid satisfied no-op was rejected: %q", response)
+		}
+	}
+	for _, response := range []string{
+		"No changes made because I could not find the requested file.",
+		"Task already complete, but I also modified a generated file.",
+	} {
+		if implementationPartialIsSatisfiedNoChange(response) {
+			t.Fatalf("ambiguous no-op was accepted: %q", response)
+		}
+	}
+}
+
 func TestRequiredCodeReviewSkillParksWhenUnavailable(t *testing.T) {
 	t.Setenv("AIMEE_HOME", "")
 	runner := &NativeRunner{}

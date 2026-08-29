@@ -5,7 +5,7 @@
     "repository": "https://github.com/gooTan/aimee-core-c.git",
     "ref": "v0.3.3",
     "version": "0.3.3",
-    "commit": "fdd06fca3a12f1a260e7c7361791fc69803f0067",
+    "commit": "3157363221ba5ab8347883f6a02a977e8ec72fdb",
     "source_sha256": "19ad200885312755f3c75e0369c1f88e2faa9b4fca6ebd0185e25c0037652de4"
   },
   "modules": [
@@ -15,7 +15,7 @@
       "repository": "https://github.com/gooTan/aimee-module-module-runtime.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "6254e5fc3aabe392ba7f9e2f95e79eab7e6e7e74",
+      "commit": "ce81f41bbe757e0e53f82cd686f5eb40a2100c04",
       "execution": "core",
       "placements": [
         "server",
@@ -29,7 +29,7 @@
       "repository": "https://github.com/gooTan/aimee-module-config.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "6ef6db3da282f3cc77c592d7bdb45728fcf976a6",
+      "commit": "40edb42687a3ac4f63d27244401ab232eb478bab",
       "execution": "core",
       "placements": [
         "server",
@@ -43,7 +43,7 @@
       "repository": "https://github.com/gooTan/aimee-module-ir.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "78e06ed914d55c1b14ef0c9d07bf2f11d2a395c8",
+      "commit": "048ef59c3e2701846b61ea602feb78e735146437",
       "execution": "core",
       "placements": [
         "server",
@@ -57,7 +57,7 @@
       "repository": "https://github.com/gooTan/aimee-module-translation.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "8a14c82980554496ee5daaf8aed95849eb24dc73",
+      "commit": "19987a913ffb31df378286865eda80a94761a7c0",
       "execution": "core",
       "placements": [
         "server",
@@ -71,7 +71,7 @@
       "repository": "https://github.com/gooTan/aimee-module-protocols.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "92099aa980695e0d60e9dd16b62a7e62176264b3",
+      "commit": "41e65ddd488b4a21f03f9add341899061a787eb3",
       "execution": "core",
       "placements": [
         "server",
@@ -85,7 +85,7 @@
       "repository": "https://github.com/gooTan/aimee-module-gateway.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "f5b41d7ee5aa061ad0b603801890edc338273431",
+      "commit": "ec75593675b427e116eac470a53a38f937083e58",
       "execution": "core",
       "placements": [
         "server",
@@ -99,7 +99,7 @@
       "repository": "https://github.com/gooTan/aimee-module-memory.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "897ed37a1b669cc3d6842f390284df2557117a21",
+      "commit": "cc301f8446f365e52f09c7de4ca4ff1ebe6dd8b1",
       "execution": "process",
       "placements": [
         "server"
@@ -123,7 +123,7 @@
       "repository": "https://github.com/gooTan/aimee-module-learning.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "167c4a47f51bea817f99626b13b8c16f42b945b4",
+      "commit": "9a3b43aaaf89a855d052fb37f168b5f3d9a4dd3a",
       "execution": "process",
       "placements": [
         "server"
@@ -142,7 +142,7 @@
       "repository": "https://github.com/gooTan/aimee-module-routing.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "bbbb560358cc8e07267af79e0bed73c3b1b47de9",
+      "commit": "f309515bc68cedf60f7bb6ccc52c912858731a9e",
       "execution": "process",
       "placements": [
         "server"
@@ -161,7 +161,7 @@
       "repository": "https://github.com/gooTan/aimee-module-delegates.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "dbf95a90ce8842eb6edbf64d0808416111cffe9e",
+      "commit": "2e9a3092b8a7fae9279c5823833345c36dc06f3f",
       "execution": "process",
       "placements": [
         "server"
@@ -201,7 +201,7 @@
       "repository": "https://github.com/gooTan/aimee-module-tools.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "98d00b202fe51bc0ae2212ba9ad1fded24ca86ea",
+      "commit": "69cff73ec46667c0126bb4621b5b03b4fce47db7",
       "execution": "process",
       "placements": [
         "server"
@@ -220,7 +220,7 @@
       "repository": "https://github.com/gooTan/aimee-module-workspace.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "a5e09d9a69753abe0579aa3c532991815026aadf",
+      "commit": "2fd962060da8b5ffbe5c9cec3c160b856b75cf0e",
       "execution": "process",
       "placements": [
         "server"
@@ -241,7 +241,7 @@
       "repository": "https://github.com/gooTan/aimee-module-git.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "2665952f89795d7295750e47a96c7092a7db2282",
+      "commit": "22738d57673d33f389c8372acd12d909a797ebb3",
       "execution": "process",
       "placements": [
         "server"
@@ -265,7 +265,7 @@
       "repository": "https://github.com/gooTan/aimee-module-skills.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "07365c4f133a55d97deb2e12cf38f01c57bb9053",
+      "commit": "302495edc41d305318618b74ca5276b618bcac5d",
       "execution": "process",
       "placements": [
         "server"
@@ -285,7 +285,7 @@
       "repository": "https://github.com/gooTan/aimee-module-response-composition.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "9aa598ebb0a82144f8d9ddb5b89ba8fc3280ccb0",
+      "commit": "af595af94f8f2d91dec978e0f6c13d16b53d5a02",
       "execution": "process",
       "placements": [
         "server"
@@ -304,7 +304,7 @@
       "repository": "https://github.com/gooTan/aimee-module-vault.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "724f092f57c2e480caff6d6ddbcac0718c96ba28",
+      "commit": "f14183d053d552ab1da8da0b9d37627f60eed1a7",
       "execution": "core",
       "placements": [
         "server",
@@ -318,7 +318,7 @@
       "repository": "https://github.com/gooTan/aimee-module-execution-policy.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "ef20f5183896f91828378c92d4026cd8e1cb7898",
+      "commit": "2f10d3c54e10401cd29aeeab6b7017404586eebe",
       "execution": "core",
       "placements": [
         "server",
@@ -332,7 +332,7 @@
       "repository": "https://github.com/gooTan/aimee-module-audit.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "7fe1e15ee0771798b52f192a06230d2d33b8064b",
+      "commit": "d3c7cca4cfdca74b16ac9d086d910f15a14f060b",
       "execution": "core",
       "placements": [
         "server",
@@ -346,7 +346,7 @@
       "repository": "https://github.com/gooTan/aimee-module-governance.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "f5377ed98dcc9d614aa0117c0f024e0a5639d423",
+      "commit": "63284e6b00bd6310f025aac8824b098f43a129ad",
       "execution": "process",
       "placements": [
         "server"
@@ -365,7 +365,7 @@
       "repository": "https://github.com/gooTan/aimee-module-workflows.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "6877d7f3c979234a085b10d66ced98a0e133a326",
+      "commit": "208daff760d49ab15535b895304454c58bbf78e9",
       "execution": "process",
       "placements": [
         "server"
@@ -387,12 +387,12 @@
       "repository": "https://github.com/gooTan/aimee-module-roundtable.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "02063f10cf90c370f9f77abc22a2de1040f433d4",
+      "commit": "52e8557198645f68157177107857d237dde236a2",
       "execution": "process",
       "placements": [
         "server"
       ],
-      "source_sha256": "d48ba6d654928a1ed67a42dc8cd31040a1b5247be28ce02b220f0cee15ddcb8e",
+      "source_sha256": "a8730821a02898904b066ad9d7ffc8ffbd982e4b6953beee036717c80d2eee41",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 21,
@@ -408,7 +408,7 @@
       "repository": "https://github.com/gooTan/aimee-module-kb-synthesis.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "ca00500f98e9e2b3005b0073edfddd1aca9f9e11",
+      "commit": "b09cfea83fe47b2c05ac5d3bcba6e107d5fb8ef1",
       "execution": "process",
       "placements": [
         "kb"
@@ -427,7 +427,7 @@
       "repository": "https://github.com/gooTan/aimee-module-runtime-web.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "fda30e8785d443ed9ef5285783ce0964fb4f4518",
+      "commit": "e072b49e1643b51e51464de1cc327218d484d390",
       "execution": "process",
       "placements": [
         "server"
@@ -446,7 +446,7 @@
       "repository": "https://github.com/gooTan/aimee-module-control-web.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "16664a99e96281493410e4a00ed74787f6e83efc",
+      "commit": "6b8affcf753b74c527fc6b096f98a48578821a9f",
       "execution": "process",
       "placements": [
         "kb"
@@ -465,7 +465,7 @@
       "repository": "https://github.com/gooTan/aimee-module-benchmarks.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "47a28fcd0b4bf043b37be950270ed9ce3f33c55c",
+      "commit": "f8ab7bc16f79c8aee8f21c2ea24b8f9fac7dc554",
       "execution": "process",
       "placements": [
         "server",
@@ -486,7 +486,7 @@
       "repository": "https://github.com/gooTan/aimee-module-sandbox.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "20fff035fe8e0ee40a0361f9e9d57dc82cbb21e4",
+      "commit": "47fe5e2e02da83b6b63405c9b1817ba244128170",
       "execution": "process",
       "placements": [
         "server"
@@ -508,7 +508,7 @@
       "repository": "https://github.com/gooTan/aimee-module-economizer.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "01418452f26a9a9728adb54f1049106f65e66053",
+      "commit": "0c6482d6802716e01efae3f0de6eba097838527f",
       "execution": "process",
       "placements": [
         "server"

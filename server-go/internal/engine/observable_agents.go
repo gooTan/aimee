@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	modelHeartbeatInterval  = 15 * time.Second
-	modelActivityStaleAfter = 2 * time.Minute
+	modelHeartbeatInterval = 15 * time.Second
 )
 
 const maxObservableDiagnosticBytes = 1024
@@ -156,7 +155,7 @@ func (o observableAgents) observe(request DelegateRequest) func(string, string, 
 				}
 				staleAfter := o.activityStaleAfter
 				if staleAfter <= 0 {
-					staleAfter = modelActivityStaleAfter
+					staleAfter = delegateapi.ModelActivityStaleAfter
 				}
 				if activityAge >= staleAfter {
 					status = "possibly_stalled"

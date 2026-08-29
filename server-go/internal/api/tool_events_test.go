@@ -36,6 +36,36 @@ func TestInternalModelEventsAcceptsToolKinds(t *testing.T) {
 	}
 }
 
+func TestInternalRoundtableHeartbeatIncludesLatestSeatActivity(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_heartbeat", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	identity := "model=sol role=review persona=qa phase=analysis invocation=turn-9"
+	for _, body := range []string{
+		`{"work_item_id":"wi_heartbeat","stage":"gate","kind":"model_progress","actor":"sol","detail":"` + identity + ` status=response_streaming"}`,
+		`{"work_item_id":"wi_heartbeat","stage":"gate","kind":"model_heartbeat","actor":"sol","detail":"` + identity + ` tools=true status=running elapsed=15s"}`,
+		`{"work_item_id":"wi_heartbeat","stage":"gate","kind":"model_heartbeat","actor":"opus","detail":"model=opus role=review persona=qa phase=analysis invocation=turn-9 tools=true status=running elapsed=2m0s"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("heartbeat status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	events, err := store.Events(t.Context(), "wi_heartbeat", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(events[2].Detail, "status=running") || !strings.Contains(events[2].Detail, "activity=model_progress") || !strings.Contains(events[2].Detail, "last_activity=") {
+		t.Fatalf("active heartbeat=%q", events[2].Detail)
+	}
+	if !strings.Contains(events[3].Detail, "status=possibly_stalled") || !strings.Contains(events[3].Detail, "activity=model_dispatch") {
+		t.Fatalf("stalled heartbeat=%q", events[3].Detail)
+	}
+}
+
 func TestInternalModelEventsRejectsRawPayload(t *testing.T) {
 	server, _, _ := newTestServer(t)
 	// Detail must not contain raw tool args — but the endpoint enforces only

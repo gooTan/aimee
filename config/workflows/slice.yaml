@@ -13,6 +13,7 @@ nodes:
     block: understand
     params:
       with_user: false
+      delegate: luna
     next: impl
     on_fail: scope
   # Implement the packet on the slice branch.
@@ -37,14 +38,12 @@ nodes:
     in:
       src: freeze.out
     params:
-      roundtable: default
+      roundtable: implementation
       panel:
         required:
-          - security
-          - architect
-          - qa
           - reviewer
-      quorum: 4
+          - qa
+      quorum: 2
       max_rounds: 6
     on_pass: pr
     on_fail: impl

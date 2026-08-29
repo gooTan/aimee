@@ -116,9 +116,12 @@ terminal state. They must not silently complete or fall back to C.
 
 ## Operational diagnostics
 
-Start with `workflow status <id>` and record the pinned version, node, state, park reason, attempt,
-cost, repository, and provider readiness. Use C logs only when the failing action names the resource
-plane, socket proxy, or forge boundary.
+Start with `workflow status <id> --watch`. It follows state and stage changes plus safe model
+dispatch, heartbeat, completion, typed availability failure, and fallback events for the run and
+its slice descendants; each event names its work-item ID. Use
+`workflow status <id> --events` for the current event history. Heartbeats show that a model call is
+still live; they do not expose prompt bodies, responses, tool arguments, or hidden reasoning. Use C
+logs only when the failing action names the resource plane, socket proxy, or forge boundary.
 
 Do not report prompt bodies, credentials, approval material, or raw provider output.
 

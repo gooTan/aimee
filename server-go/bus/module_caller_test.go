@@ -13,13 +13,14 @@ import (
 // sent and answers with whatever the test scripts, so the invoke framing,
 // correlation and reassembly are exercised without a live host.
 type fakeCallerBus struct {
-	mu          sync.Mutex
-	sent        []Event
-	pending     []Event
-	cancelled   []uint64
-	budget      uint32
-	replyTo     func(f *fakeCallerBus, kind uint32, correlation uint64, body []byte)
-	requestFail error
+	mu            sync.Mutex
+	sent          []Event
+	pending       []Event
+	cancelled     []uint64
+	budget        uint32
+	replyTo       func(f *fakeCallerBus, kind uint32, correlation uint64, body []byte)
+	requestFail   error
+	requestBlocks int
 }
 
 func (f *fakeCallerBus) Poll() (Event, bool, error) {
@@ -34,6 +35,13 @@ func (f *fakeCallerBus) Poll() (Event, bool, error) {
 }
 
 func (f *fakeCallerBus) RequestFragment(kind uint32, correlation uint64, payload []byte, more bool) error {
+	f.mu.Lock()
+	if f.requestBlocks > 0 {
+		f.requestBlocks--
+		f.mu.Unlock()
+		return ErrWouldBlock
+	}
+	f.mu.Unlock()
 	if f.requestFail != nil {
 		return f.requestFail
 	}
@@ -64,6 +72,25 @@ func (f *fakeCallerBus) RequestFragment(kind uint32, correlation uint64, payload
 		f.replyTo(f, kind, correlation, assembled)
 	}
 	return nil
+}
+
+func TestModuleCallerRetriesBackpressureWithoutDuplicatingFrames(t *testing.T) {
+	fake := echoingBus(128)
+	fake.requestBlocks = 3
+	body := []byte(strings.Repeat("roundtable artifact ", 20))
+	got, err := newModuleCaller(fake).Call(t.Context(), 9474, 2, 77, time.Second, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("round trip changed body: got %d bytes, want %d", len(got), len(body))
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	wantFrames := (len(body) + int(fake.budget) - ModuleMessageHeaderLen - 1) / (int(fake.budget) - ModuleMessageHeaderLen)
+	if len(fake.sent) != wantFrames {
+		t.Fatalf("sent %d frames after backpressure, want %d", len(fake.sent), wantFrames)
+	}
 }
 
 func (f *fakeCallerBus) Cancel(kind uint32, correlation uint64) error {

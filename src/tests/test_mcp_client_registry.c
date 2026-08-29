@@ -905,6 +905,17 @@ static int schema_requires(cJSON *tool, const char *name)
    return 0;
 }
 
+static void test_memory_recall_is_read_only(void)
+{
+   cJSON *tools = mcp_build_tools_list();
+   cJSON *recall = tools_get(tools, "memory_recall");
+   assert(recall != NULL);
+   cJSON *annotations = cJSON_GetObjectItemCaseSensitive(recall, "annotations");
+   assert(cJSON_IsObject(annotations));
+   assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(annotations, "readOnlyHint")));
+   cJSON_Delete(tools);
+}
+
 /* E1 contract: the words installed guidance gives an agent must map to a direct
  * lean tool, and every code-navigation schema must admit active-project defaults
  * plus an explicit cross-project escape hatch. */
@@ -1197,6 +1208,7 @@ int main(void)
    test_tool_profile_filter();
    test_call_tool_demux();
    test_get_help_topics_exist();
+   test_memory_recall_is_read_only();
    test_solo_profile_is_gone();
    test_delegates_disabled_withholds_delegate_tools();
    test_agent_code_intelligence_contracts();

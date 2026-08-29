@@ -27,9 +27,8 @@ static wfe_custom_block_t g_blocks[WFE_CUSTOM_MAX];
 static int g_count = 0;
 static int g_loaded = 0;
 static int g_allow_command = 0;
-/* Wall-clock cap for a command block (ms). Default ~120s per the proposal's
- * operational contract; overridable via blocks.yaml `command_timeout_ms`. */
-#define WFE_CUSTOM_COMMAND_TIMEOUT_MS_DEFAULT 120000
+/* Explicit command bounds remain supported; zero means unbounded. */
+#define WFE_CUSTOM_COMMAND_TIMEOUT_MS_DEFAULT 0
 static int g_command_timeout_ms = WFE_CUSTOM_COMMAND_TIMEOUT_MS_DEFAULT;
 
 static wfe_artifact_type_t artifact_from_name(const char *s)

@@ -125,11 +125,9 @@ static void test_delegate_effective_timeout(void)
    /* No request timeout: fall back to the agent's configured timeout. */
    assert(delegate_effective_timeout_ms(0, 180000) == 180000);
    assert(delegate_effective_timeout_ms(-1, 120000) == 120000);
-   /* THE BUG: neither request nor agent configures a timeout (agents with no
-    * timeout_ms zero-init to 0). Must resolve to the default ceiling, NEVER 0. */
-   assert(delegate_effective_timeout_ms(0, 0) == AGENT_DEFAULT_TIMEOUT_MS);
-   assert(delegate_effective_timeout_ms(-1, -1) == AGENT_DEFAULT_TIMEOUT_MS);
-   assert(delegate_effective_timeout_ms(0, 0) > 0);
+   /* No configured deadline is unbounded. */
+   assert(delegate_effective_timeout_ms(0, 0) == 0);
+   assert(delegate_effective_timeout_ms(-1, -1) == 0);
 
    /* A workflow stage cap may only shorten the whole four-call loop. It must
     * preserve a smaller configured budget and saturate multiplication rather
@@ -360,8 +358,8 @@ static void test_reasoning_timeout_default(void)
    agent_t *plain = agent_find(&cfg, "plain");
    agent_t *pinned = agent_find(&cfg, "pinned");
    assert(rsn && plain && pinned);
-   assert(rsn->timeout_ms == AGENT_REASONING_TIMEOUT_MS);
-   assert(plain->timeout_ms == AGENT_DEFAULT_TIMEOUT_MS);
+   assert(rsn->timeout_ms == 0);
+   assert(plain->timeout_ms == 0);
    assert(pinned->timeout_ms == 5000);
    printf("  PASS: test_reasoning_timeout_default\n");
 }

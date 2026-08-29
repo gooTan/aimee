@@ -51,7 +51,7 @@ func (e *planningExecutor) PlanGroup(_ context.Context,
 
 func (blockingExecutor) Execute(ctx context.Context, _ delegatecontract.Invocation) delegatecontract.InvocationResult {
 	<-ctx.Done()
-	return delegatecontract.InvocationResult{Version: 2, Status: "failed", Error: ctx.Err().Error()}
+	return delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed", Error: ctx.Err().Error()}
 }
 
 func (e *fixedExecutor) Execute(_ context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
@@ -60,8 +60,8 @@ func (e *fixedExecutor) Execute(_ context.Context, request delegatecontract.Invo
 }
 
 func TestExecutionStageCanonicalizesRoleAndReturnsTerminalStatus(t *testing.T) {
-	executor := &fixedExecutor{result: delegatecontract.InvocationResult{Version: 2, Status: "done", Response: "complete"}}
-	request, _ := json.Marshal(delegatecontract.Invocation{Version: 2, Role: "implement", Persona: "engineer", Prompt: "do it"})
+	executor := &fixedExecutor{result: delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "done", Response: "complete"}}
+	request, _ := json.Marshal(delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "implement", Persona: "engineer", Prompt: "do it"})
 	reply, status := NewHandler(executor)(bus.ModuleInvocation{StageID: StageInvoke}, request)
 	if status != bus.ModuleStatusOK {
 		t.Fatalf("status = %d", status)
@@ -76,7 +76,7 @@ func TestExecutionStageCanonicalizesRoleAndReturnsTerminalStatus(t *testing.T) {
 }
 
 func TestExecutionStageAppliesProducerDeadline(t *testing.T) {
-	request, _ := json.Marshal(delegatecontract.Invocation{Version: 2, Role: "review",
+	request, _ := json.Marshal(delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "review",
 		Persona: "reviewer", Prompt: "inspect", ExecutionTimeoutMS: 20})
 	started := time.Now()
 	reply, status := NewHandler(blockingExecutor{})(bus.ModuleInvocation{StageID: StageInvoke}, request)
@@ -155,10 +155,58 @@ func TestRegistryExecutorRunsArgvWithoutShell(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: 2, Role: "code",
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
 		Persona: "security", Prompt: "inspect", Workdir: workdir, Tools: true})
 	if result.Status != "done" || !strings.Contains(result.Response, "You are acting as security.") {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRegistryExecutorLoadsCanonicalModelsKey(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "delegate-helper")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nread prompt\nprintf 'answer:%s' \"$prompt\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{"default_agent": "helper", "models": []map[string]any{{
+		"name": "helper", "model": "test", "cli_kind": "generic", "cli_cmd": script, "enabled": true,
+		"roles": []string{"code"},
+	}}}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
+		Persona: "security", Prompt: "inspect", Workdir: workdir, Tools: true})
+	if result.Status != "done" || !strings.Contains(result.Response, "You are acting as security.") {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRegistryExecutorRejectsMixedRegistryKeys(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "delegate-helper")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := map[string]any{
+		"agents": []map[string]any{{"name": "helper-a", "cli_kind": "generic", "cli_cmd": script, "roles": []string{"code"}}},
+		"models": []map[string]any{{"name": "helper-b", "cli_kind": "generic", "cli_cmd": script, "roles": []string{"code"}}},
+	}
+	body, _ := json.Marshal(registry)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRegistryExecutor(home); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("mixed registry error = %v", err)
 	}
 }
 
@@ -189,7 +237,7 @@ func TestRegistryExecutorEnforcesMaxParallelWithoutPoisoningAgentHealth(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := delegatecontract.Invocation{Version: 2, Role: "code", Persona: "engineer",
+	request := delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code", Persona: "engineer",
 		Prompt: "work", Workdir: workdir, Tools: true}
 	results := make(chan delegatecontract.InvocationResult, 2)
 	for range 2 {
@@ -262,11 +310,213 @@ func TestRegistryExecutorTypesCallerDeadlineAsExecutionDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	result := executor.Execute(ctx, delegatecontract.Invocation{Version: 2, Role: "code",
+	result := executor.Execute(ctx, delegatecontract.Invocation{Version: delegatecontract.WireVersion, Role: "code",
 		Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
-	if result.Status != "failed" || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassStartDeadline || result.ResponseStarted || !delegatecontract.IsExecutionDeadline(errors.New(result.Error)) ||
 		delegatecontract.IsCapacityDeadline(errors.New(result.Error)) {
 		t.Fatalf("caller deadline was not typed as an execution deadline: %+v", result)
+	}
+}
+
+func TestRegistryExecutorDoesNotClassifyFailureAfterResponseBegins(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "partial-delegate")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf partial-output\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "helper", "cli_kind": "generic", "cli_cmd": script, "roles": []string{"code"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "code", Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassNone || !result.ResponseStarted {
+		t.Fatalf("partial response was classified as unavailable: %+v", result)
+	}
+}
+
+func TestRegistryExecutorClassifiesClaudeRateLimitPreambleBeforeResponse(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "limited-claude")
+	body := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}' '{\"type\":\"rate_limit_event\"}' '{\"type\":\"assistant\",\"is_api_error_message\":true}' '{\"type\":\"result\",\"result\":\"You have hit your session limit\"}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "fable", "cli_kind": "claude", "cli_cmd": script, "roles": []string{"draft"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "draft", Persona: "architect", Prompt: "plan", Workdir: workdir})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassQuotaRateLimit || result.ResponseStarted {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestRegistryExecutorReadOnlyCodexRequiresWorkdir(t *testing.T) {
+	home := t.TempDir()
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "scout", "cli_kind": "codex", "cli_cmd": "codex", "roles": []string{"search"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "search", Persona: "architect", Prompt: "scout", Tools: true})
+	if result.Status != "failed" || result.Error != "read-only codex delegate requires an isolated checkout" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestRegistryExecutorRejectsClaudeLoginExpiredExitZero(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "expired-claude")
+	body := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Login expired · Please run /login\"}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "opus", "cli_kind": "claude", "cli_cmd": script, "roles": []string{"code"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "code", Persona: "engineer", Prompt: "work", Workdir: workdir, Tools: true})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassAuthenticationSession || result.ResponseStarted || result.Error != "Login expired · Please run /login" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestRegistryExecutorClassifiesAgyZeroFinalBeforeResponse(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "agy")
+	body := "#!/bin/sh\nprintf '%s\n' " + `'{"event":"error","message":"provider not configured before response"}'` + "\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "antigravity", "cli_kind": "agy", "cli_cmd": script, "roles": []string{"review"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "review", Persona: "qa", Prompt: "inspect", Tools: true, Workdir: workdir})
+	if result.Status != "failed" || result.AvailabilityClass != delegatecontract.AvailabilityClassProviderCLIUnavailable || result.ResponseStarted || strings.TrimSpace(result.Error) == "" {
+		t.Fatalf("agy zero-final failure was not typed and observable: %+v", result)
+	}
+}
+
+func TestRegistryExecutorReadOnlyCodexRunsInReadOnlyExternalSandbox(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexHome := filepath.Join(home, "codex-home")
+	if err := os.MkdirAll(filepath.Join(codexHome, "plugins"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(codexHome, "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"auth.json", "config.toml", "hooks.json"} {
+		if err := os.WriteFile(filepath.Join(codexHome, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bwrap := filepath.Join(home, "bwrap")
+	log := filepath.Join(home, "bwrap.args")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > '" + log + "'\n" +
+		"printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"scouted\"}}'\n"
+	if err := os.WriteFile(bwrap, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "scout", "cli_kind": "codex", "cli_cmd": "codex", "roles": []string{"search"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", home+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_HOME", codexHome)
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "search", Persona: "architect", Prompt: "scout", Tools: true, Workdir: workdir})
+	if result.Status != "done" || result.Response != "scouted" {
+		t.Fatalf("result = %+v", result)
+	}
+	argsBytes, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(argsBytes)
+	for _, want := range []string{"--ro-bind\n/\n/\n", "--tmpfs\n/tmp\n", "--setenv\nCODEX_HOME\n", "--chdir\n" + workdir + "\n", "--\ncodex\n"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("sandbox args missing %q:\n%s", want, args)
+		}
+	}
+	for _, want := range []string{"approval_policy=\"on-request\"", "approvals_reviewer=\"auto_review\"", "sandbox_mode=\"read-only\"", "default_tools_approval_mode=\"approve\""} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("codex args missing %q:\n%s", want, args)
+		}
+	}
+	if strings.Contains(args, "sandbox_mode=\"workspace-write\"") || strings.Contains(args, "approval_policy=\"never\"") {
+		t.Fatalf("read-only scout used unsafe codex policy:\n%s", args)
+	}
+}
+
+func TestProviderAvailabilityDoesNotTreatLocalDiskQuotaAsProviderQuota(t *testing.T) {
+	if got := delegatecontract.ClassifyProviderAvailability(errors.New("write /tmp/cache: Disk quota exceeded"), false); got != delegatecontract.AvailabilityClassNone {
+		t.Fatalf("local disk quota class=%q, want none", got)
+	}
+	if got := delegatecontract.ClassifyProviderAvailability(errors.New("provider quota exceeded"), false); got != delegatecontract.AvailabilityClassQuotaRateLimit {
+		t.Fatalf("provider quota class=%q, want quota_rate_limit", got)
 	}
 }
 
@@ -466,17 +716,174 @@ func TestRegistryRejectsNegativeMaxParallel(t *testing.T) {
 	}
 }
 
-func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
-	_, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
-		delegatecontract.Invocation{Role: "review", Tools: false})
-	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
-		t.Fatalf("codex tools-disabled error = %v", err)
+func TestRegistryRejectsMissingCLIKind(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(
+		`{"models":[{"name":"bad","backend":"tmux-cli","cli_cmd":"claude","roles":["code"]}]}`),
+		0o600); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := NewRegistryExecutor(home); err == nil || !strings.Contains(err.Error(), "cli_kind") {
+		t.Fatalf("missing cli_kind error = %v", err)
+	}
+}
+
+func TestExecutorArgvUsesRoleScopedCodexApprovalBoundary(t *testing.T) {
+	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
+	if err != nil {
+		t.Fatalf("codex read-only review argv = %q, %v", argv, err)
+	}
+	wants := []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
+		`sandbox_mode="read-only"`,
+		`plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`}
+	for _, want := range wants {
+		idx := slices.Index(argv, want)
+		if idx < 1 || argv[idx-1] != "-c" {
+			t.Fatalf("codex read-only review argv missing -c for %q: %q", want, argv)
+		}
+	}
+
+	argv, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+		delegatecontract.Invocation{Role: "code", Tools: true}, "prompt")
+	if err != nil {
+		t.Fatalf("codex write argv = %q, %v", argv, err)
+	}
+	if slices.Contains(argv, "--approve-for-me") || slices.Contains(argv, "--sandbox") {
+		t.Fatalf("codex write argv contains conflicting approval/sandbox flag: %q", argv)
+	}
+	wants = []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
+		`sandbox_mode="workspace-write"`,
+		`plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`}
+	for _, want := range wants {
+		idx := slices.Index(argv, want)
+		if idx < 1 || argv[idx-1] != "-c" {
+			t.Fatalf("codex write argv missing -c for %q: %q", want, argv)
+		}
+	}
+
+	_, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+		delegatecontract.Invocation{Role: "code", Tools: false}, "prompt")
+	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
+		t.Fatalf("codex write-role tools-disabled error = %v", err)
+	}
+}
+
+func TestExecutorArgvDisablesClaudeTools(t *testing.T) {
 	argv, err := executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
-		delegatecontract.Invocation{Role: "review", Tools: false})
+		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
 	tools := slices.Index(argv, "--tools")
-	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" {
+	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" ||
+		!slices.Contains(argv, "--strict-mcp-config") || slices.Contains(argv, "--mcp-config") {
 		t.Fatalf("claude tools-disabled argv = %q, %v", argv, err)
+	}
+	argv, err = executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
+		delegatecontract.Invocation{Role: "review", Tools: true}, "prompt")
+	mcp := slices.Index(argv, "--mcp-config")
+	if err != nil || mcp < 0 || mcp+1 >= len(argv) || !strings.Contains(argv[mcp+1], `"aimee"`) ||
+		!strings.Contains(argv[mcp+1], `"mcp-serve"`) {
+		t.Fatalf("claude Aimee MCP argv = %q, %v", argv, err)
+	}
+}
+
+func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
+	agent := agentEntry{CLIKind: "agy", CLICmd: "agy", Model: "gemini-test"}
+	argv, err := executorArgv(agent,
+		delegatecontract.Invocation{Role: "review", Tools: true}, "composed prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"agy", "--input-format", "stream-json", "--output-format", "stream-json",
+		"--disable-slash-commands", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions",
+		"--model", "gemini-test"}
+	if !slices.Equal(argv, want) {
+		t.Fatalf("agy argv = %q, want %q", argv, want)
+	}
+	output := []byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"remembered\"}}\n")
+	if got := finalOutput("agy", output); got != "remembered" {
+		t.Fatalf("agy final output = %q", got)
+	}
+	output = []byte("{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"remembered from step\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n")
+	if got := finalOutput("agy", output); got != "remembered from step" {
+		t.Fatalf("agy empty-result fallback = %q", got)
+	}
+	output = []byte("{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"remembered \"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"in parts\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n")
+	if got := finalOutput("agy", output); got != "remembered in parts" {
+		t.Fatalf("agy delta fallback = %q", got)
+	}
+	output = []byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"response\":\"\",\"error\":\"usage limit reached\"}}\n")
+	if got := streamFailureDetail("agy", output); got != "usage limit reached" {
+		t.Fatalf("agy terminal error = %q", got)
+	}
+	if _, err := executorArgv(agent,
+		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt"); err == nil ||
+		!strings.Contains(err.Error(), "tools-disabled") {
+		t.Fatalf("agy tools-disabled error = %v", err)
+	}
+}
+
+func TestAgyReceivesLargePromptOnStdin(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(home, "input.jsonl")
+	script := filepath.Join(home, "agy")
+	body := "#!/bin/sh\ncp /dev/stdin '" + inputPath + "'\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "antigravity", "cli_kind": "agy", "cli_cmd": script, "roles": []string{"review"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Repeat("large roundtable artifact ", 10000)
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "review", Persona: "qa", Prompt: prompt, Tools: true, Workdir: workdir})
+	if result.Status != "done" || result.Response != "ok" {
+		t.Fatalf("result = %+v", result)
+	}
+	input, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(input, &message); err != nil {
+		t.Fatal(err)
+	}
+	wantPrompt := "You are acting as qa.\n\n" + prompt
+	if message.Event != "user" || message.Message.Content != wantPrompt {
+		t.Fatalf("agy stdin changed prompt: event=%q bytes=%d want=%d", message.Event, len(message.Message.Content), len(wantPrompt))
+	}
+}
+
+func TestExecutorCommandTransportsLargeArgvOutsideEnvironment(t *testing.T) {
+	argv := []string{"/bin/true"}
+	for range 1000 {
+		argv = append(argv, strings.Repeat("x", 200))
+	}
+	cmd, closeCommand, err := executorCommand(t.Context(), argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCommand()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("large argv watchdog failed: %v: %s", err, output)
 	}
 }
 
@@ -511,7 +918,7 @@ func TestWatchdogKillsAndReapsDeepProcessTreeWhenProducerDies(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		done <- runWatchdog(controlRead,
-			[]string{"/bin/sh", "-c", `/bin/sh -c 'sleep 30 & child=$!; printf "%s %s %s\n" "$PPID" "$$" "$child"; wait' & wait`},
+			[]string{"/bin/sh", "-c", `/bin/sh -c 'setsid sleep 30 >/dev/null 2>&1 & child=$!; printf "%s %s %s\n" "$PPID" "$$" "$child"; wait' & wait`},
 			strings.NewReader(""), outputWrite, outputWrite)
 	}()
 	var leader, child, grandchild int
@@ -590,5 +997,44 @@ func TestExecutorCancellationTerminatesDelegateProcessGroup(t *testing.T) {
 	}
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("delegate process %d survived module cancellation: %v", pid, err)
+	}
+}
+
+func TestQualifiedSelectorResolvesForGroupAndSingleDelegate(t *testing.T) {
+	enabled := true
+	registry := agentRegistry{Agents: []agentEntry{{
+		Name: "sol", Model: "gpt-5.6-sol", Provider: "chatgpt", CLIKind: "codex", CLICmd: "codex",
+		Enabled: &enabled, Roles: []string{"review"}, Personas: []string{"reviewer"},
+	}}}
+	selected, err := selectAgent(registry, "codex:gpt-5.6-sol", "review", "reviewer")
+	if err != nil {
+		t.Fatalf("selectAgent error = %v", err)
+	}
+	if selected.Name != "sol" {
+		t.Fatalf("selectAgent name = %q, want %q", selected.Name, "sol")
+	}
+	home := t.TempDir()
+	registryPath := filepath.Join(home, "models.json")
+	if err := os.WriteFile(registryPath, []byte(`{"agents":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &RegistryExecutor{
+		path:     registryPath,
+		registry: registry,
+		stamp:    info.ModTime().UnixNano(),
+		limits:   make(map[string]*agentLimiter),
+	}
+	models, err := executor.PlanGroup(t.Context(), []delegatecontract.GroupPlanSeat{
+		{Model: "codex:gpt-5.6-sol", Role: "review", Persona: "reviewer"},
+	})
+	if err != nil {
+		t.Fatalf("PlanGroup error = %v", err)
+	}
+	if !slices.Equal(models, []string{"sol"}) {
+		t.Fatalf("PlanGroup models = %v, want %v", models, []string{"sol"})
 	}
 }

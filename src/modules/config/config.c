@@ -1031,9 +1031,7 @@ static void config_set_defaults(config_t *cfg)
    cfg->ensemble_max_cost_usd = 0.0; /* 0 = no cost cap (unlimited) by default */
    cfg->roundtable_max_rounds = 1;
    cfg->roundtable_converge_threshold = 10;
-   /* Ten-minute default safety bound for a complete roundtable. It remains
-    * overridable via roundtable.deadline_ms in GUI and CLI configuration. */
-   cfg->roundtable_deadline_ms = 600000;
+   cfg->roundtable_deadline_ms = 0; /* unbounded unless explicitly configured */
    snprintf(cfg->roundtable_turns, sizeof(cfg->roundtable_turns), "parallel");
    snprintf(cfg->roundtable_pipeline_done_bar, sizeof(cfg->roundtable_pipeline_done_bar),
             "zero_blocking");

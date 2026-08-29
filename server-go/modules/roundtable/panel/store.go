@@ -9,42 +9,44 @@ import (
 	"strings"
 )
 
-const DefaultDeadlineMS = 600000
-
 // Seat is one convened reviewer. Persona is its review lens; Selector is an
 // operator's positive pin, empty meaning ordinary eligibility routing.
 // Participant and Ordinal are filled in when the panel actually convenes.
 type Seat struct {
 	Persona     string
 	Selector    string
+	Optional    bool `json:"optional"`
 	Participant string
 	Ordinal     int
 }
 
 type Panel struct {
-	Name            string
-	Seats           []Seat
-	MinSuccessful   int
-	Discussion      bool
-	DeadlineMS      int
-	Chairman        string
-	ChairmanEnabled bool
-	Acquired        bool
+	Name             string
+	Seats            []Seat
+	MinSuccessful    int
+	Discussion       bool
+	DeadlineMS       int
+	Chairman         string
+	ChairmanFallback string `json:"chairman_fallback"`
+	ChairmanEnabled  bool
+	Acquired         bool
 }
 
 type presetSeat struct {
 	Selector string `json:"model"`
 	Persona  string `json:"persona"`
+	Optional bool   `json:"optional"`
 }
 
 type preset struct {
-	Name            string       `json:"name"`
-	Seats           []presetSeat `json:"seats"`
-	MinSuccessful   int          `json:"min_successful"`
-	Discussion      bool         `json:"discussion"`
-	DeadlineMS      int          `json:"deadline_ms"`
-	Chairman        string       `json:"chairman"`
-	ChairmanEnabled bool         `json:"chairman_enabled"`
+	Name             string       `json:"name"`
+	Seats            []presetSeat `json:"seats"`
+	MinSuccessful    int          `json:"min_successful"`
+	Discussion       bool         `json:"discussion"`
+	DeadlineMS       int          `json:"deadline_ms"`
+	Chairman         string       `json:"chairman"`
+	ChairmanFallback string       `json:"chairman_fallback"`
+	ChairmanEnabled  bool         `json:"chairman_enabled"`
 }
 
 type Store struct {
@@ -112,26 +114,37 @@ func resolvePreset(p preset, lenses []string, pins map[string]string) (Panel, er
 		if pinned := strings.TrimSpace(pins[persona]); pinned != "" {
 			selector = pinned
 		}
-		seats = append(seats, Seat{Persona: persona, Selector: selector})
+		seats = append(seats, Seat{Persona: persona, Selector: selector, Optional: configured.Optional})
 	}
 	minimum := p.MinSuccessful
 	if minimum <= 0 {
-		minimum = len(seats)
+		for _, seat := range seats {
+			if !seat.Optional {
+				minimum++
+			}
+		}
 	}
-	if minimum > len(seats) {
-		return Panel{}, fmt.Errorf("roundtable %q min_successful %d exceeds its %d seats", p.Name, minimum, len(seats))
+	requiredSeats := 0
+	for _, seat := range seats {
+		if !seat.Optional {
+			requiredSeats++
+		}
+	}
+	if minimum > requiredSeats {
+		return Panel{}, fmt.Errorf("roundtable %q min_successful %d exceeds its %d required seats", p.Name, minimum, requiredSeats)
 	}
 	deadline := p.DeadlineMS
-	if deadline <= 0 {
-		deadline = DefaultDeadlineMS
-	}
 	chairman := strings.TrimSpace(p.Chairman)
+	chairmanFallback := strings.TrimSpace(p.ChairmanFallback)
 	if p.ChairmanEnabled {
 		if chairman == "" {
 			return Panel{}, fmt.Errorf("roundtable %q enables its chairman without selecting an agent", p.Name)
 		}
+		if chairmanFallback == "" {
+			return Panel{}, fmt.Errorf("roundtable %q enables its chairman without selecting a fallback agent", p.Name)
+		}
 	}
-	return Panel{Name: p.Name, Seats: seats, MinSuccessful: minimum, Discussion: p.Discussion, DeadlineMS: deadline, Chairman: chairman, ChairmanEnabled: p.ChairmanEnabled, Acquired: true}, nil
+	return Panel{Name: p.Name, Seats: seats, MinSuccessful: minimum, Discussion: p.Discussion, DeadlineMS: deadline, Chairman: chairman, ChairmanFallback: chairmanFallback, ChairmanEnabled: p.ChairmanEnabled, Acquired: true}, nil
 }
 
 func lensAt(lenses []string, i int) string {

@@ -1,6 +1,8 @@
 package panel
 
-import "context"
+import (
+	"context"
+)
 
 // Run is the identity and budget a review executes under. The panel needs these
 // to key durable delegate slots, bound spend and reach the worktree; it needs
@@ -66,6 +68,11 @@ type SeatRequest struct {
 	Tools bool
 	// MaxTurnsCap bounds a seat without overriding a smaller role or agent cap.
 	MaxTurnsCap int
+	// FallbackFrom and FallbackReason are safe operational metadata set only on
+	// an explicit fallback attempt. The transport may surface the transition;
+	// neither field is included in the model prompt.
+	FallbackFrom   string
+	FallbackReason string
 }
 
 // SeatResult is what a seat returned, or why it did not.
@@ -91,7 +98,36 @@ type SeatResult struct {
 	// ReplayLost marks a seat whose durable result is gone. Retrying cannot fix
 	// that, so the caller must reach reservation recovery rather than park.
 	ReplayLost bool
+	// AvailabilityClass is the transport-owned retry class. It is independent
+	// of FailureCategory and remains empty for replay loss and ordinary failures.
+	AvailabilityClass string
+	// ResponseStarted is transport-owned evidence that a usable response began.
+	// Chairman fallback is only eligible when this is false.
+	ResponseStarted bool
 }
+
+const (
+	AvailabilityClassNone                   = ""
+	AvailabilityClassQuotaRateLimit         = "quota_rate_limit"
+	AvailabilityClassCapacity               = "capacity"
+	AvailabilityClassCapacityDeadline       = "capacity_deadline"
+	AvailabilityClassAuthenticationSession  = "authentication_session"
+	AvailabilityClassProviderCLIUnavailable = "provider_cli_unavailable"
+	AvailabilityClassStartDeadline          = "start_deadline"
+	// Compatibility spellings for older panel callers.
+	AvailabilityClassProviderQuota       = AvailabilityClassQuotaRateLimit
+	AvailabilityClassAuthentication      = AvailabilityClassAuthenticationSession
+	AvailabilityClassProviderUnavailable = AvailabilityClassProviderCLIUnavailable
+	AvailabilityProviderQuota            = AvailabilityClassProviderQuota
+	AvailabilityCapacity                 = AvailabilityClassCapacity
+	AvailabilityCapacityDeadline         = AvailabilityClassCapacityDeadline
+	AvailabilityAuthentication           = AvailabilityClassAuthentication
+	AvailabilityAuthenticationSession    = AvailabilityClassAuthenticationSession
+	AvailabilityProviderCLIUnavailable   = AvailabilityClassProviderCLIUnavailable
+	AvailabilityProviderCliUnavailable   = AvailabilityClassProviderCLIUnavailable
+	AvailabilityProviderUnavailable      = AvailabilityClassProviderUnavailable
+	AvailabilityStartDeadline            = AvailabilityClassStartDeadline
+)
 
 // Delegates is the resource plane a panel convenes over.
 //

@@ -683,6 +683,7 @@ void delegate_worker(void *arg)
          return;
       }
       agent_set_durable_job(cctx->background_job_id);
+      server_delegate_heartbeat_begin(cctx->background_job_id);
    }
    /* Cleanup-relevant state, hoisted + zero-initialised so the single
     * delegate_fail: error path releases exactly what was acquired — each
@@ -1788,7 +1789,6 @@ void delegate_worker(void *arg)
          agent_tools_parent_write_guard_clear();
          parent_write_guard_active = 0;
       }
-      server_delegate_heartbeat_begin(cctx->background_job_id);
       rc = delegate_run_with_credential_retry(&acfg, target_agent, role, system_prompt, run_prompt,
                                               max_tokens, force_tools, delegate_allows_writes,
                                               leased_cred_name, sizeof(leased_cred_name),
@@ -2068,6 +2068,7 @@ void delegate_worker(void *arg)
     * the exit has already sent its own error response; the success path returns
     * above and never falls through. */
 delegate_fail:
+   server_delegate_heartbeat_end();
    run_cmd_set_cwd(NULL);
    free(resolved_prompt);
    free(template_sys_prompt);

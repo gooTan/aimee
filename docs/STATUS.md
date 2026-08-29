@@ -47,6 +47,7 @@ means the contract or branch exists but is not part of the integrated path yet.
 | Watched-proposal triggers | Done | Go scans `watch-dir` and `proposals`. Mode is recorded, but current scheduling is identical; human gates always park. |
 | Generic cron jobs | Done | The C job scheduler runs configured commands. Cron is not a Go WFE trigger source. |
 | Live forge and PR completion | Done | Branch, implement, verify, review, merge, and PR steps have terminal failure states. |
+| Delegate liveness without completion deadlines | Done | Heartbeat and last progress are reported separately; suspected stalls remain observable and are not cancelled by age alone. |
 | Transactional turn rewind | Proposed | Design exists; not a shipped recovery path. |
 
 ## Providers and context

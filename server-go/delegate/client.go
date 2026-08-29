@@ -19,12 +19,11 @@ import (
 )
 
 const (
-	EventKind       uint32 = 6657
-	StageInvoke     uint32 = 1
-	EventGroupPlan  uint32 = 6678
-	StageGroupPlan  uint32 = 22
-	WireVersion            = 2
-	DefaultDeadline        = 30 * time.Minute
+	EventKind      uint32 = 6657
+	StageInvoke    uint32 = 1
+	EventGroupPlan uint32 = 6678
+	StageGroupPlan uint32 = 22
+	WireVersion           = 3
 )
 
 type DelegateRequest struct {
@@ -51,12 +50,15 @@ type DelegateRequest struct {
 }
 
 type DelegateResult struct {
-	Response    string
-	Agent       string
-	Participant string
-	CostUSD     float64
-	CostUnknown bool
-	Partial     bool
+	Response          string
+	Agent             string
+	Participant       string
+	CostUSD           float64
+	CostUnknown       bool
+	Partial           bool
+	AvailabilityClass AvailabilityClass
+	ResponseStarted   bool
+	ToolEvents        []ToolEvent
 }
 
 type AgentClient interface {
@@ -64,11 +66,14 @@ type AgentClient interface {
 }
 
 type DelegateGroupResult struct {
-	Participant string
-	Response    string
-	CostUSD     float64
-	CostUnknown bool
-	Err         error
+	Participant       string
+	Response          string
+	CostUSD           float64
+	CostUnknown       bool
+	AvailabilityClass AvailabilityClass
+	ResponseStarted   bool
+	ToolEvents        []ToolEvent
+	Err               error
 }
 
 type DelegateGroupClient interface {
@@ -86,18 +91,55 @@ var (
 	ErrDelegateExecutionDeadline    = errors.New("delegate execution deadline exceeded [aimee_err=execution_deadline]")
 )
 
+// AvailabilityClass is the transport-owned recovery class for a delegate
+// failure. Empty means the failure is not safe to retry by selecting another
+// provider/profile. It is an alias so panel transport contracts can expose the
+// field as a plain string without conversion noise.
+type AvailabilityClass = string
+
+const (
+	AvailabilityClassNone                   = ""
+	AvailabilityClassQuotaRateLimit         = "quota_rate_limit"
+	AvailabilityClassCapacity               = "capacity"
+	AvailabilityClassCapacityDeadline       = "capacity_deadline"
+	AvailabilityClassAuthenticationSession  = "authentication_session"
+	AvailabilityClassProviderCLIUnavailable = "provider_cli_unavailable"
+	AvailabilityClassStartDeadline          = "start_deadline"
+
+	// Compatibility names retained for older in-process callers. They alias the
+	// canonical values so the wire accepts only the six approved classes.
+	AvailabilityClassProviderQuota       = AvailabilityClassQuotaRateLimit
+	AvailabilityClassAuthentication      = AvailabilityClassAuthenticationSession
+	AvailabilityClassProviderUnavailable = AvailabilityClassProviderCLIUnavailable
+	AvailabilityNone                     = AvailabilityClassNone
+	AvailabilityProviderQuota            = AvailabilityClassProviderQuota
+	AvailabilityQuotaRateLimit           = AvailabilityClassQuotaRateLimit
+	AvailabilityCapacity                 = AvailabilityClassCapacity
+	AvailabilityCapacityDeadline         = AvailabilityClassCapacityDeadline
+	AvailabilityAuthentication           = AvailabilityClassAuthentication
+	AvailabilityAuthenticationSession    = AvailabilityClassAuthenticationSession
+	AvailabilityProviderCLIUnavailable   = AvailabilityClassProviderCLIUnavailable
+	AvailabilityProviderCliUnavailable   = AvailabilityClassProviderCLIUnavailable
+	AvailabilityProviderUnavailable      = AvailabilityClassProviderUnavailable
+	AvailabilityStartDeadline            = AvailabilityClassStartDeadline
+)
+
 type DelegateExecutionError struct {
-	Err        error
-	Dispatched bool
-	CostKnown  bool
-	CostUSD    float64
+	Err               error
+	Dispatched        bool
+	CostKnown         bool
+	CostUSD           float64
+	AvailabilityClass AvailabilityClass
+	ResponseStarted   bool
 }
 
 func (e *DelegateExecutionError) Error() string { return e.Err.Error() }
 func (e *DelegateExecutionError) Unwrap() error { return e.Err }
 
 // Invocation is the complete delegate-owned wire request. Workflow replay,
-// durable-slot, work-item and retry fields intentionally have no JSON mapping.
+// durable-slot, work-item and retry fields intentionally have no JSON mapping
+// except for the explicit workflow_context envelope, which is the safe
+// observability carrier for workflow-scoped tool telemetry.
 type Invocation struct {
 	Version  int    `json:"version"`
 	Role     string `json:"role"`
@@ -107,19 +149,53 @@ type Invocation struct {
 	Workdir  string `json:"workdir,omitempty"`
 	Tools    bool   `json:"tools"`
 	MaxTurns int    `json:"max_turns,omitempty"`
-	// ExecutionTimeoutMS is a delegate-owned run bound, not workflow state. It
-	// lets the producer terminate work at the same boundary as the bus caller.
+	// ExecutionTimeoutMS is an optional delegate-owned run bound. Zero means
+	// unbounded; explicit caller context deadlines still propagate here.
 	ExecutionTimeoutMS int64 `json:"execution_timeout_ms,omitempty"`
+	// Workflow carries safe workflow identity for tool-call observability.
+	// It is the only workflow-scoped field that may cross the delegate wire;
+	// all other workflow fields (durability, retry, cost) remain caller-local.
+	Workflow *WorkflowContext `json:"workflow_context,omitempty"`
+}
+
+// WorkflowContext is the minimal safe workflow identity that may cross the
+// delegate wire to tag per-tool telemetry. It never carries prompts, tool
+// arguments, results, or credentials. Invocation is the stable per-turn
+// identity (the delegate's ExecutionVersion / UpdatedAt) that distinguishes
+// identical provider call IDs across separate turns while keeping duplicate
+// transport delivery for the same turn idempotent.
+type WorkflowContext struct {
+	WorkItemID string `json:"work_item_id"`
+	Stage      string `json:"stage"`
+	Model      string `json:"model,omitempty"`
+	Role       string `json:"role,omitempty"`
+	Persona    string `json:"persona,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Invocation string `json:"invocation,omitempty"`
+}
+
+// ToolEvent is a safe, normalized per-tool-call telemetry record. It never
+// carries raw tool arguments, results, prompts, or credentials — only the
+// tool name, call identifier, status, and elapsed duration.
+type ToolEvent struct {
+	ToolName  string `json:"tool_name"`
+	CallID    string `json:"call_id,omitempty"`
+	Status    string `json:"status"` // started, completed, error
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	Phase     string `json:"phase,omitempty"`
 }
 
 type InvocationResult struct {
-	Version   int     `json:"version"`
-	Status    string  `json:"status"`
-	Response  string  `json:"response,omitempty"`
-	Agent     string  `json:"agent,omitempty"`
-	Error     string  `json:"error,omitempty"`
-	CostUSD   float64 `json:"cost_usd,omitempty"`
-	CostKnown bool    `json:"cost_known"`
+	Version           int               `json:"version"`
+	Status            string            `json:"status"`
+	Response          string            `json:"response,omitempty"`
+	Agent             string            `json:"agent,omitempty"`
+	Error             string            `json:"error,omitempty"`
+	CostUSD           float64           `json:"cost_usd,omitempty"`
+	CostKnown         bool              `json:"cost_known"`
+	AvailabilityClass AvailabilityClass `json:"availability_class,omitempty"`
+	ResponseStarted   bool              `json:"response_started"`
+	ToolEvents        []ToolEvent       `json:"tool_events,omitempty"`
 }
 
 // GroupPlan carries only delegate-selection inputs. Participant continuity is
@@ -141,7 +217,8 @@ type GroupPlanResult struct {
 	// Error is a delegate-domain failure carried by a successful bus exchange.
 	// The bus strips response bodies from non-OK transport replies, so load
 	// classifications must travel in this versioned envelope.
-	Error string `json:"error,omitempty"`
+	Error             string            `json:"error,omitempty"`
+	AvailabilityClass AvailabilityClass `json:"availability_class,omitempty"`
 }
 
 // StageCaller is the delegate bus-call seam. The production implementation is
@@ -161,12 +238,25 @@ func NewBusClient(caller *bus.ConcurrentModuleCaller, deadline time.Duration) (*
 	return NewClient(caller, deadline)
 }
 
+func durablePhase(slot string) string {
+	switch {
+	case strings.Contains(slot, ":chairman"):
+		return "chairman"
+	case strings.Contains(slot, ":discussion:"):
+		return "discussion"
+	case strings.Contains(slot, ":analysis"):
+		return "analysis"
+	default:
+		if slot != "" {
+			return "analysis"
+		}
+		return ""
+	}
+}
+
 func NewClient(caller StageCaller, deadline time.Duration) (*BusClient, error) {
 	if caller == nil {
 		return nil, errors.New("delegate bus caller is required")
-	}
-	if deadline <= 0 {
-		deadline = DefaultDeadline
 	}
 	return &BusClient{caller: caller, deadline: deadline}, nil
 }
@@ -194,22 +284,41 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 	if contextDeadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(contextDeadline)
 		if remaining <= 0 {
-			return DelegateResult{}, errors.Join(ErrDelegateTerminal, context.DeadlineExceeded)
+			err := errors.Join(ErrDelegateTerminal, context.DeadlineExceeded)
+			return DelegateResult{AvailabilityClass: AvailabilityClassStartDeadline}, &DelegateExecutionError{
+				Err: err, AvailabilityClass: AvailabilityClassStartDeadline}
 		}
-		if remaining < deadline {
+		if deadline <= 0 || remaining < deadline {
 			deadline = remaining
 		}
 	}
 	if request.ToolLoopTimeoutMSCap > 0 {
 		cap := time.Duration(request.ToolLoopTimeoutMSCap) * time.Millisecond
-		if cap < deadline {
+		if deadline <= 0 || cap < deadline {
 			deadline = cap
 		}
+	}
+	executionTimeoutMS := int64(0)
+	if deadline > 0 {
+		executionTimeoutMS = max(1, deadline.Milliseconds())
 	}
 	wire := Invocation{Version: WireVersion, Role: request.Role, Persona: request.Persona,
 		Model: request.Delegate, Prompt: request.Prompt, Workdir: request.Workdir,
 		Tools: request.Tools, MaxTurns: request.MaxTurnsCap,
-		ExecutionTimeoutMS: max(1, deadline.Milliseconds())}
+		ExecutionTimeoutMS: executionTimeoutMS}
+	if request.WorkItemID != "" || request.Stage != "" {
+		wire.Workflow = &WorkflowContext{
+			WorkItemID: request.WorkItemID,
+			Stage:      request.Stage,
+			Model:      request.Delegate,
+			Role:       request.Role,
+			Persona:    request.Persona,
+			Invocation: request.ExecutionVersion,
+		}
+		if request.DurableSlot != "" {
+			wire.Workflow.Phase = durablePhase(request.DurableSlot)
+		}
+	}
 	body, err := json.Marshal(wire)
 	if err != nil {
 		return DelegateResult{}, err
@@ -220,6 +329,9 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) ||
 			errors.Is(err, bus.ErrModuleCallRejected) ||
 			errors.Is(err, bus.ErrModuleCallNotDispatched) {
+			if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) {
+				return DelegateResult{AvailabilityClass: AvailabilityClassProviderCLIUnavailable}, err
+			}
 			return DelegateResult{}, err
 		}
 		// Once handed to the bus, loss of the reply cannot prove the provider did
@@ -227,7 +339,8 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 		if errors.Is(err, bus.ErrModuleCallDeadline) {
 			err = errors.Join(err, context.DeadlineExceeded)
 		}
-		return DelegateResult{}, &DelegateExecutionError{Err: err, Dispatched: true, CostKnown: false}
+		return DelegateResult{}, &DelegateExecutionError{Err: err, Dispatched: true, CostKnown: false,
+			AvailabilityClass: AvailabilityClassOf(err)}
 	}
 	var result InvocationResult
 	if err := json.Unmarshal(reply, &result); err != nil {
@@ -245,18 +358,33 @@ func (c *BusClient) Delegate(ctx context.Context, request DelegateRequest) (Dele
 			detail = ErrDelegateTerminal.Error()
 		}
 		failure := classifyDelegateError(errors.New(detail))
-		if !IsCapacityBackpressure(failure) && !IsCapacityDeadline(failure) && !IsExecutionDeadline(failure) {
+		if !errors.Is(failure, ErrDelegateCapacity) && !IsCapacityDeadline(failure) && !IsExecutionDeadline(failure) {
 			failure = fmt.Errorf("%w: %s", ErrDelegateTerminal, detail)
 		}
-		return DelegateResult{}, &DelegateExecutionError{Err: failure,
-			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD}
+		// Older producers did not carry the explicit bit but did include the
+		// partial response. Keep that wire version backward-compatible; current
+		// producers set the bit only after finalOutput returns usable text.
+		responseStarted := result.ResponseStarted || strings.TrimSpace(result.Response) != ""
+		availability := AvailabilityClassNone
+		if !responseStarted {
+			availability = validAvailabilityClass(result.AvailabilityClass)
+		}
+		participant := request.Participant
+		if participant == "" {
+			participant = result.Agent
+		}
+		return DelegateResult{Agent: result.Agent, Participant: participant, AvailabilityClass: availability, ResponseStarted: responseStarted, ToolEvents: result.ToolEvents}, &DelegateExecutionError{Err: failure,
+			Dispatched: true, CostKnown: result.CostKnown, CostUSD: result.CostUSD,
+			AvailabilityClass: availability, ResponseStarted: responseStarted}
 	}
 	participant := request.Participant
 	if participant == "" {
 		participant = result.Agent
 	}
+	responseStarted := result.ResponseStarted || strings.TrimSpace(result.Response) != ""
 	return DelegateResult{Response: result.Response, Agent: result.Agent, Participant: participant,
-		CostUSD: result.CostUSD, CostUnknown: !result.CostKnown}, nil
+		CostUSD: result.CostUSD, CostUnknown: !result.CostKnown,
+		AvailabilityClass: AvailabilityClassNone, ResponseStarted: responseStarted, ToolEvents: result.ToolEvents}, nil
 }
 
 func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
@@ -268,6 +396,7 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 		return out
 	}
 	planned := append([]DelegateRequest(nil), requests...)
+	planAvailability := AvailabilityClassNone
 	plan := GroupPlan{Version: WireVersion, Seats: make([]GroupPlanSeat, len(planned))}
 	for i := range planned {
 		model := planned[i].Delegate
@@ -285,6 +414,7 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 			if decodeErr := json.Unmarshal(reply, &result); decodeErr != nil || result.Version != WireVersion {
 				err = errors.New("delegate module returned an invalid group plan")
 			} else if strings.TrimSpace(result.Error) != "" {
+				planAvailability = validAvailabilityClass(result.AvailabilityClass)
 				err = errors.New(result.Error)
 			} else if len(result.Models) != len(planned) {
 				err = errors.New("delegate module returned an invalid group plan")
@@ -301,8 +431,12 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 	}
 	if err != nil {
 		err = classifyDelegateError(err)
+		availability := planAvailability
+		if availability == AvailabilityClassNone {
+			availability = AvailabilityClassOf(err)
+		}
 		for i := range out {
-			out[i] = DelegateGroupResult{Participant: requests[i].Participant, Err: err}
+			out[i] = DelegateGroupResult{Participant: requests[i].Participant, AvailabilityClass: availability, Err: err}
 		}
 		return out
 	}
@@ -311,7 +445,8 @@ func (c *BusClient) DelegateGroup(ctx context.Context, requests []DelegateReques
 		go func(i int) {
 			result, err := c.Delegate(ctx, planned[i])
 			out[i] = DelegateGroupResult{Participant: result.Participant, Response: result.Response,
-				CostUSD: result.CostUSD, CostUnknown: result.CostUnknown, Err: err}
+				CostUSD: result.CostUSD, CostUnknown: result.CostUnknown,
+				AvailabilityClass: result.AvailabilityClass, ResponseStarted: result.ResponseStarted, ToolEvents: result.ToolEvents, Err: err}
 			done <- i
 		}(i)
 	}
@@ -345,6 +480,20 @@ func SafeDiagnostic(detail string) string {
 	return detail
 }
 
+func SafeDiagnosticSummary(detail string, maxBytes int) string {
+	detail = strings.Join(strings.Fields(SafeDiagnostic(detail)), " ")
+	if maxBytes <= 0 || len(detail) <= maxBytes {
+		return detail
+	}
+	const marker = " … [truncated] … "
+	if maxBytes <= len(marker) {
+		return strings.ToValidUTF8(detail[:maxBytes], "")
+	}
+	available := maxBytes - len(marker)
+	prefix := available * 3 / 5
+	return strings.ToValidUTF8(detail[:prefix], "") + marker + strings.ToValidUTF8(detail[len(detail)-(available-prefix):], "")
+}
+
 func IsCapacityBackpressure(err error) bool {
 	if err == nil {
 		return false
@@ -365,6 +514,131 @@ func IsCapacityDeadline(err error) bool {
 func IsExecutionDeadline(err error) bool {
 	return err != nil && (errors.Is(err, ErrDelegateExecutionDeadline) ||
 		strings.Contains(err.Error(), "aimee_err=execution_deadline"))
+}
+
+func validAvailabilityClass(class AvailabilityClass) AvailabilityClass {
+	switch class {
+	case AvailabilityClassQuotaRateLimit, AvailabilityClassCapacity,
+		AvailabilityClassCapacityDeadline, AvailabilityClassAuthenticationSession,
+		AvailabilityClassProviderCLIUnavailable, AvailabilityClassStartDeadline:
+		return class
+	default:
+		return AvailabilityClassNone
+	}
+}
+
+// AvailabilityClassOf returns only transport metadata carried by a delegate
+// execution error. It deliberately does not infer provider availability from
+// arbitrary terminal diagnostics; only the typed capacity sentinels are safe
+// to derive locally.
+func AvailabilityClassOf(err error) AvailabilityClass {
+	if err == nil {
+		return AvailabilityClassNone
+	}
+	var execution *DelegateExecutionError
+	if errors.As(err, &execution) {
+		if class := validAvailabilityClass(execution.AvailabilityClass); class != AvailabilityClassNone {
+			return class
+		}
+	}
+	if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) {
+		return AvailabilityClassProviderCLIUnavailable
+	}
+	if IsCapacityDeadline(err) {
+		return AvailabilityClassCapacityDeadline
+	}
+	if errors.Is(err, ErrDelegateCapacity) {
+		return AvailabilityClassCapacity
+	}
+	if strings.Contains(err.Error(), "aimee_err=rate_limit") {
+		return AvailabilityClassQuotaRateLimit
+	}
+	return AvailabilityClassNone
+}
+
+// CarriedAvailabilityClass is an explicit-name alias for callers that prefer
+// to document that the class came from the transport envelope.
+func CarriedAvailabilityClass(err error) AvailabilityClass { return AvailabilityClassOf(err) }
+
+// ClassifyProviderAvailability is used only by the delegate producer, which
+// owns CLI/provider diagnostics. The client-side ClassifyAvailability below
+// never infers a class from arbitrary terminal text.
+func ClassifyProviderAvailability(err error, responseStarted bool) AvailabilityClass {
+	if err == nil || responseStarted || errors.Is(err, ErrDelegateReplayUnavailable) {
+		return AvailabilityClassNone
+	}
+	if errors.Is(err, bus.ErrModuleCallCapabilityAbsent) {
+		return AvailabilityClassProviderCLIUnavailable
+	}
+	if errors.Is(err, ErrDelegateCapacity) || IsCapacityDeadline(err) {
+		if IsCapacityDeadline(err) {
+			return AvailabilityClassCapacityDeadline
+		}
+		return AvailabilityClassCapacity
+	}
+	detail := strings.ToLower(err.Error())
+	if strings.Contains(detail, "disk quota exceeded") || strings.Contains(detail, "no space left on device") {
+		return AvailabilityClassNone
+	}
+	if strings.Contains(detail, "capacity deadline") || strings.Contains(detail, "capacity-deadline") ||
+		strings.Contains(detail, "aimee_err=capacity_deadline") {
+		return AvailabilityClassCapacityDeadline
+	}
+	if strings.Contains(detail, "aimee_err=concurrency_limit") ||
+		strings.Contains(detail, "capacity unavailable") || strings.Contains(detail, "capacity saturated") {
+		return AvailabilityClassCapacity
+	}
+	if strings.Contains(detail, "provider quota") || strings.Contains(detail, "api quota") ||
+		strings.Contains(detail, "aimee_err=rate_limit") || strings.Contains(detail, "rate limit") || strings.Contains(detail, "rate-limit") ||
+		strings.Contains(detail, "rate_limit") || strings.Contains(detail, "rate_limited") ||
+		strings.Contains(detail, "rate limited") || strings.Contains(detail, "hit your session limit") ||
+		strings.Contains(detail, "too many requests") || strings.Contains(detail, "429") ||
+		strings.Contains(detail, "credits exhausted") || strings.Contains(detail, "throttled") {
+		return AvailabilityClassQuotaRateLimit
+	}
+	if strings.Contains(detail, "authentication") || strings.Contains(detail, "authorization") ||
+		strings.Contains(detail, "unauthorized") ||
+		strings.Contains(detail, "invalid api key") || strings.Contains(detail, "api key") ||
+		strings.Contains(detail, "login") || strings.Contains(detail, "credential") ||
+		strings.Contains(detail, "session expired") || strings.Contains(detail, "expired session") || strings.Contains(detail, "expired-session") ||
+		strings.Contains(detail, "session unavailable") || strings.Contains(detail, "session is unavailable") || strings.Contains(detail, "session outage") ||
+		strings.Contains(detail, "session not found") || strings.Contains(detail, "no active session") ||
+		strings.Contains(detail, "token expired") || strings.Contains(detail, "invalid token") ||
+		strings.Contains(detail, "credentials") {
+		return AvailabilityClassAuthenticationSession
+	}
+	if strings.Contains(detail, "provider unavailable") || strings.Contains(detail, "provider is unavailable") ||
+		strings.Contains(detail, "unavailable provider") ||
+		strings.Contains(detail, "provider not found") || strings.Contains(detail, "cli unavailable") ||
+		strings.Contains(detail, "command not found") || strings.Contains(detail, "executable file not found") ||
+		strings.Contains(detail, "no such file or directory") || strings.Contains(detail, "not installed") ||
+		strings.Contains(detail, "missing provider") || strings.Contains(detail, "no enabled delegate cli") ||
+		strings.Contains(detail, "no enabled cli") || strings.Contains(detail, "not an enabled cli agent") ||
+		strings.Contains(detail, "cli not found") || strings.Contains(detail, "provider not configured") ||
+		strings.Contains(detail, "no eligible healthy backend") {
+		return AvailabilityClassProviderCLIUnavailable
+	}
+	if IsExecutionDeadline(err) || errors.Is(err, context.DeadlineExceeded) || strings.Contains(detail, "execution deadline exceeded") {
+		return AvailabilityClassStartDeadline
+	}
+	return AvailabilityClassNone
+}
+
+// ClassifyAvailability returns only transport-carried metadata and typed
+// capacity. It is safe to use at the client boundary because it does not
+// inspect arbitrary terminal error text.
+func ClassifyAvailability(err error, responseStarted bool) AvailabilityClass {
+	if responseStarted {
+		return AvailabilityClassNone
+	}
+	class := AvailabilityClassOf(err)
+	// The pre-v3 diagnostic slug was capacity-wide. Preserve that helper's
+	// historical result for callers that still pass the raw slug; typed wire
+	// failures use the distinct capacity_deadline class above.
+	if class == AvailabilityClassCapacityDeadline && !errors.Is(err, ErrDelegateCapacityDeadline) {
+		return AvailabilityClassCapacity
+	}
+	return class
 }
 
 // classifyDelegateError preserves the specific typed deadline sentinel even

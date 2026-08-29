@@ -187,6 +187,36 @@ func (s *ArtifactStore) NodeArtifact(workItemID, nodeID string) (Artifact, error
 type Finding = panel.Finding
 type ReviewFeedback = panel.ReviewFeedback
 
+// RunConfig carries per-run operator choices made at admission, such as
+// reseating a pinned delegate for just this run ("factory this using sol").
+// It lives beside the run's artifacts so no schema migration is needed and
+// the choice survives restarts with the run.
+type RunConfig struct {
+	// DelegateAliases remaps pinned workflow delegates (from -> to) for this
+	// run only, taking precedence over the server-wide AIMEE_DELEGATE_ALIASES.
+	DelegateAliases map[string]string `json:"delegate_aliases,omitempty"`
+}
+
+func (s *ArtifactStore) PutRunConfig(workItemID string, config RunConfig) error {
+	content, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("encode run config: %w", err)
+	}
+	return s.replace(workItemID, "run-config.json", content)
+}
+
+func (s *ArtifactStore) RunConfig(workItemID string) (RunConfig, error) {
+	content, err := s.read(workItemID, "run-config.json")
+	if err != nil {
+		return RunConfig{}, err
+	}
+	var config RunConfig
+	if err := json.Unmarshal(content, &config); err != nil {
+		return RunConfig{}, fmt.Errorf("decode run config: %w", err)
+	}
+	return config, nil
+}
+
 func (s *ArtifactStore) PutFeedback(workItemID string, feedback ReviewFeedback) error {
 	if feedback.SchemaVersion == 0 {
 		feedback.SchemaVersion = 1

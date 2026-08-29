@@ -55,8 +55,26 @@ static int coord_spawn_delegate(void *ctx, const char *role, const char *brief)
    cJSON *req = cJSON_CreateObject();
    if (!req)
       return -1;
-   const char *req_role = role && role[0] ? role : "execute";
+   char req_role_buf[DB1_COORD_ROLE_LEN] = "execute";
+   const char *via = NULL;
+   if (role && role[0])
+   {
+      const char *marker = strstr(role, "|via=");
+      size_t role_len = marker ? (size_t)(marker - role) : strlen(role);
+      if (role_len >= sizeof req_role_buf)
+      {
+         cJSON_Delete(req);
+         return -1;
+      }
+      memcpy(req_role_buf, role, role_len);
+      req_role_buf[role_len] = '\0';
+      if (marker && marker[5])
+         via = marker + 5;
+   }
+   const char *req_role = req_role_buf;
    cJSON_AddStringToObject(req, "role", req_role);
+   if (via)
+      cJSON_AddStringToObject(req, "via", via);
    /* A coord WRITE task (code/refactor/...) is agentic worktree work: it must edit
     * files IN PLACE via the Write/Edit tools. Force tools on. Unlike the CLI
     * single-shot `aimee delegate code` (which returns a diff as text for the caller

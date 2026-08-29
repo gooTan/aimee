@@ -48,12 +48,6 @@ func NewBusReviewer(ctx context.Context, socketPath string, principalClass, prin
 	if err != nil {
 		return nil, err
 	}
-	if timeout <= 0 {
-		// A review runs a panel of live agents; the module enforces its own
-		// per-panel deadline, and this is only the backstop for a module that
-		// never answers at all.
-		timeout = 20 * time.Minute
-	}
 	return &BusReviewer{caller: caller, timeout: timeout}, nil
 }
 

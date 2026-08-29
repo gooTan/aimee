@@ -148,6 +148,12 @@ func main() {
 		if runnerErr != nil {
 			log.Fatal(runnerErr)
 		}
+		// Premium planning delegates are budgeted per run tree. The default policy
+		// (sol and fable, two calls) is env-tunable; see docs/SOFTWARE_FACTORY.md.
+		nativeRunner.SetPremiumPolicy(engine.PremiumPolicyFromEnv())
+		// AIMEE_DELEGATE_ALIASES reseats pinned delegates at dispatch (for
+		// example fable=sol when the planner's subscription quota is exhausted).
+		nativeRunner.SetDelegateAliases(engine.DelegateAliasesFromEnv())
 		// Reviews run in the roundtable module over the daemon's bus. This process
 		// attaches as a requesting principal under its generated grant; it does
 		// not host a panel, so there is one implementation and one place that
@@ -193,7 +199,7 @@ func main() {
 		scheduler := engine.NewScheduler(store, workflowEngine, *concurrency, nil)
 		var liveMu sync.Mutex
 		lastConcurrency := *concurrency
-		lastPolicy := engine.RunPolicy{MaxTurns: 300, MaxWall: 1800 * time.Second, AutoResumeWall: true, MaxResumes: 50}
+		lastPolicy := engine.RunPolicy{MaxTurns: 300, AutoResumeWall: true, MaxResumes: 50}
 		readInt := func(key string, fallback int) int {
 			value, ok, err := configStore.IntValue(key)
 			if err != nil {

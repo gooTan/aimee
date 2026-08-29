@@ -27,7 +27,17 @@ ROOT = Path(__file__).resolve().parent.parent
 INVENTORY = ROOT / "tests/baselines/modules/canonical-inventory.yaml"
 LOCK = ROOT / "dependencies/aimee-repositories.lock.json"
 CORE_VERSION_FILE = ROOT / "src/core/VERSION"
-REMOTE_ROOT = "https://github.com/RakuenSoftware"
+REMOTE_ROOT = "https://github.com/gooTan"
+MODULE_ORIGIN_OVERRIDES: dict[str, str] = {}
+
+
+def module_remote(module_id: str) -> str:
+    override = MODULE_ORIGIN_OVERRIDES.get(module_id)
+    if override is not None:
+        return override
+    return f"{REMOTE_ROOT}/aimee-module-{module_id}.git"
+
+
 HOSTED_BY_EXECUTABLE = {"wfe": "/usr/local/bin/aimee-wfe"}
 PRINCIPAL_CLASS = 1
 
@@ -327,11 +337,32 @@ def go_process_shared_sources(module_id: str) -> list[str]:
     """
     if module_id not in {"delegates", "roundtable"}:
         return []
-    return sorted(
+    sources = [
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "server-go/delegate").glob("*.go")
         if not path.name.endswith("_test.go")
-    )
+    ]
+    if module_id == "roundtable":
+        sources.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "server-go/modules/delegates").glob("*.go")
+            if not path.name.endswith("_test.go")
+        )
+        sources.extend(
+            [
+                "config/roundtables/default.json",
+                "config/roundtables/plan.json",
+                "config/roundtables/implementation.json",
+                "config/roundtables/documentation.json",
+            ]
+        )
+    if module_id == "delegates":
+        sources.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "server-go/modules/delegates/testdata").glob("*")
+            if path.is_file()
+        )
+    return sorted(sources)
 
 
 def go_xsys_version() -> str:
@@ -431,7 +462,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: RakuenSoftware/aimee-core-c
+          repository: gooTan/aimee-core-c
           ref: v{version}
           path: _aimee-core
       - run: cmake -S _aimee-core -B _core-build -DCMAKE_BUILD_TYPE=Release
@@ -580,7 +611,7 @@ preserved at their canonical paths so their migration history remains auditable.
         "owned_files": owned,
     }
     write_text(repository / "SOURCE_MANIFEST.json", json.dumps(manifest, indent=2) + "\n")
-    remote = f"{REMOTE_ROOT}/aimee-module-{module_id}.git"
+    remote = module_remote(module_id)
     commit = initialize_repository(repository, remote, timestamp, version)
     pin = {
         "id": module_id,

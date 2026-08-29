@@ -26,11 +26,7 @@ func TestShippedWorkflowDefinitionsRunWithNativeEngine(t *testing.T) {
 		wantState string
 		wantPause string
 	}{
-		{name: "managed-change", wantState: "accepted"},
-		{name: "hotfix", wantState: "accepted"},
 		{name: "build", wantState: "accepted"},
-		{name: "build-triggered", wantState: "accepted"},
-		{name: "manual-review", wantState: "active", wantPause: "human_gate"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -50,8 +46,6 @@ func TestShippedAutonomousWorkflowRetriesAreBounded(t *testing.T) {
 	}{
 		{workflow: "build", node: "plan_gate", max: 6},
 		{workflow: "build", node: "slices", max: 3},
-		{workflow: "build-triggered", node: "plan_gate", max: 6},
-		{workflow: "build-triggered", node: "slices", max: 3},
 		{workflow: "slice", node: "impl", max: 3},
 	}
 	for _, check := range checks {
@@ -103,7 +97,7 @@ func runExactShippedWorkflow(t *testing.T, workflowName, wantState, wantPause st
 		t.Fatal(err)
 	}
 	sourcePath := ""
-	if workflowName == "build" || workflowName == "build-triggered" {
+	if workflowName == "build" {
 		sourcePath = "docs/proposals/pending/" + workflowName + ".md"
 	}
 	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
@@ -164,7 +158,7 @@ func runExactShippedWorkflow(t *testing.T, workflowName, wantState, wantPause st
 		t.Fatalf("workflow timed out: item=%+v children=%+v events=%+v", item, children, events)
 	}
 	assertShippedStagesVisited(t, store, id, definition)
-	if workflowName == "build" || workflowName == "build-triggered" {
+	if workflowName == "build" {
 		children, err := store.Children(t.Context(), id)
 		if err != nil || len(children) != 1 {
 			t.Fatalf("slice children=%+v err=%v", children, err)
@@ -255,7 +249,7 @@ func newShippedWorkflowRepo(t *testing.T, root string) string {
 	run(root, "init", "--bare", bare)
 	run(root, "clone", bare, repo)
 	run(repo, "checkout", "-b", "trunk")
-	for _, name := range []string{"build", "build-triggered"} {
+	for _, name := range []string{"build"} {
 		path := filepath.Join(repo, "docs", "proposals", "pending", name+".md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -265,6 +259,13 @@ func newShippedWorkflowRepo(t *testing.T, root string) string {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("root\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(repo, ".agents", "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skill, []byte("# Code review\nReview correctness and the requested behavior.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	run(repo, "add", ".")

@@ -1622,6 +1622,7 @@ static const struct
     {"git_add", handle_git_add, 1},
     {"git_switch", handle_git_switch, 0},
     {"git_checkout", handle_git_checkout, 1},
+    {"git_fork", handle_git_fork, 1},
 };
 
 static cJSON *dispatch_git_tool(server_ctx_t *ctx, server_conn_t *conn, const char *tool,

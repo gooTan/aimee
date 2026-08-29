@@ -30,6 +30,8 @@ extern void run_cmd_set_cwd(const char *cwd);
  * across concurrent delegate threads. */
 const char *delegation_active_id(void);
 
+static int cli_session_terminal_failure(const agent_t *agent, const char *response);
+
 static int cli_session_execute_inner(const agent_t *agent, const agent_network_t *network,
                                      const char *system_prompt, const char *user_prompt,
                                      int max_tokens, double temperature, agent_result_t *out)
@@ -245,14 +247,10 @@ static int cli_session_execute_inner(const agent_t *agent, const agent_network_t
       snprintf(out->error, sizeof(out->error), "out of memory");
       return -1;
    }
-   /* Bound the receive: a CLI stuck in a provider retry loop (e.g. an Anthropic
-    * outage) animates its pane forever without the session dying, so the
-    * stability heuristic alone would hang indefinitely. Prefer the explicit
-    * per-CLI response timeout, then the agent timeout, then the default. */
-   int recv_timeout_ms =
-       agent->cli_idle_timeout_ms > 0
-           ? agent->cli_idle_timeout_ms
-           : (agent->timeout_ms > 0 ? agent->timeout_ms : AGENT_DEFAULT_TIMEOUT_MS);
+   /* Explicit per-CLI or agent bounds still apply; absent means unbounded. */
+   int recv_timeout_ms = agent->cli_idle_timeout_ms > 0
+                             ? agent->cli_idle_timeout_ms
+                             : (agent->timeout_ms > 0 ? agent->timeout_ms : -1);
    recv_timeout_ms = agent_timeout_cap_ms(recv_timeout_ms, agent->tool_loop_timeout_ms_cap);
    int recv_rc = cli_session_recv(&sess, raw, CLI_SESSION_BUF_MAX, recv_timeout_ms);
    if (recv_rc != 0)
@@ -315,6 +313,13 @@ static int cli_session_execute_inner(const agent_t *agent, const agent_network_t
    {
       free(clean);
       snprintf(out->error, sizeof(out->error), "empty response from tmux session");
+      return -1;
+   }
+
+   if (cli_session_terminal_failure(agent, clean))
+   {
+      snprintf(out->error, sizeof(out->error), "%s", clean);
+      free(clean);
       return -1;
    }
 
@@ -382,4 +387,29 @@ int agent_execute_cli_session(const agent_t *agent, const agent_network_t *netwo
    if (fell_back)
       run_cmd_set_cwd(saved_cwd[0] ? saved_cwd : NULL);
    return rc;
+}
+static int cli_session_terminal_failure(const agent_t *agent, const char *response)
+{
+   if (!agent || !response)
+      return 0;
+   const char *kind = agent->cli_kind[0] ? agent->cli_kind : agent->name;
+   if (!kind || (strcmp(kind, "claude") != 0 && strncmp(kind, "claude-", 7) != 0))
+      return 0;
+   while (*response == ' ' || *response == '\t' || *response == '\r' || *response == '\n')
+      response++;
+   static const char *const prefixes[] = {
+       "Login expired",
+       "You have hit your session limit",
+       "You've hit your session limit",
+       "You have hit your usage limit",
+       "You've hit your usage limit",
+       "You have reached your usage limit",
+       "You've reached your usage limit",
+       "Reached your usage limit",
+       "Usage limit for this billing cycle",
+   };
+   for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+      if (strncmp(response, prefixes[i], strlen(prefixes[i])) == 0)
+         return 1;
+   return 0;
 }

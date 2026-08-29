@@ -602,6 +602,7 @@ static void attn_lexical_normalize(const char *path, char *out, size_t out_n)
  *   "/.aimee/worktrees/"  — aimee's own launcher + delegate worktrees
  *   "/.claude/worktrees/" — Claude Code's native worktrees (EnterWorktree)
  *   "/.codex/worktrees/"  — Codex's native worktrees
+ *   "$AIMEE_HOME/wfe-worktrees/" — workflow-owned slice worktrees
  * All are isolated worktrees on a branch off the default branch — the exact
  * isolation this guard requires — so a Claude Code / Codex session working in its
  * own worktree is honoured, not blocked. Deliberately the full "/worktrees/" path,
@@ -609,9 +610,19 @@ static void attn_lexical_normalize(const char *path, char *out, size_t out_n)
  * unrelated dirs like "/home/u/.aimee-notes/..." or "~/.claude/". */
 static int attn_path_in_managed_worktree(const char *norm)
 {
-   return norm && (strstr(norm, "/.aimee/worktrees/") != NULL ||
-                   strstr(norm, "/.claude/worktrees/") != NULL ||
-                   strstr(norm, "/.codex/worktrees/") != NULL);
+   if (!norm)
+      return 0;
+   if (strstr(norm, "/.aimee/worktrees/") != NULL || strstr(norm, "/.claude/worktrees/") != NULL ||
+       strstr(norm, "/.codex/worktrees/") != NULL)
+      return 1;
+
+   const char *home = aimee_home();
+   char normalized_home[PATH_MAX], wfe_root[PATH_MAX];
+   if (!home || !home[0])
+      return 0;
+   attn_lexical_normalize(home, normalized_home, sizeof normalized_home);
+   int n = snprintf(wfe_root, sizeof wfe_root, "%s/wfe-worktrees/", normalized_home);
+   return n > 0 && (size_t)n < sizeof wfe_root && strncmp(norm, wfe_root, (size_t)n) == 0;
 }
 
 /* Returns 1 iff `norm` is harness-owned session state rather than repo content:

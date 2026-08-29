@@ -235,6 +235,12 @@ int main(void)
                         "  - id: a\n    block: author.proposal\n    next: bad\n"
                         "  - id: bad\n    block: author.plan\n    in:\n      p: pr.out\n",
                         e, sizeof e));
+      /* author.plan accepts intent: understand brief:true emits validated schema_version 2
+       * ContextBrief */
+      assert(validates("name: x\nstart: u\nnodes:\n"
+                       "  - id: u\n    block: understand\n    next: p\n"
+                       "  - id: p\n    block: author.plan\n    in:\n      proposal: u.out\n",
+                       e, sizeof e));
       /* single-lens gate (required < 2) */
       assert(!validates("name: x\nstart: a\nnodes:\n"
                         "  - id: a\n    block: author.proposal\n    next: g\n"
@@ -286,6 +292,11 @@ int main(void)
          if (rc != 0)
             printf("\n  build.yaml invalid: %s\n", err);
          assert(rc == 0);
+         const wfe_node_t *final_pr = wfe_def_node(d, "final_pr");
+         const cJSON *base = final_pr && final_pr->params
+                                 ? cJSON_GetObjectItemCaseSensitive(final_pr->params, "base")
+                                 : NULL;
+         assert(cJSON_IsString(base) && strcmp(base->valuestring, "trunk") == 0);
          char v[65] = "";
          assert(wfe_def_compute_version(d, v) == 0);
          wfe_def_free(d);
@@ -293,31 +304,6 @@ int main(void)
       else
       {
          printf("(skip build.yaml: %s) ", err);
-      }
-   }
-
-   /* --- shipped manual-review.yaml (the sweep's filing target) validates --- */
-   {
-      char err[256];
-      wfe_def_t *d = wfe_def_load_file("../config/workflows/manual-review.yaml", err, sizeof err);
-      if (d)
-      {
-         int rc = wfe_def_validate(d, err, sizeof err);
-         if (rc != 0)
-            printf("\n  manual-review.yaml invalid: %s\n", err);
-         assert(rc == 0);
-         /* security invariant: the sweep's untrusted output must NOT auto-implement —
-          * manual-review contains no implement/merge node, only a human gate. */
-         for (int i = 0; i < d->n_nodes; i++)
-         {
-            assert(d->nodes[i].block != WFE_BLK_IMPLEMENT);
-            assert(d->nodes[i].block != WFE_BLK_MERGE);
-         }
-         wfe_def_free(d);
-      }
-      else
-      {
-         printf("(skip manual-review.yaml: %s) ", err);
       }
    }
 

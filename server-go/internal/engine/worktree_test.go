@@ -63,6 +63,62 @@ func TestParentUsesFeatureWorktreeAndChildBranchesFromIt(t *testing.T) {
 	}
 }
 
+func TestParentFeatureStartsFromAdmittedIntegrationBranch(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@example",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@example")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-b", "trunk", repo)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", repo, "add", "README")
+	run("-C", repo, "commit", "-m", "init")
+	run("-C", repo, "remote", "add", "origin", repo)
+	run("-C", repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+	run("-C", repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+	run("-C", repo, "switch", "-c", "integration")
+	if err := os.WriteFile(filepath.Join(repo, "integration.txt"), []byte("admitted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", repo, "add", "integration.txt")
+	run("-C", repo, "commit", "-m", "integration")
+	run("-C", repo, "update-ref", "refs/remotes/origin/integration", "HEAD")
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, db1.CreateWorkItem{ID: "wi_parent", Repo: repo,
+		ProposalPath: "p", WorkflowName: "build", StartStage: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ := store.WorkItem(ctx, "wi_parent")
+	workdir, _, err := manager.Ensure(ctx, item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "integration.txt")); err != nil {
+		t.Fatalf("feature did not start from admitted integration branch: %v", err)
+	}
+	base, err := frozenWorktreeBase(ctx, item, workdir)
+	if err != nil || base != "origin/integration" {
+		t.Fatalf("root frozen-diff base=%q err=%v, want origin/integration", base, err)
+	}
+}
+
 func TestCleanupIsIdempotentAfterManagedPathWasRemoved(t *testing.T) {
 	root := t.TempDir()
 	store, err := db1.Open(filepath.Join(root, "db.sqlite"))

@@ -1,12 +1,4 @@
-/* server_delegate_monitor.h: aimee-server background thread that polls
- * running agent_jobs and auto-cancels delegates whose
- * (current_tool, api_call_count, heartbeat_at) row indicates a stall.
- *
- * Pairs with PR #1583 (heartbeat substrate) and PR #1584 (cooperative
- * cancellation). The monitor itself does not interrupt the running
- * delegate — it flips agent_jobs.status to 'cancelled', and the agent
- * runtime's per-turn db1_agent_job_is_cancelled check halts the loop at
- * the next turn boundary.
+/* server_delegate_monitor.h: delegate runtime heartbeat and stale-state inspection.
  *
  * Enabled by default. Set AIMEE_DELEGATE_HEARTBEAT_MONITOR=0 to disable
  * the monitor while debugging delegate runtime behavior. */
@@ -26,10 +18,8 @@ extern "C"
     * server_shutdown unconditionally. */
    void server_delegate_monitor_shutdown(void);
 
-   /* Test seam: classify every running agent_job and cancel the stale
-    * ones. Returns the number cancelled. Called by the monitor thread
-    * once per poll interval; exposed so tests can drive the same logic
-    * without spawning the thread. */
+   /* Test seam: classify every running agent_job without changing it.
+    * Returns the number suspected stalled. */
    int server_delegate_monitor_sweep(int idle_threshold_secs, int in_tool_threshold_secs);
 
    /* Bind/unbind a per-turn heartbeat for the in-flight background delegate on

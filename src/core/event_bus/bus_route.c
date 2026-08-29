@@ -267,8 +267,14 @@ void bus_route_forget_slot(bus_host_t *h, uint32_t slot)
          h->kinds[i].server = KIND_SERVER_NONE;
    }
    for (uint32_t i = 0; i < BUS_HOST_MAX_PENDING; i++)
-      if (h->pending[i].in_use && (h->pending[i].requester == slot || h->pending[i].server == slot))
-         h->pending[i].in_use = 0;
+   {
+      bus_pending_t *p = &h->pending[i];
+      if (!p->in_use || (p->requester != slot && p->server != slot))
+         continue;
+      if (p->server == slot && p->requester != slot && h->slots[p->requester].in_use)
+         emit_control(h, (int)p->requester, BUS_KIND_CAPABILITY_ABSENT, p->correlation_id, NULL, 0);
+      p->in_use = 0;
+   }
 }
 
 /* ---- pending request table ---- */

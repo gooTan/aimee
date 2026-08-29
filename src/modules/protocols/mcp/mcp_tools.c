@@ -448,12 +448,14 @@ static cJSON *mcp_build_tools_list_ex(int collapse)
                               "Character/token budget for the rendered bundle. 0 = default "
                               "(1800 session, 600 per-turn).");
       mcp_add_memory_scope_properties(p);
-      cJSON_AddItemToArray(
-          tools, mcp_tool_new("memory_recall",
-                              "Return a six-section proactive-recall bundle (identity, "
-                              "preferences, active_context, open_commitments, reminders, "
-                              "directives) suitable for prompt injection. Pure DB queries.",
-                              s));
+      cJSON *tool = mcp_tool_new("memory_recall",
+                                 "Return a six-section proactive-recall bundle (identity, "
+                                 "preferences, active_context, open_commitments, reminders, "
+                                 "directives) suitable for prompt injection. Pure DB queries.",
+                                 s);
+      cJSON *annotations = cJSON_AddObjectToObject(tool, "annotations");
+      cJSON_AddBoolToObject(annotations, "readOnlyHint", 1);
+      cJSON_AddItemToArray(tools, tool);
    }
 
    /* list_epistemic_directives */

@@ -1,13 +1,13 @@
 {
   "name": "default",
   "seats": [
-    {"model": "$random", "persona": "architect"},
-    {"model": "$random", "persona": "reviewer"},
-    {"model": "$random", "persona": "qa"}
+    {"model": "codex:gpt-5.6-sol", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "qa"},
+    {"model": "claude:claude-fable-5", "persona": "architect", "optional": true}
   ],
-  "chairman": "$random",
+  "chairman": "antigravity",
+  "chairman_fallback": "codex:gpt-5.6-sol",
   "chairman_enabled": true,
   "min_successful": 2,
-  "deadline_ms": 600000,
   "discussion": false
 }

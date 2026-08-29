@@ -1,159 +1,143 @@
-# Default proposal-to-PR workflow.
-#
-# input (proposal | user request)
-#   -> author.proposal
-#   -> branch.open (durable feature branch from the repository default branch)
-#   -> author.plan -> roundtable (bounded refinement loop)
-#   -> split (plan -> per-slice packets)
-#   -> foreach.workflow (each packet runs slice: implement -> review -> sub-PR -> CI -> merge)
-#   -> acceptance review -> documentation review
-#   -> draft PR (feature branch -> admitted checkout branch)
-#
-# The engine supplies the admitted proposal to review prompts, so each gate can judge
-# the artifact against the original request. The final PR remains a draft for human
-# review and merge.
-#
-# `branch.open base: trunk` starts the feature from the repository default branch.
-# `pr.open base: trunk` targets the branch checked out when Go admitted the repo.
-# Those branches can differ by design. Only slice PRs merge automatically.
 name: build
 intent_tags:
   - proposal
   - full-lifecycle
 start: draft
 nodes:
-  # Normalize a proposal or bare request. Requested corrections return to this node.
   - id: draft
     block: author.proposal
     params:
       with_user: true
     next: feature
     on_fail: draft
-  # Open the durable feature branch before the plan. Slice PRs merge into it.
-  # branch.open needs no input; base: trunk selects the repository default branch.
   - id: feature
     block: branch.open
     params:
       base: trunk
+    next: scout
+  - id: scout
+    block: understand
+    params:
+      brief: true
+      delegate: luna
+      with_user: false
     next: plan
-  # Author the implementation plan from the admitted proposal.
-  # Bound repeated authoring. Review findings feed the next plan pass.
+    on_fail: scout
   - id: plan
     block: author.plan
     in:
-      proposal: draft.out
+      proposal: scout.out
     params:
+      delegate: fable
       max_rounds: 60
+      require_brief: true
     next: plan_gate
     on_fail: plan
-  # Review the plan against the proposal. Requested changes return to plan.
   - id: plan_gate
     block: gate.roundtable
     in:
       src: plan.out
     params:
-      roundtable: default
+      focus: does this implementation plan fully satisfy the proposal/request?
+      max_rounds: 6
       panel:
-        required:
-          - security
-          - architect
-          - qa
-          - reviewer
         eligible:
           - contrarian
-      quorum: 4
-      # Bound the gate -> plan -> gate refinement loop.
-      max_rounds: 6
-      focus: does this implementation plan fully satisfy the proposal/request?
+        required:
+          - reviewer
+          - qa
+      quorum: 2
+      roundtable: plan
     on_pass: split
     on_fail: plan
-  # Decompose the approved plan into independent per-slice packets.
   - id: split
     block: split
     in:
       plan: plan.out
     next: slices
-    # Regenerate packets when split requests another pass.
     on_fail: split
-  # Run one child workflow per packet and wait for every accepted child.
+    params:
+      delegate: fable
   - id: slices
     block: foreach.workflow
     in:
-      packets: split.out
       feature: feature.out
+      packets: split.out
     params:
-      workflow: slice
-      # Bound whole-generation retries after a child fails.
       max_rounds: 3
+      workflow: slice
     next: accept_freeze
     on_fail: split
-  # Freeze the assembled feature branch for the acceptance review.
   - id: accept_freeze
     block: freeze
     in:
       branch: slices.out
-    next: accept_gate
-  # Judge the assembled branch against the proposal. Changes return to split.
-  - id: accept_gate
-    block: gate.roundtable
+    next: gemini_review
+  - id: gemini_review
+    block: review
     in:
       src: accept_freeze.out
     params:
-      roundtable: default
-      panel:
-        required:
-          - security
-          - architect
-          - qa
-          - reviewer
-      quorum: 4
-      max_rounds: 6
-      focus: was the proposal completed? assess code quality and any missing tests.
-    on_pass: document
+      delegate: antigravity
+      require_code_review_skill: true
+      task: Apply the repository code-review skill across the Standards and Spec axes.
+    next: sol_review
     on_fail: split
-  # Write user-facing and inline documentation on the feature branch.
+  - id: sol_review
+    block: review
+    in:
+      src: accept_freeze.out
+    params:
+      delegate: sol
+      require_code_review_skill: true
+      task: Apply the repository code-review skill across the Standards and Spec axes.
+    next: fable_judgment
+    on_fail: split
+  - id: fable_judgment
+    block: review
+    in:
+      src: accept_freeze.out
+    params:
+      delegate: fable
+      persona: chairman
+      task: Make the final acceptance judgment after the Gemini and Sol code-review-skill passes. Confirm the requested behavior is complete and reject any surviving blocker before documentation and pull-request handoff.
+    next: document
+    on_fail: split
   - id: document
     block: document
     in:
       branch: slices.out
+    params:
+      delegate: muse
     next: doc_freeze
     on_fail: document
-  # Freeze the documentation diff for review.
   - id: doc_freeze
     block: freeze
     in:
       branch: document.out
     next: doc_gate
-  # Review documentation. Requested changes return to document.
   - id: doc_gate
     block: gate.roundtable
     in:
       src: doc_freeze.out
     params:
-      roundtable: default
-      panel:
-        required:
-          - architect
-          - qa
-          - reviewer
-        eligible:
-          - technical-writer # joins when an eligible agent is available
-      quorum: 3
-      max_rounds: 6
       focus: is the documentation complete, accurate, and clear for this feature?
+      max_rounds: 6
+      panel:
+        eligible:
+          - technical-writer
+        required:
+          - reviewer
+          - qa
+      quorum: 2
+      roundtable: documentation
     on_pass: archive
     on_fail: document
-  # Retire the triggering proposal on the run branch: move it from the watch dir
-  # (docs/proposals/pending) to docs/proposals/done, committed on the feature
-  # branch so the final PR retires the trigger input atomically with the work.
-  # A run without a trigger artifact advances as a no-op.
   - id: archive
     block: source.archive
     in:
       branch: document.out
     next: final_pr
-  # Open a draft PR into the admitted checkout branch, then stop. A human reviews,
-  # marks it ready, and decides whether to merge.
   - id: final_pr
     block: pr.open
     in:

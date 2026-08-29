@@ -3,21 +3,39 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/JBailes/aimee/server-go/internal/db1"
+	"github.com/JBailes/aimee/server-go/internal/wfe"
 )
 
 func (s *Server) workflowGate(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Decision string `json:"decision"`
 		Gate     string `json:"gate,omitempty"`
+		// Findings carries a "changes" decision's requested fixes, typically
+		// distilled from the human's pull-request review comments. They become
+		// review feedback (persona human, severity blocking) and the run returns
+		// to the gate's on_fail stage through the normal repair machinery, so
+		// leaving PR comments loops back into the factory instead of ending it.
+		Findings []struct {
+			Location       string `json:"location,omitempty"`
+			Summary        string `json:"summary"`
+			Recommendation string `json:"recommendation,omitempty"`
+		} `json:"findings,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || (request.Decision != "approve" && request.Decision != "reject") {
-		writeError(w, http.StatusBadRequest, errors.New("decision must be approve or reject"))
+	if err := decoder.Decode(&request); err != nil ||
+		(request.Decision != "approve" && request.Decision != "reject" && request.Decision != "changes") {
+		writeError(w, http.StatusBadRequest, errors.New("decision must be approve, reject, or changes"))
+		return
+	}
+	if request.Decision == "changes" && len(request.Findings) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("a changes decision requires at least one finding"))
 		return
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
@@ -63,17 +81,46 @@ func (s *Server) workflowGate(w http.ResponseWriter, r *http.Request) {
 		} else {
 			err = s.db.ResolveGate(r.Context(), item.ID, node.ID, next, "approve", artifact.Hash)
 		}
+	} else if request.Decision == "changes" {
+		if node.OnFail == "" {
+			writeError(w, http.StatusConflict, errors.New("this gate has no on_fail stage to route changes to"))
+			return
+		}
+		feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: item.ContentHash}
+		for i, finding := range request.Findings {
+			summary := strings.TrimSpace(finding.Summary)
+			if summary == "" {
+				writeError(w, http.StatusBadRequest, errors.New("every finding requires a summary"))
+				return
+			}
+			feedback.Findings = append(feedback.Findings, wfe.Finding{
+				ID: fmt.Sprintf("human-%d", i+1), Persona: "human", Severity: "blocking",
+				Location: strings.TrimSpace(finding.Location), Summary: summary,
+				Recommendation: strings.TrimSpace(finding.Recommendation),
+			})
+		}
+		if putErr := s.artifacts.PutFeedback(item.ID, feedback); putErr != nil {
+			writeError(w, http.StatusInternalServerError, putErr)
+			return
+		}
+		artifact, putErr := s.artifacts.PutNodeArtifact(item.ID, node.ID, "approval", []byte("changes requested"))
+		if putErr != nil {
+			writeError(w, http.StatusInternalServerError, putErr)
+			return
+		}
+		err = s.db.ResolveGate(r.Context(), item.ID, node.ID, node.OnFail, "changes", artifact.Hash)
 	} else {
 		artifact, putErr := s.artifacts.PutNodeArtifact(item.ID, node.ID, "approval", []byte("rejected"))
 		if putErr != nil {
 			writeError(w, http.StatusInternalServerError, putErr)
 			return
 		}
-		if node.OnFail == "" {
-			err = s.db.RejectGate(r.Context(), item.ID, node.ID, artifact.Hash)
-		} else {
-			err = s.db.ResolveGate(r.Context(), item.ID, node.ID, node.OnFail, "reject", artifact.Hash)
-		}
+		// Reject is always terminal. The gate's on_fail edge belongs to the
+		// "changes" decision exclusively: before that decision existed, reject
+		// doubled as the send-it-back path, but a rejection that silently
+		// re-dispatches an implementer with no feedback is neither an ending
+		// nor a usable repair.
+		err = s.db.RejectGate(r.Context(), item.ID, node.ID, artifact.Hash)
 	}
 	if err != nil {
 		writeError(w, http.StatusConflict, err)

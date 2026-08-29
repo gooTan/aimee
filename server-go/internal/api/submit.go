@@ -20,6 +20,10 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 		Workflow   string `json:"workflow"`
 		Repo       string `json:"repo"`
 		SourcePath string `json:"source_path"`
+		// DelegateAliases reseats pinned workflow delegates for this run only
+		// (for example {"fable":"sol"} to plan on sol). Stored as the run's
+		// config artifact; the engine applies it at every dispatch.
+		DelegateAliases map[string]string `json:"delegate_aliases,omitempty"`
 	}
 	decoder := jsonDecoder(r.Body)
 	if err := decoder.Decode(&request); err != nil {
@@ -101,6 +105,26 @@ func (s *Server) devSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := s.artifacts.PutProposal(id, []byte(request.Proposal)); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if len(request.DelegateAliases) > 0 {
+		if len(request.DelegateAliases) > 8 {
+			writeError(w, http.StatusBadRequest, errors.New("too many delegate aliases"))
+			return
+		}
+		aliases := make(map[string]string, len(request.DelegateAliases))
+		for from, to := range request.DelegateAliases {
+			from = strings.ToLower(strings.TrimSpace(from))
+			to = strings.TrimSpace(to)
+			if from == "" || to == "" || len(from) > 64 || len(to) > 64 {
+				writeError(w, http.StatusBadRequest, errors.New("delegate aliases must map non-empty delegate names"))
+				return
+			}
+			aliases[from] = to
+		}
+		if err := s.artifacts.PutRunConfig(id, wfe.RunConfig{DelegateAliases: aliases}); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	start := definition.Start
 	if start == "" {

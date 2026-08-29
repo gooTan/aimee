@@ -129,6 +129,26 @@ static void test_common_json_parse_text_tool_and_error(void)
    assert(strcmp(ev.text, "boom") == 0);
 }
 
+static void test_agy_parse_live_tool_steps(void)
+{
+   const provider_cli_adapter_t *agy = provider_cli_adapter_get("agy");
+   assert(agy != NULL);
+
+   cli_event_t ev;
+   const char *active = "{\"event\":\"step_update\",\"step_update\":{"
+                        "\"state\":\"ACTIVE\",\"step_type\":\"tool\","
+                        "\"tool_name\":\"view_file\"}}";
+   assert(agy->parse_line(active, &ev) == 1);
+   assert(ev.type == CLI_EVENT_TOOL_START);
+   assert(strcmp(ev.tool_name, "view_file") == 0);
+
+   const char *done = "{\"event\":\"step_update\",\"step_update\":{"
+                      "\"state\":\"DONE\",\"step_type\":\"tool\","
+                      "\"tool_name\":\"view_file\"}}";
+   assert(agy->parse_line(done, &ev) == 1);
+   assert(ev.type == CLI_EVENT_TOOL_COMPLETE);
+}
+
 static void test_claude_parse_stream_json(void)
 {
    const provider_cli_adapter_t *claude = provider_cli_adapter_get("claude");
@@ -162,6 +182,40 @@ static void test_claude_parse_stream_json(void)
    assert(ev.type == CLI_EVENT_TURN_COMPLETE);
    assert(strcmp(ev.text, "hi") == 0);
    assert(ev.latency_ms == 23);
+
+   const struct
+   {
+      const char *line;
+      cli_event_type_t want;
+   } cases[] = {
+       {"{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"terminal_reason\":"
+        "\"completed\"}",
+        CLI_EVENT_TURN_COMPLETE},
+       {"{\"type\":\"result\",\"result\":\"done\",\"api_error_status\":null}",
+        CLI_EVENT_TURN_COMPLETE},
+       {"{\"type\":\"result\",\"result\":\"done\",\"api_error_status\":0}",
+        CLI_EVENT_TURN_COMPLETE},
+       {"{\"type\":\"result\",\"result\":\"failed\",\"is_error\":true}", CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"result\":\"failed\"}",
+        CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"result\":\"failed\",\"api_error_status\":429}", CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"result\":\"failed\",\"terminal_reason\":\"rate_limited\"}",
+        CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"result\":\"Login expired · Please run /login\"}", CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"result\":\"You've hit your session limit · resets 1:20am\"}",
+        CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"result\":\"Reached your usage limit for this billing cycle\"}",
+        CLI_EVENT_ERROR},
+       {"{\"type\":\"result\",\"result\":\"The usage limit section is ready\"}",
+        CLI_EVENT_TURN_COMPLETE},
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+   {
+      assert(claude->parse_line(cases[i].line, &ev) == 1);
+      assert(ev.type == cases[i].want);
+   }
+   assert(claude->parse_line("Login expired · Please run /login", &ev) == 1);
+   assert(ev.type == CLI_EVENT_ERROR);
 }
 
 static void test_claude_stream_json_does_not_duplicate_final_result(void)
@@ -197,6 +251,40 @@ static void test_claude_stream_json_does_not_duplicate_final_result(void)
    assert(strcmp(out.response, "ok") == 0);
    assert(out.turns == 1);
    free(out.response);
+   unlink(path);
+}
+
+static void test_claude_terminal_error_overrides_assistant_text(void)
+{
+   char path[512];
+   snprintf(path, sizeof(path), "%s/aimee-expired-claude-XXXXXX", platform_tmpdir());
+   int fd = mkstemp(path);
+   assert(fd >= 0);
+   FILE *f = fdopen(fd, "w");
+   assert(f != NULL);
+   fputs(
+       "#!/bin/sh\n"
+       "cat >/dev/null\n"
+       "printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+       "\"delta\":{\"type\":\"text_delta\",\"text\":\"Login expired · Please run /login\"}}}'\n"
+       "printf '%s\\n' '{\"type\":\"result\",\"result\":\"Login expired · Please run /login\"}'\n",
+       f);
+   fclose(f);
+   chmod(path, 0700);
+
+   agent_t agent;
+   memset(&agent, 0, sizeof(agent));
+   snprintf(agent.name, sizeof(agent.name), "expired-claude");
+   snprintf(agent.backend, sizeof(agent.backend), "%s", AGENT_BACKEND_PROVIDER_CLI);
+   snprintf(agent.cli_kind, sizeof(agent.cli_kind), "claude");
+   snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "%s", path);
+   agent.timeout_ms = 5000;
+
+   agent_result_t out;
+   assert(provider_cli_adapter_execute(provider_cli_adapter_get("claude"), &agent, ".", "sys",
+                                       "user", &out) != 0);
+   assert(out.success == 0);
+   assert(strstr(out.error, "Login expired") != NULL);
    unlink(path);
 }
 
@@ -310,8 +398,10 @@ int main(void)
 {
    test_registry_and_caps();
    test_common_json_parse_text_tool_and_error();
+   test_agy_parse_live_tool_steps();
    test_claude_parse_stream_json();
    test_claude_stream_json_does_not_duplicate_final_result();
+   test_claude_terminal_error_overrides_assistant_text();
    test_provider_cli_honors_workflow_tool_loop_cap();
    test_mistral_native_adapter_execution();
    test_native_auth_cmd_uses_bearer_token_command();

@@ -257,6 +257,25 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 		}
 		reason := "runner_unavailable"
 		capacity := isCapacityBackpressure(err)
+		if errors.Is(err, db1.ErrPremiumCallLimit) {
+			// A spent premium allowance cannot heal on a retry backoff: every
+			// re-dispatch would refuse at the same ledger. Park for a human, who
+			// can finish the run on the standard delegates or raise the cap.
+			if parkErr := e.parkAfterSpend(ctx, item, "premium_cap", err, 0); parkErr != nil {
+				return out, parkErr
+			}
+			out.Parked, out.PauseReason = true, "premium_cap"
+			return out, nil
+		}
+		if errors.Is(err, ErrPremiumWriteRefused) {
+			// A workflow that pins a premium delegate on a write-capable node is
+			// misconfigured; retrying dispatches nothing and spends nothing.
+			if parkErr := e.parkAfterSpend(ctx, item, "premium_write_refused", err, 0); parkErr != nil {
+				return out, parkErr
+			}
+			out.Parked, out.PauseReason = true, "premium_write_refused"
+			return out, nil
+		}
 		if errors.Is(err, ErrGitIdentityMissing) {
 			// This cannot heal on the scheduler's five-second runner backoff. Park
 			// until an operator seals the documented install-time identity and
@@ -431,13 +450,21 @@ func (e *Engine) Advance(ctx context.Context, workItemID string) (AdvanceResult,
 		if err != nil {
 			return out, e.parkAfterSpend(ctx, item, "feedback_encode_failed", err, step.CostUSD)
 		}
-		transition, err := e.db.RecordRequestedChanges(ctx, item.ID, node.ID, node.OnFail,
+		// An escalation-classed verdict takes the dedicated senior-review edge
+		// when the node declares one; every routine finding stays on on_fail.
+		// The class is trusted only after normalization in the runner, so an
+		// unknown label cannot buy a premium dispatch.
+		changesTarget := node.OnFail
+		if step.Feedback.Escalation != "" && node.OnEscalate != "" {
+			changesTarget = node.OnEscalate
+		}
+		transition, err := e.db.RecordRequestedChanges(ctx, item.ID, node.ID, changesTarget,
 			reviewed.Hash, wfe.Hash(encoded), unresolvedBlockers(step.Feedback),
 			maxIterations(node), e.maxNoProgress, step.CostUSD)
 		if err != nil {
 			return out, err
 		}
-		out.NextStage = node.OnFail
+		out.NextStage = changesTarget
 		out.Parked = transition.Parked
 		out.PauseReason = transition.PauseReason
 		return out, nil

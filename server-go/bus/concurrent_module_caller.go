@@ -175,7 +175,7 @@ func (c *ConcurrentModuleCaller) Call(ctx context.Context, eventKind, stageID ui
 		deadlineNS = monotonicNowNS() + uint64(deadline)
 	}
 	c.sendMu.Lock()
-	err := (&ModuleCaller{client: c.client}).send(eventKind, stageID, traceID, id, deadlineNS, request)
+	err := (&ModuleCaller{client: c.client, pollInterval: c.pollInterval}).send(ctx, eventKind, stageID, traceID, id, deadlineNS, request)
 	c.sendMu.Unlock()
 	if err != nil {
 		c.deliver(id, callerReply{err: errors.Join(ErrModuleCallNotDispatched, err)})

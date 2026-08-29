@@ -60,6 +60,23 @@ type Forge interface {
 	Merge(context.Context, string, string, string) error
 }
 
+// ReviewComment is one reviewer finding anchored to a diff location, posted
+// as an inline pull-request comment. The findings are authored by the review
+// seats; the ENGINE posts them, because delegates deliberately hold no forge
+// credentials.
+type ReviewComment struct {
+	Path string
+	Line int
+	Body string
+}
+
+// ReviewCommenter is the optional forge capability for inline PR comments.
+// A forge without it falls back to the engine's gh CLI helper; posting is
+// best-effort either way, since every finding already appears in the PR body.
+type ReviewCommenter interface {
+	ReviewComments(ctx context.Context, workdir, prRef string, comments []ReviewComment) error
+}
+
 type unavailableForge struct{}
 
 func (unavailableForge) Push(context.Context, string, string, string) error {

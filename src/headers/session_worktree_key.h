@@ -42,10 +42,16 @@
  * plus the readability prefix (up to 8 chars): 8 + 1 + 16 = 25, + NUL. */
 #define SESSION_WORKTREE_KEY_MAX 26
 
+/* Stable directory key for a repository path. Worktrees live under the Aimee
+ * state directory, so the repository needs its own collision-resistant slot. */
+#define SESSION_WORKTREE_REPO_KEY_MAX 17
+
 /* Derive the worktree/branch key for `sid` into out[cap]. Writes "" when sid is
  * NULL/empty or cap is too small. Pure and stable across processes, builds and
  * platforms — a session resuming later must land on the same worktree. */
 void session_worktree_key(const char *sid, char *out, size_t cap);
+
+void session_worktree_repo_key(const char *git_root, char *out, size_t cap);
 
 /* The PREVIOUS server-side derivation: the first 16 sanitized characters of the
  * session id. Retained solely so a session that already owns a worktree under

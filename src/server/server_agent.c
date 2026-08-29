@@ -1033,7 +1033,7 @@ int handle_agent_local(server_ctx_t *ctx, server_conn_t *conn, cJSON *req)
    snprintf(ag->provider, sizeof(ag->provider), "openai");
    ag->cost_tier = opt_get_int(&opts, "cost-tier", 0);
    ag->max_tokens = opt_get_int(&opts, "max-tokens", AGENT_DEFAULT_MAX_TOKENS);
-   ag->timeout_ms = opt_get_int(&opts, "timeout-ms", opt_get_int(&opts, "timeout", 300000));
+   ag->timeout_ms = opt_get_int(&opts, "timeout-ms", opt_get_int(&opts, "timeout", 0));
    ag->enabled = 1;
    ag->tools_enabled = opt_has(&opts, "no-tools") ? 0 : 1;
    ag->max_turns = opt_get_int(&opts, "max-turns", -1);

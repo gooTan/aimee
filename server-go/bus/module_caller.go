@@ -111,7 +111,7 @@ func (m *ModuleCaller) Call(ctx context.Context, eventKind, stageID uint32, trac
 	if deadline > 0 {
 		deadlineNS = monotonicNowNS() + uint64(deadline)
 	}
-	if err := m.send(eventKind, stageID, traceID, correlation, deadlineNS, request); err != nil {
+	if err := m.send(ctx, eventKind, stageID, traceID, correlation, deadlineNS, request); err != nil {
 		return nil, err
 	}
 
@@ -131,7 +131,7 @@ func (m *ModuleCaller) Call(ctx context.Context, eventKind, stageID uint32, trac
 
 // send fragments the invoke across the client's inline budget, exactly as the
 // serving side fragments its reply.
-func (m *ModuleCaller) send(eventKind, stageID uint32, traceID, correlation, deadlineNS uint64,
+func (m *ModuleCaller) send(ctx context.Context, eventKind, stageID uint32, traceID, correlation, deadlineNS uint64,
 	request []byte) error {
 	budget := m.client.moduleInlineBudget()
 	if budget <= ModuleMessageHeaderLen {
@@ -154,8 +154,19 @@ func (m *ModuleCaller) send(eventKind, stageID uint32, traceID, correlation, dea
 			return err
 		}
 		copy(frame[written:], request[offset:offset+part])
-		if err := m.client.RequestFragment(eventKind, correlation, frame[:written+part], more); err != nil {
-			return err
+		for {
+			err := m.client.RequestFragment(eventKind, correlation, frame[:written+part], more)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, ErrWouldBlock) {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(m.pollInterval):
+			}
 		}
 		offset += part
 	}

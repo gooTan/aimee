@@ -468,3 +468,49 @@ func TestMergeCarriesMethodDriftGuardAndReturnsTheSHA(t *testing.T) {
 		t.Fatalf("default method = %s", stub2.body)
 	}
 }
+
+func TestRepoForkPostsToForksEndpointWithNoBody(t *testing.T) {
+	stub := &forgeStub{reply: `{"full_name":"me/widgets","html_url":"https://github.com/me/widgets"}`}
+	stub.start(t)
+	out := PerformForge(ForgeRequest{Op: OpRepoFork, Owner: "o", Repo: "r", Token: "s3cret"})
+	if out.Error != "" {
+		t.Fatalf("unexpected error: %s", out.Error)
+	}
+	if stub.method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", stub.method)
+	}
+	if stub.path != "/repos/o/r/forks" {
+		t.Fatalf("path = %q, want /repos/o/r/forks", stub.path)
+	}
+	if stub.auth != "Bearer s3cret" {
+		t.Fatalf("Authorization = %q", stub.auth)
+	}
+	if stub.body != "" {
+		t.Fatalf("body = %q, want no request body", stub.body)
+	}
+	if out.ForkFullName != "me/widgets" {
+		t.Fatalf("fork_full_name = %q, want me/widgets", out.ForkFullName)
+	}
+	if out.ForkURL != "https://github.com/me/widgets" {
+		t.Fatalf("fork_url = %q, want https://github.com/me/widgets", out.ForkURL)
+	}
+	encoded, _ := json.Marshal(out)
+	if strings.Contains(string(encoded), "s3cret") {
+		t.Fatalf("credential must not appear in response: %s", encoded)
+	}
+}
+
+func TestRepoForkSurfacesGitHubError(t *testing.T) {
+	stub := &forgeStub{status: 422, reply: `{"message":"Fork already exists"}`}
+	stub.start(t)
+	out := PerformForge(ForgeRequest{Op: OpRepoFork, Owner: "o", Repo: "r", Token: "t"})
+	if out.Status != 422 {
+		t.Fatalf("status = %d, want 422", out.Status)
+	}
+	if !strings.Contains(out.Error, "Fork already exists") || !strings.Contains(out.Error, "422") {
+		t.Fatalf("error = %q, want forge message and status", out.Error)
+	}
+	if !strings.Contains(out.Error, "repo fork") {
+		t.Fatalf("error = %q, want repo fork prefix", out.Error)
+	}
+}

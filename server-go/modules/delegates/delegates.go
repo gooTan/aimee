@@ -71,12 +71,13 @@ func NewHandler(executor Executor) bus.ModuleHandler {
 			defer cancel()
 			models, err := planner.PlanGroup(ctx, decoded.Seats)
 			if err != nil {
-				if !delegatecontract.IsCapacityBackpressure(err) && !delegatecontract.IsCapacityDeadline(err) {
+				availability := delegatecontract.ClassifyProviderAvailability(err, false)
+				if availability == delegatecontract.AvailabilityClassNone {
 					return nil, bus.ModuleStatusInternal
 				}
 				response, marshalErr := json.Marshal(delegatecontract.GroupPlanResult{
 					Version: delegatecontract.WireVersion,
-					Error:   delegatecontract.SafeDiagnostic(err.Error()),
+					Error:   delegatecontract.SafeDiagnostic(err.Error()), AvailabilityClass: availability,
 				})
 				if marshalErr != nil {
 					return nil, bus.ModuleStatusInternal

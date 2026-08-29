@@ -2,9 +2,12 @@ package panel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/JBailes/aimee/server-go/delegate"
 )
 
 func chairmanRun() Run {
@@ -98,5 +101,150 @@ func TestChairmanRejectsAnotherRunsArtifactIdentity(t *testing.T) {
 	analysis := discussionAnalysis("blocking")
 	if _, _, _, _, errText, _ := RunChairman(context.Background(), agents, run, Panel{ChairmanEnabled: true, Chairman: "codex"}, analysis, analysis.Feedback, 0, false, "plan"); !strings.Contains(errText, "mismatched run or artifact identity") {
 		t.Fatalf("stale chairman response was not rejected: %q", errText)
+	}
+}
+
+type chairmanFallbackAgents struct {
+	responses map[string][]SeatResult
+	requests  []SeatRequest
+}
+
+func (a *chairmanFallbackAgents) One(_ context.Context, _ Run, request SeatRequest) SeatResult {
+	a.requests = append(a.requests, request)
+	responses := a.responses[request.Selector]
+	if len(responses) == 0 {
+		return SeatResult{Err: errors.New("unexpected chairman call")}
+	}
+	result := responses[0]
+	a.responses[request.Selector] = responses[1:]
+	return result
+}
+
+func (a *chairmanFallbackAgents) Group(context.Context, Run, []SeatRequest) []SeatResult {
+	return nil
+}
+
+func validChairmanResult() SeatResult {
+	return SeatResult{Response: chairmanResponse(`"artifact_stage":"plan","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`)}
+}
+
+func unavailableChairmanResult(class delegate.AvailabilityClass) SeatResult {
+	return SeatResult{AvailabilityClass: class, Err: fmt.Errorf("%s unavailable", class), FailureDetail: fmt.Sprintf("%s unavailable", class)}
+}
+
+func TestChairmanFallbackRunsForAvailabilityFailures(t *testing.T) {
+	classes := []delegate.AvailabilityClass{
+		delegate.AvailabilityClassQuotaRateLimit,
+		delegate.AvailabilityClassCapacity,
+		delegate.AvailabilityClassCapacityDeadline,
+		delegate.AvailabilityClassAuthentication,
+		delegate.AvailabilityClassProviderUnavailable,
+		delegate.AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(string(class), func(t *testing.T) {
+			agents := &chairmanFallbackAgents{responses: map[string][]SeatResult{
+				"primary":  {unavailableChairmanResult(class)},
+				"fallback": {validChairmanResult()},
+			}}
+			analysis := discussionAnalysis("blocking")
+			feedback, approvals, _, _, errText, _ := RunChairman(context.Background(), agents, chairmanRun(), Panel{
+				ChairmanEnabled: true, Chairman: "primary", ChairmanFallback: "fallback",
+			}, analysis, analysis.Feedback, 0, false, "plan")
+			if errText != "" || approvals != len(analysis.Reports) || len(feedback.Findings) != 0 || len(agents.requests) != 2 {
+				t.Fatalf("fallback did not recover %s: approvals=%d err=%q calls=%d", class, approvals, errText, len(agents.requests))
+			}
+			if agents.requests[0].Selector != "primary" || agents.requests[1].Selector != "fallback" {
+				t.Fatalf("selectors=%q,%q", agents.requests[0].Selector, agents.requests[1].Selector)
+			}
+			if agents.requests[1].FallbackFrom != "primary" || agents.requests[1].FallbackReason != string(class) {
+				t.Fatalf("fallback metadata=%+v", agents.requests[1])
+			}
+		})
+	}
+}
+
+func TestChairmanFallbackDurableSlotsAreDistinct(t *testing.T) {
+	agents := &chairmanFallbackAgents{responses: map[string][]SeatResult{
+		"primary":  {unavailableChairmanResult(delegate.AvailabilityClassProviderUnavailable)},
+		"fallback": {{Response: "not json"}, validChairmanResult()},
+	}}
+	analysis := discussionAnalysis("blocking")
+	_, _, _, _, errText, _ := RunChairman(context.Background(), agents, chairmanRun(), Panel{
+		ChairmanEnabled: true, Chairman: "primary", ChairmanFallback: "fallback",
+	}, analysis, analysis.Feedback, 0, false, "plan")
+	if errText != "" || len(agents.requests) != 3 {
+		t.Fatalf("fallback repair failed: calls=%d err=%q", len(agents.requests), errText)
+	}
+	seen := map[string]bool{}
+	for _, request := range agents.requests {
+		if seen[request.DurableSlot] {
+			t.Fatalf("durable slot reused: %q", request.DurableSlot)
+		}
+		seen[request.DurableSlot] = true
+	}
+	if !strings.HasSuffix(agents.requests[0].DurableSlot, ":chairman") ||
+		!strings.HasSuffix(agents.requests[1].DurableSlot, ":chairman:fallback") ||
+		!strings.HasSuffix(agents.requests[2].DurableSlot, ":chairman:fallback:repair:1") {
+		t.Fatalf("unexpected durable slots: %+v", agents.requests)
+	}
+}
+
+func TestChairmanDoesNotFallbackForSemanticOrUnclassifiedFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []SeatResult
+		wantCalls int
+	}{
+		{name: "approve", responses: []SeatResult{validChairmanResult()}, wantCalls: 1},
+		{name: "changes", responses: []SeatResult{{Response: chairmanResponse(`"artifact_stage":"plan","original_request_alignment":{"status":"aligned"},"verdict":"changes","findings":[{"severity":"blocking","summary":"fix it","recommendation":"fix it"}]}`)}}, wantCalls: 1},
+		{name: "blocked", responses: []SeatResult{{Response: chairmanResponse(`"artifact_stage":"plan","original_request_alignment":{"status":"aligned"},"verdict":"blocked","findings":[{"severity":"foundational","summary":"impossible","recommendation":"ask a human"}]}`)}}, wantCalls: 1},
+		{name: "malformed after repair", responses: []SeatResult{{Response: "not json"}, {Response: "still not json"}}, wantCalls: 2},
+		{name: "replay loss", responses: []SeatResult{{Err: delegate.ErrDelegateReplayUnavailable}}, wantCalls: 1},
+		{name: "response started", responses: []SeatResult{{AvailabilityClass: delegate.AvailabilityClassCapacity, ResponseStarted: true, Err: errors.New("partial output")}}, wantCalls: 1},
+		{name: "terminal", responses: []SeatResult{{Err: errors.New("ordinary terminal failure")}}, wantCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agents := &chairmanFallbackAgents{responses: map[string][]SeatResult{"primary": tc.responses, "fallback": {validChairmanResult()}}}
+			analysis := discussionAnalysis("blocking")
+			_, _, _, _, errText, blocked := RunChairman(context.Background(), agents, chairmanRun(), Panel{
+				ChairmanEnabled: true, Chairman: "primary", ChairmanFallback: "fallback",
+			}, analysis, analysis.Feedback, 0, false, "plan")
+			if len(agents.requests) != tc.wantCalls || len(agents.requests) > 0 && agents.requests[len(agents.requests)-1].Selector == "fallback" {
+				t.Fatalf("unexpected fallback calls=%d requests=%+v err=%q blocked=%v", len(agents.requests), agents.requests, errText, blocked)
+			}
+		})
+	}
+}
+
+func TestChairmanDoesNotFallbackInReplayOnlyRuns(t *testing.T) {
+	agents := &chairmanFallbackAgents{responses: map[string][]SeatResult{
+		"primary":  {unavailableChairmanResult(delegate.AvailabilityClassProviderUnavailable)},
+		"fallback": {validChairmanResult()},
+	}}
+	run := chairmanRun()
+	run.ReplayOnly = true
+	analysis := discussionAnalysis("blocking")
+	_, _, _, _, errText, _ := RunChairman(context.Background(), agents, run, Panel{
+		ChairmanEnabled: true, Chairman: "primary", ChairmanFallback: "fallback",
+	}, analysis, analysis.Feedback, 0, false, "plan")
+	if len(agents.requests) != 1 || errText == "" {
+		t.Fatalf("replay-only run launched fallback: calls=%d err=%q", len(agents.requests), errText)
+	}
+}
+
+func TestChairmanBothProfilesUnavailableReturnCombinedDiagnostics(t *testing.T) {
+	agents := &chairmanFallbackAgents{responses: map[string][]SeatResult{
+		"primary":  {unavailableChairmanResult(delegate.AvailabilityClassQuotaRateLimit)},
+		"fallback": {unavailableChairmanResult(delegate.AvailabilityClassProviderUnavailable)},
+	}}
+	analysis := discussionAnalysis("blocking")
+	_, approvals, _, _, errText, _ := RunChairman(context.Background(), agents, chairmanRun(), Panel{
+		ChairmanEnabled: true, Chairman: "primary", ChairmanFallback: "fallback",
+	}, analysis, analysis.Feedback, 0, false, "plan")
+	if approvals != analysis.Approvals || !strings.Contains(errText, "primary chairman unavailable (provider_quota)") ||
+		!strings.Contains(errText, "fallback chairman unavailable (provider_unavailable)") {
+		t.Fatalf("combined unavailable diagnostics missing: approvals=%d err=%q", approvals, errText)
 	}
 }

@@ -27,9 +27,14 @@ func (a *e2eAgents) Delegate(_ context.Context, request DelegateRequest) (Delega
 	case "review":
 		return DelegateResult{Response: fmt.Sprintf(`{"run_id":%q,"artifact_hash":%q,"artifact_stage":%q,"original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`,
 			request.WorkItemID, request.ArtifactHash, request.ArtifactStage)}, nil
+	case "search":
+		return DelegateResult{Response: `{"schema_version":2,"status":"ready","summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
 	case "draft":
+		if strings.Contains(request.Prompt, "Prepare a concise ContextBrief") {
+			return DelegateResult{Response: `{"schema_version":2,"status":"ready","summary":"add the feature","files":["feature.txt"],"interfaces":["none"],"constraints":["stay small"],"decisions":["none"],"risks":["low"],"open_questions":[],"acceptance_criteria":["feature exists"],"artifacts":[]}`}, nil
+		}
 		if strings.Contains(request.Prompt, "PACKET PLAN") || strings.Contains(request.Prompt, "Decompose the complete approved plan") {
-			return DelegateResult{Response: `{"schema_version":1,"packets":[{"packet_id":"p1","summary":"implement feature","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature exists"]}]}`}, nil
+			return DelegateResult{Response: `{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"implement feature","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["feature exists"],"implementation_kind":"general"}]}`}, nil
 		}
 		if strings.Contains(request.Prompt, "Scope the engineering task") {
 			return DelegateResult{Response: `{"schema_version":1,"status":"unconfirmed","summary":"implement feature","rationale":"proposal","acceptance_criteria":["feature exists"]}`}, nil
@@ -84,8 +89,17 @@ func (r *transientGateRunner) Run(ctx context.Context, request StepRequest) (Ste
 }
 
 type e2eForge struct {
-	mu    sync.Mutex
-	opens []PullRequestSpec
+	mu       sync.Mutex
+	opens    []PullRequestSpec
+	bases    []string
+	comments []ReviewComment
+}
+
+func (f *e2eForge) ReviewComments(_ context.Context, _ string, _ string, comments []ReviewComment) error {
+	f.mu.Lock()
+	f.comments = append(f.comments, comments...)
+	f.mu.Unlock()
+	return nil
 }
 
 func (*e2eForge) Push(ctx context.Context, _, workdir, branch string) error {
@@ -96,6 +110,7 @@ func (*e2eForge) Push(ctx context.Context, _, workdir, branch string) error {
 func (f *e2eForge) Open(_ context.Context, _ string, _ string, head, base string, spec PullRequestSpec) (PullRequest, error) {
 	f.mu.Lock()
 	f.opens = append(f.opens, spec)
+	f.bases = append(f.bases, base)
 	f.mu.Unlock()
 	return PullRequest{Ref: "pr:" + head, URL: "pr:" + head, Head: head, Base: base}, nil
 }
@@ -133,6 +148,8 @@ func TestNativeSchedulerDrivesConfiguredBuildThroughSliceToFinalPR(t *testing.T)
 	run(repo, "commit", "-m", "init")
 	run(repo, "push", "-u", "origin", "trunk")
 	run(repo, "remote", "set-head", "origin", "trunk")
+	run(repo, "checkout", "-b", "testing")
+	run(repo, "push", "-u", "origin", "testing")
 	workflowDir := filepath.Join(root, "workflows")
 	registry, err := wfe.NewRegistry(workflowDir)
 	if err != nil {
@@ -317,6 +334,7 @@ nodes:
 			}
 			forge.mu.Lock()
 			opens := append([]PullRequestSpec(nil), forge.opens...)
+			bases := append([]string(nil), forge.bases...)
 			forge.mu.Unlock()
 			if len(opens) != 2 {
 				t.Fatalf("opened %d PRs, want slice + final: %+v", len(opens), opens)
@@ -327,6 +345,9 @@ nodes:
 			final := opens[1]
 			if !final.Draft || final.Title != "Build feature" {
 				t.Fatalf("final handoff = %+v, want meaningful draft PR", final)
+			}
+			if len(bases) != 2 || bases[1] != "trunk" {
+				t.Fatalf("PR bases = %v, want final PR against repository trunk", bases)
 			}
 			for _, marker := range []string{"## Human review boundary", "intentionally a draft",
 				"## What this proposal does", "## What changed", "Original request",

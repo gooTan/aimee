@@ -281,12 +281,10 @@ static void test_mcp_chdir_repairs_stale_delegate_tracked_cwd(void)
 
    char session_main[MAX_PATH_LEN];
    char stale_delegate[MAX_PATH_LEN];
-   /* Derive the key rather than hard-coding it. The session key is a hash of the
-    * full id now, not its first 16 characters — a literal path here silently
-    * stopped matching what the resolver computes. */
-   char skey[SESSION_WORKTREE_KEY_MAX];
-   session_worktree_key("102ee97d-session", skey, sizeof(skey));
-   snprintf(session_main, sizeof(session_main), "%s/.aimee/worktrees/%s/main", g_tmpdir, skey);
+   /* Resolve through the shared layout helper so this seam follows externalized
+    * session worktrees as well as the former in-repo layout. */
+   assert(worktree_sibling_path(g_tmpdir, "102ee97d-session", NULL, session_main,
+                                sizeof(session_main)) == 0);
    snprintf(stale_delegate, sizeof(stale_delegate), "%s/.aimee/worktrees/deleg-24/37368447",
             g_tmpdir);
 
@@ -314,6 +312,52 @@ static void test_mcp_chdir_repairs_stale_delegate_tracked_cwd(void)
    cJSON_Delete(args);
    unlink(cwd_path);
    session_id_clear_override();
+   char cleanup[MAX_PATH_LEN + 32];
+   snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", session_main);
+   assert(system(cleanup) == 0);
+   teardown_git_repo();
+}
+
+static void test_mcp_chdir_repairs_externalized_delegate_tracked_cwd(void)
+{
+   setup_git_repo();
+
+   char session_main[MAX_PATH_LEN];
+   char stale_delegate[MAX_PATH_LEN];
+   assert(worktree_sibling_path(g_tmpdir, "102ee97d-session", NULL, session_main,
+                                sizeof(session_main)) == 0);
+   assert(worktree_sibling_path(g_tmpdir, "deleg-stale", "work", stale_delegate,
+                                sizeof(stale_delegate)) == 0);
+
+   char cmd[MAX_PATH_LEN * 3];
+   snprintf(cmd, sizeof(cmd),
+            "mkdir -p '%s' '%s' && git -C '%s' worktree add -q -b session-main-%d '%s' HEAD && "
+            "git -C '%s' worktree add -q -b delegate-stale-%d '%s' HEAD",
+            session_main, stale_delegate, g_tmpdir, (int)getpid(), session_main, g_tmpdir,
+            (int)getpid(), stale_delegate);
+   assert(system(cmd) == 0);
+
+   session_id_set_override("102ee97d-session");
+   char cwd_path[MAX_PATH_LEN];
+   snprintf(cwd_path, sizeof(cwd_path), "%s/git-cwd-%s", config_output_dir(), session_id());
+   FILE *fp = fopen(cwd_path, "w");
+   assert(fp != NULL);
+   fputs(stale_delegate, fp);
+   fclose(fp);
+
+   assert(chdir("/tmp") == 0);
+   cJSON *args = cJSON_CreateObject();
+   assert(mcp_chdir_git_root(NULL, 0, args, NULL) == 1);
+   assert(strcmp(run_cmd_get_cwd(), session_main) == 0);
+
+   run_cmd_set_cwd(NULL);
+   cJSON_Delete(args);
+   unlink(cwd_path);
+   session_id_clear_override();
+   snprintf(cmd, sizeof(cmd),
+            "git -C '%s' worktree remove --force '%s' && git -C '%s' worktree remove --force '%s'",
+            g_tmpdir, stale_delegate, g_tmpdir, session_main);
+   assert(system(cmd) == 0);
    teardown_git_repo();
 }
 
@@ -1817,6 +1861,8 @@ static void test_verify_load_config_repairs_existing_generated_plan_with_go_modu
    assert(verify_load_config(tmpdir, &cfg) == 0);
    assert(cfg.count == 4);
    assert(strcmp(cfg.steps[0].name, "verify-local") == 0);
+   assert(strstr(cfg.steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-1") != NULL);
+   assert(strstr(cfg.steps[0].run, "AIMEE_VERIFY_TEST_JOBS:-2") == NULL);
    assert(strcmp(cfg.steps[1].name, "go-test-root") == 0);
    assert(strcmp(cfg.steps[2].name, "go-test-alpha-go") == 0);
    assert(strcmp(cfg.steps[3].name, "go-test-zeta-go") == 0);
@@ -2029,7 +2075,7 @@ static void test_verify_load_config_falls_back_to_verify_local(void)
    assert(strcmp(cfg.steps[0].name, "verify-local") == 0);
    assert(strcmp(cfg.steps[0].run,
                  "make -j${AIMEE_VERIFY_MAKE_JOBS:-$(nproc 2>/dev/null || echo 4)} "
-                 "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-2} "
+                 "AIMEE_VERIFY_TEST_JOBS=${AIMEE_VERIFY_TEST_JOBS:-1} "
                  "verify-local") == 0);
 
    verify_test_teardown(tmpdir, fake_home);
@@ -3093,6 +3139,248 @@ static void test_switch_requires_a_ref(void)
    teardown_git_repo();
 }
 
+static void test_git_fork_missing_repo(void)
+{
+   cJSON *args = cJSON_CreateObject();
+   cJSON *resp = handle_git_fork(args);
+   char *text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   assert(strstr(text, "repo") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "repo", "");
+   resp = handle_git_fork(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "repo", "badformat");
+   resp = handle_git_fork(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   assert(strstr(text, "owner/repo") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "repo", "a/b/c");
+   resp = handle_git_fork(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+}
+
+static void test_git_push_explicit_rejects_bad_urls(void)
+{
+   setup_git_repo();
+   assert(system("git checkout -q -b rej-feature") == 0);
+
+   const char *bad_urls[] = {"/tmp/local.git",
+                             "file:///tmp/foo",
+                             "/absolute/path/to/repo.git",
+                             "https://github.com.evil.com/acme/widgets",
+                             "https://github.com.evil/acme/widgets",
+                             "https://user@github.com/acme/widgets.git",
+                             "https://token:hunter2@github.com/acme/widgets",
+                             "https://github.com/acme", /* missing repo */
+                             "git@evil.com:acme/widgets.git",
+                             "-o",
+                             NULL};
+   for (int i = 0; bad_urls[i]; i++)
+   {
+      cJSON *args = cJSON_CreateObject();
+      cJSON_AddStringToObject(args, "remote_url", bad_urls[i]);
+      cJSON *resp = handle_git_push(args);
+      char *text = get_mcp_text(resp);
+      assert(text != NULL);
+      assert(strstr(text, "error") != NULL);
+      cJSON_Delete(resp);
+      cJSON_Delete(args);
+   }
+
+   teardown_git_repo();
+}
+
+static void test_git_push_explicit_builder(void)
+{
+   char cmd[2048];
+
+   /* Canonical URL and refspec, no -u */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 0, 0) == 0);
+   assert(strstr(cmd, "https://github.com/acme/widgets.git") != NULL);
+   assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
+   assert(strstr(cmd, "-u") == NULL);
+   assert(strstr(cmd, "git push") == cmd);
+   assert(strstr(cmd, "2>&1") != NULL);
+
+   /* Force flag – generic lease, no tags, no forced tag refspec */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 1, 0) == 0);
+   assert(strstr(cmd, "--force-with-lease") != NULL);
+   assert(strstr(cmd, "--tags") == NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") == NULL);
+   assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
+
+   /* Tags flag – generic --tags, no lease, no forced tag refspec */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 0, 1) == 0);
+   assert(strstr(cmd, "--tags") != NULL);
+   assert(strstr(cmd, "--force-with-lease") == NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") == NULL);
+
+   /* Both flags – branch-scoped lease + forced tag refspec, no generic --tags or bare --force */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "spy-feature", 1, 1) == 0);
+   assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
+   assert(strstr(cmd, "spy-feature") != NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") != NULL);
+   assert(strstr(cmd, "'+refs/tags/*:refs/tags/*'") != NULL);
+   assert(strstr(cmd, " --tags") == NULL);
+   assert(strstr(cmd, "--tags") == NULL || strstr(cmd, "refs/tags") != NULL);
+   /* No bare/global --force (only --force-with-lease=...) */
+   assert(strstr(cmd, " --force ") == NULL);
+   {
+      const char *p = strstr(cmd, "--force");
+      assert(p != NULL);
+      assert(strncmp(p, "--force-with-lease=refs/heads/", 27) == 0);
+      p = strstr(p + 1, "--force");
+      assert(p == NULL);
+   }
+   assert(strstr(cmd, "https://github.com/acme/widgets.git") != NULL);
+   assert(strstr(cmd, "'spy-feature:spy-feature'") != NULL);
+
+   /* Branch shell escaping: single quote in branch name */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "a'b", 0, 0) == 0);
+   /* shell_escape turns ' into '\'' -> command must contain that escaped sequence */
+   assert(strstr(cmd, "'\\''") != NULL);
+   assert(strstr(cmd, "a'b:a'b") == NULL);
+
+   /* Branch with spaces/semicolon must be quoted safely */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git",
+                                              "my branch; rm -rf /", 0, 0) == 0);
+   assert(strstr(cmd, "my branch; rm -rf /") != NULL);
+   assert(strstr(cmd, "'my branch; rm -rf /:my branch; rm -rf /'") != NULL);
+
+   /* Branch escaping remains safe in scoped lease and tag refspec (force+tags) */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "a'b", 1, 1) == 0);
+   assert(strstr(cmd, "'\\''") != NULL);
+   assert(strstr(cmd, "a'b:a'b") == NULL);
+   assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
+   assert(strstr(cmd, "+refs/tags/*:refs/tags/*") != NULL);
+   assert(strstr(cmd, " --tags") == NULL);
+   assert(strstr(cmd, "'+refs/tags/*:refs/tags/*'") != NULL);
+
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd),
+                                              "https://github.com/acme/widgets.git",
+                                              "my branch; rm -rf /", 1, 1) == 0);
+   assert(strstr(cmd, "my branch; rm -rf /") != NULL);
+   assert(strstr(cmd, "'my branch; rm -rf /:my branch; rm -rf /'") != NULL);
+   assert(strstr(cmd, "--force-with-lease=refs/heads/") != NULL);
+   assert(strstr(cmd, "'+refs/tags/*:refs/tags/*'") != NULL);
+   /* Scoped lease must contain the escaped branch safely */
+   assert(strstr(cmd, "my branch; rm -rf /") != NULL);
+
+   /* URL shell escaping: single quote in canonical URL */
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), "https://github.com/acme/wi'd.git",
+                                              "branch", 0, 0) == 0);
+   assert(strstr(cmd, "'\\''") != NULL);
+
+   /* URL with space (should be shell-escaped but still quoted) */
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/with space.git", "branch", 0, 0) == 0);
+   assert(strstr(cmd, "with space") != NULL);
+
+   /* Small-buffer / null / empty input failure */
+   char small[10];
+   assert(mcp_git_build_explicit_push_command(
+              small, sizeof(small), "https://github.com/acme/widgets.git", "mybranch", 0, 0) == -1);
+   char tiny[20];
+   assert(mcp_git_build_explicit_push_command(
+              tiny, sizeof(tiny), "https://github.com/acme/widgets.git", "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(NULL, 0, "https://github.com/acme/widgets.git",
+                                              "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, 0, "https://github.com/acme/widgets.git",
+                                              "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), NULL, "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(cmd, sizeof(cmd), "", "mybranch", 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", NULL, 0, 0) == -1);
+   assert(mcp_git_build_explicit_push_command(
+              cmd, sizeof(cmd), "https://github.com/acme/widgets.git", "", 0, 0) == -1);
+}
+
+static void test_git_push_mirror_rejects_new_options(void)
+{
+   setup_git_repo();
+   assert(system("git checkout -q -b mirror-reject") == 0);
+
+   cJSON *args = cJSON_CreateObject();
+   cJSON_AddBoolToObject(args, "mirror", 1);
+   cJSON_AddStringToObject(args, "remote_url", "https://example.com/foo.git");
+   cJSON *resp = handle_git_push(args);
+   char *text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   assert(strstr(text, "mirror") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddBoolToObject(args, "mirror", 1);
+   cJSON_AddBoolToObject(args, "tags", 1);
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddBoolToObject(args, "mirror", 1);
+   cJSON_AddStringToObject(args, "remote_url", "https://example.com/foo.git");
+   cJSON_AddBoolToObject(args, "tags", 1);
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   /* remote_url validation */
+   args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "remote_url", "");
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   args = cJSON_CreateObject();
+   cJSON_AddNumberToObject(args, "remote_url", 123);
+   resp = handle_git_push(args);
+   text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "error") != NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   teardown_git_repo();
+}
+
 /* --- PR title/body derivation --- */
 
 /* One commit: the PR is that commit. No model call, no invented prose. */
@@ -3795,6 +4083,7 @@ int main(void)
    test_mcp_chdir_session_cwd_precedes_proxy_cwd();
    test_explicit_path_is_authoritative_and_live();
    test_mcp_chdir_repairs_stale_delegate_tracked_cwd();
+   test_mcp_chdir_repairs_externalized_delegate_tracked_cwd();
    test_mcp_chdir_keeps_stale_delegate_cwd_when_repair_missing();
    test_mcp_chdir_does_not_repair_delegate_session_cwd();
    test_mcp_chdir_keeps_explicit_managed_worktree_despite_stale_session_state();
@@ -3911,6 +4200,12 @@ int main(void)
    test_pr_ready_stops_at_the_failing_step();
    test_pr_ready_runs_sync_then_push();
    test_pr_unknown_action_lists_ready();
+
+   /* Fork and explicit push (canonicalization spy tests) */
+   test_git_fork_missing_repo();
+   test_git_push_explicit_rejects_bad_urls();
+   test_git_push_explicit_builder();
+   test_git_push_mirror_rejects_new_options();
 
    printf("all tests passed\n");
    return 0;

@@ -16,11 +16,11 @@ extern "C"
 {
 #endif
 
-#define DB1_AJ_ROLE_LEN   32
-#define DB1_AJ_AGENT_LEN  64
+#define DB1_AJ_ROLE_LEN        32
+#define DB1_AJ_AGENT_LEN       64
 #define DB1_AJ_PARTICIPANT_LEN 65
-#define DB1_AJ_STATUS_LEN 32
-#define DB1_AJ_TS_LEN     32
+#define DB1_AJ_STATUS_LEN      32
+#define DB1_AJ_TS_LEN          32
 
 #define DB1_AJ_TOOL_LEN 64
 
@@ -82,7 +82,7 @@ extern "C"
    /* UPDATE agent_name + updated_at=now once routing has selected an agent. */
    void db1_agent_job_set_agent(int job_id, const char *agent_name);
 
-   /* UPDATE heartbeat_at/updated_at=now. */
+   /* UPDATE heartbeat_at=now. Does not claim forward progress. */
    void db1_agent_job_heartbeat(int job_id);
 
    /* UPDATE heartbeat_at/updated_at=now AND current_tool, api_call_count.
@@ -99,7 +99,7 @@ extern "C"
     * boundaries — it does not pull the full row. */
    int db1_agent_job_is_cancelled(int job_id);
 
-   /* Classify a job's stale state based on heartbeat_at + current_tool.
+   /* Classify a job's progress state based on updated_at + current_tool.
     * Model waits ("model") use the idle threshold because no external tool is
     * legitimately still running. Forced final-response waits use a built-in
     * minimum so slow final responses are not cut off by aggressive idle
@@ -110,8 +110,8 @@ extern "C"
     *   idle_threshold_secs:    threshold for idle/model-wait stalls
     *     (default  450 = 7.5 min — a model that hasn't called a tool).
     * Returns one of:
-    *   "fresh"     — heartbeat newer than threshold
-    *   "in_tool"   — current_tool != "" and heartbeat older than in_tool_threshold
+    *   "fresh"     — progress newer than threshold
+    *   "in_tool"   — current_tool != "" and progress older than in_tool_threshold
     *   "model"     — model wait older than idle_threshold
     *   "final_response" — final text-only wait older than its capped threshold
     *   "idle"      — current_tool == "" and heartbeat older than idle_threshold

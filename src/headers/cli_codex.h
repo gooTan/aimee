@@ -101,6 +101,10 @@ extern "C"
     * errors, or items that ARE agentMessages. */
    int cli_codex_parse_tool_action(const char *line);
 
+   int cli_codex_parse_tool_event(const char *line, char *tool_name, size_t tool_name_sz,
+                                  char *call_id, size_t call_id_sz, char *status,
+                                  size_t status_sz);
+
    /* If `line` is a `thread/tokenUsage/updated` notification, copy the
     * `params.tokenUsage.last.{inputTokens, outputTokens}` values into
     * *prompt and *completion and return 1. Either out-param may be

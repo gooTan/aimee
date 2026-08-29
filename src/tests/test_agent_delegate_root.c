@@ -214,7 +214,7 @@ void test_delegate_bash_cancel_kills_running_tool(void)
    cancel_job_args_t args = {.job_id = job_id};
    pthread_t tid;
    assert(pthread_create(&tid, NULL, cancel_job_soon, &args) == 0);
-   char *result = tool_bash("sleep 5", 5000);
+   char *result = tool_bash("while :; do :; done", 5000);
    pthread_join(tid, NULL);
    agent_set_durable_job(0);
 

@@ -10,7 +10,9 @@
 #include "wfe_def.h"
 #include "wfe_iface.h"
 
-/* The parent "build" spine: author.proposal -> branch.open(base:trunk) -> author.plan
+/* The parent "build" spine: author.proposal -> branch.open(base:trunk) -> prep(understand,
+ * brief:true emits validated schema_version 2 ContextBrief as intent) -> author.plan (proposal:
+ * prep.out)
  * -> roundtable(plan+proposal) -> split -> foreach.workflow -> freeze -> acceptance
  * roundtable -> document -> freeze -> documentation roundtable -> PR(base:trunk).
  * The final pr.open is TERMINAL (opened against the repo trunk, never merged). */
@@ -34,13 +36,17 @@ static const char *BUILD =
     "    block: branch.open\n"
     "    params:\n"
     "      base: trunk\n"
+    "    next: prep\n"
+    "  - id: prep\n"
+    "    block: understand\n"
     "    next: plan\n"
+    "    on_fail: prep\n"
     "  - id: plan\n"
     "    block: author.plan\n"
     "    in:\n"
-    "      proposal: draft.out\n"
+    "      proposal: prep.out\n"
     "    next: plan_gate\n"
-    "    on_fail: plan\n"
+    "    on_fail: prep\n"
     "  - id: plan_gate\n"
     "    block: gate.roundtable\n"
     "    in:\n"

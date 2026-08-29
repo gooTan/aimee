@@ -1161,7 +1161,9 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		return r.executeACP(ctx, runCancel, closeCommand, cmd, agent, request, prompt)
 	}
 	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "agy") {
-		input, _ := json.Marshal(map[string]string{"event": "user", "message": prompt})
+		input, _ := json.Marshal(map[string]any{
+			"event": "user", "message": map[string]string{"content": prompt},
+		})
 		cmd.Stdin = bytes.NewReader(append(input, '\n'))
 	} else {
 		cmd.Stdin = strings.NewReader(prompt)

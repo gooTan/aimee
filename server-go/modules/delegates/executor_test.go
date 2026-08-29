@@ -793,7 +793,7 @@ func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"agy", "-p", "composed prompt", "--output-format", "stream-json",
+	want := []string{"agy", "--input-format", "stream-json", "--output-format", "stream-json",
 		"--disable-slash-commands", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions",
 		"--model", "gemini-test"}
 	if !slices.Equal(argv, want) {
@@ -822,6 +822,66 @@ func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt"); err == nil ||
 		!strings.Contains(err.Error(), "tools-disabled") {
 		t.Fatalf("agy tools-disabled error = %v", err)
+	}
+}
+
+func TestAgyReceivesLargePromptOnStdin(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(filepath.Join(workdir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(home, "input.jsonl")
+	script := filepath.Join(home, "agy")
+	body := "#!/bin/sh\ncp /dev/stdin '" + inputPath + "'\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := json.Marshal(map[string]any{"agents": []map[string]any{{
+		"name": "antigravity", "cli_kind": "agy", "cli_cmd": script, "roles": []string{"review"},
+	}}})
+	if err := os.WriteFile(filepath.Join(home, "models.json"), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRegistryExecutor(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Repeat("large roundtable artifact ", 10000)
+	result := executor.Execute(t.Context(), delegatecontract.Invocation{Version: delegatecontract.WireVersion,
+		Role: "review", Persona: "qa", Prompt: prompt, Tools: true, Workdir: workdir})
+	if result.Status != "done" || result.Response != "ok" {
+		t.Fatalf("result = %+v", result)
+	}
+	input, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message struct {
+		Event   string `json:"event"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(input, &message); err != nil {
+		t.Fatal(err)
+	}
+	wantPrompt := "You are acting as qa.\n\n" + prompt
+	if message.Event != "user" || message.Message != wantPrompt {
+		t.Fatalf("agy stdin changed prompt: event=%q bytes=%d want=%d", message.Event, len(message.Message), len(wantPrompt))
+	}
+}
+
+func TestExecutorCommandTransportsLargeArgvOutsideEnvironment(t *testing.T) {
+	argv := []string{"/bin/true"}
+	for range 1000 {
+		argv = append(argv, strings.Repeat("x", 200))
+	}
+	cmd, closeCommand, err := executorCommand(t.Context(), argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCommand()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("large argv watchdog failed: %v: %s", err, output)
 	}
 }
 

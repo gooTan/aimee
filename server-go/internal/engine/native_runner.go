@@ -31,6 +31,7 @@ type CommandVerifier struct {
 }
 
 const defaultCommandVerifyLock = "aimee-wfe-command-verify.lock"
+const verifierHeartbeatInterval = 15 * time.Second
 
 // ErrGitIdentityMissing is a permanent deployment prerequisite, not a transient
 // runner outage. The engine gives it a non-auto-resumed park reason so a missing
@@ -129,13 +130,14 @@ func (v CommandVerifier) acquire(ctx context.Context) (func(), error) {
 }
 
 type NativeRunner struct {
-	db        *db1.Store
-	worktrees *WorktreeManager
-	agents    AgentClient
-	verifier  Verifier
-	artifacts *wfe.ArtifactStore
-	workflows *wfe.Registry
-	forge     Forge
+	db                     *db1.Store
+	worktrees              *WorktreeManager
+	agents                 AgentClient
+	verifier               Verifier
+	verifierHeartbeatEvery time.Duration
+	artifacts              *wfe.ArtifactStore
+	workflows              *wfe.Registry
+	forge                  Forge
 	// premium bounds dispatches to the expensive planning delegates. The zero
 	// value enforces nothing.
 	premium PremiumPolicy
@@ -147,6 +149,41 @@ type NativeRunner struct {
 	// module does, over the bus, so this is the whole of the runner's coupling
 	// to reviewing.
 	reviews RoundtableReviewer
+}
+
+func (r *NativeRunner) verify(ctx context.Context, req StepRequest, workdir string) error {
+	started := time.Now()
+	r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "verify_start", "verifier", "status=running")
+	interval := r.verifierHeartbeatEvery
+	if interval <= 0 {
+		interval = verifierHeartbeatInterval
+	}
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "verify_heartbeat", "verifier",
+					fmt.Sprintf("status=running elapsed=%s", time.Since(started).Round(time.Second)))
+			}
+		}
+	}()
+	err := r.verifier.Verify(ctx, workdir)
+	close(stop)
+	<-stopped
+	if err != nil {
+		r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "verify_error", "verifier",
+			"status=failed error="+safeDiagnostic(err.Error()))
+		return err
+	}
+	r.recordModelEvent(req.WorkItem.ID, req.Node.ID, "verify_complete", "verifier",
+		fmt.Sprintf("status=complete elapsed=%s", time.Since(started).Round(time.Second)))
+	return nil
 }
 
 // RoundtableReviewer convenes one review. Narrow on purpose: the runner depends
@@ -1074,7 +1111,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		if status == "" && strings.TrimSpace(diff) != "" &&
 			wfe.Hash([]byte(diff)) != req.Feedback.ArtifactHash {
 			if !docs {
-				if err := r.verifier.Verify(ctx, workdir); err != nil {
+				if err := r.verify(ctx, req, workdir); err != nil {
 					return StepResult{Status: StepChanges, Detail: err.Error()}, nil
 				}
 			}
@@ -1244,7 +1281,7 @@ func (r *NativeRunner) mutate(ctx context.Context, req StepRequest, docs bool) (
 		}
 	}
 	if !docs {
-		if err := r.verifier.Verify(ctx, workdir); err != nil {
+		if err := r.verify(ctx, req, workdir); err != nil {
 			return StepResult{Status: StepChanges, Detail: err.Error(), CostUSD: cost, CostUnknown: costUnknown}, nil
 		}
 	}

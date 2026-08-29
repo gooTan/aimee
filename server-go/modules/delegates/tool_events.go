@@ -167,7 +167,9 @@ func postModelProgressLive(ctx context.Context, wf *delegatecontract.WorkflowCon
 	if status == "" {
 		return false
 	}
-	detail := "status=" + strings.ReplaceAll(status, " ", "_")
+	detail := delegatecontract.FormatToolDetail(wf, delegatecontract.ToolEvent{
+		Status: strings.ReplaceAll(status, " ", "_"),
+	}, 0)
 	return postModelEventLive(ctx, wf, "model_progress", detail)
 }
 

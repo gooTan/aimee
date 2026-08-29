@@ -10,7 +10,10 @@ import (
 	"github.com/JBailes/aimee/server-go/internal/db1"
 )
 
-const modelHeartbeatInterval = 15 * time.Second
+const (
+	modelHeartbeatInterval  = 15 * time.Second
+	modelActivityStaleAfter = 2 * time.Minute
+)
 
 const maxObservableDiagnosticBytes = 1024
 
@@ -23,9 +26,10 @@ func observableDiagnostic(detail string) string {
 // metadata; prompts, responses, tool arguments, and hidden reasoning stay out
 // of the lifecycle log.
 type observableAgents struct {
-	next           AgentClient
-	db             *db1.Store
-	heartbeatEvery time.Duration
+	next               AgentClient
+	db                 *db1.Store
+	heartbeatEvery     time.Duration
+	activityStaleAfter time.Duration
 }
 
 func modelActor(request DelegateRequest) string {
@@ -39,11 +43,28 @@ func modelActor(request DelegateRequest) string {
 }
 
 func modelDetail(request DelegateRequest, extra string) string {
-	detail := fmt.Sprintf("role=%s persona=%s tools=%t", request.Role, request.Persona, request.Tools)
+	wf := modelWorkflowContext(request)
+	detail := delegateapi.FormatToolDetail(wf, delegateapi.ToolEvent{}, 0)
+	if detail != "" {
+		detail += " "
+	}
+	detail += fmt.Sprintf("tools=%t", request.Tools)
 	if extra != "" {
 		detail += " " + extra
 	}
 	return detail
+}
+
+func modelWorkflowContext(request DelegateRequest) *delegateapi.WorkflowContext {
+	return &delegateapi.WorkflowContext{
+		WorkItemID: request.WorkItemID,
+		Stage:      request.Stage,
+		Model:      request.Delegate,
+		Role:       request.Role,
+		Persona:    request.Persona,
+		Phase:      durablePhase(request.DurableSlot),
+		Invocation: request.ExecutionVersion,
+	}
 }
 
 func (o observableAgents) record(request DelegateRequest, kind, actor, detail string) {
@@ -73,15 +94,7 @@ func (o observableAgents) recordToolEvents(request DelegateRequest, result Deleg
 	if len(result.ToolEvents) == 0 || request.WorkItemID == "" || o.db == nil {
 		return
 	}
-	wf := &delegateapi.WorkflowContext{
-		WorkItemID: request.WorkItemID,
-		Stage:      request.Stage,
-		Model:      request.Delegate,
-		Role:       request.Role,
-		Persona:    request.Persona,
-		Phase:      durablePhase(request.DurableSlot),
-		Invocation: request.ExecutionVersion,
-	}
+	wf := modelWorkflowContext(request)
 	actor := result.Agent
 	if actor == "" {
 		actor = modelActor(request)
@@ -97,15 +110,7 @@ func (o observableAgents) recordToolEventsGroup(request DelegateRequest, result 
 	if len(result.ToolEvents) == 0 || request.WorkItemID == "" || o.db == nil {
 		return
 	}
-	wf := &delegateapi.WorkflowContext{
-		WorkItemID: request.WorkItemID,
-		Stage:      request.Stage,
-		Model:      request.Delegate,
-		Role:       request.Role,
-		Persona:    request.Persona,
-		Phase:      durablePhase(request.DurableSlot),
-		Invocation: request.ExecutionVersion,
-	}
+	wf := modelWorkflowContext(request)
 	actor := result.Participant
 	if actor == "" {
 		actor = modelActor(request)
@@ -120,6 +125,7 @@ func (o observableAgents) recordToolEventsGroup(request DelegateRequest, result 
 func (o observableAgents) observe(request DelegateRequest) func(string, string, string) {
 	actor := modelActor(request)
 	started := time.Now()
+	identity := delegateapi.FormatToolDetail(modelWorkflowContext(request), delegateapi.ToolEvent{}, 0)
 	o.record(request, "model_dispatch", actor, modelDetail(request, "status=running"))
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -136,8 +142,28 @@ func (o observableAgents) observe(request DelegateRequest) func(string, string, 
 			case <-done:
 				return
 			case <-ticker.C:
+				status := "running"
+				activity := "model_dispatch"
+				activityAge := time.Since(started)
+				if o.db != nil {
+					event, ok, err := o.db.LatestModelActivity(context.Background(), request.WorkItemID, request.Stage, actor, identity)
+					if err == nil && ok {
+						activity = event.Kind
+						if at, parseErr := time.ParseInLocation("2006-01-02 15:04:05", event.CreatedAt, time.UTC); parseErr == nil {
+							activityAge = time.Since(at)
+						}
+					}
+				}
+				staleAfter := o.activityStaleAfter
+				if staleAfter <= 0 {
+					staleAfter = modelActivityStaleAfter
+				}
+				if activityAge >= staleAfter {
+					status = "possibly_stalled"
+				}
 				o.record(request, "model_heartbeat", actor,
-					modelDetail(request, "status=running elapsed="+time.Since(started).Round(time.Second).String()))
+					modelDetail(request, fmt.Sprintf("status=%s elapsed=%s last_activity=%s activity=%s",
+						status, time.Since(started).Round(time.Second), activityAge.Round(time.Second), activity)))
 			}
 		}
 	}()

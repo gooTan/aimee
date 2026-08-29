@@ -213,6 +213,11 @@ they are listed here rather than folded into the sections above.
 - **A delegated shell was gated on config read from disk rather than the live snapshot.** The
   sandbox accessor loaded a whole config on each call, so a containment decision could be made on
   state the published snapshot had not adopted.
+- **Local-prefix installs omitted the KB curator sidecars and autonomous curator sweeps reported
+  terminally failed code-unit jobs as newly queued.** Local-prefix installs via
+  `make -C src install` now include `curator-extract.py` and `llm-chat.py` in
+  `$(PREFIX)/scripts`, and autonomous curator sweeps leave terminally failed code-unit jobs
+  failed and require an explicit retry instead of reporting them as newly queued.
 
 Fixes for the KB connection pool, KB error surfacing, ingest durability, shared-cluster entrypoint
 reuse, agent removal, session branch enforcement and workflow branch aliasing also landed in this

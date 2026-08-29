@@ -508,7 +508,8 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 			return nil, errors.New("agy CLI cannot guarantee a tools-disabled invocation")
 		}
 		argv = append(argv, "-p", prompt, "--output-format", "stream-json",
-			"--disable-slash-commands", "--mode", "plan", "--sandbox")
+			"--disable-slash-commands", "--mode", "plan", "--sandbox",
+			"--dangerously-skip-permissions")
 		if agent.Model != "" {
 			argv = append(argv, "--model", agent.Model)
 		}
@@ -812,7 +813,7 @@ func finalOutput(kind string, output []byte) string {
 				nested, _ := item["step_update"].(map[string]any)
 				if nested["step_type"] == "agent_response" {
 					if value, ok := nested["text_delta"].(string); ok && strings.TrimSpace(value) != "" {
-						agyStepResponse = value
+						agyStepResponse += value
 					}
 				}
 			}
@@ -856,6 +857,14 @@ func outputResponseStarted(kind string, output []byte) bool {
 				}
 			}
 		case "agy":
+			if item["event"] == "step_update" {
+				nested, _ := item["step_update"].(map[string]any)
+				if nested["step_type"] == "agent_response" {
+					if value, ok := nested["text_delta"].(string); ok && strings.TrimSpace(value) != "" {
+						return true
+					}
+				}
+			}
 			if item["event"] == "result" {
 				if nested, ok := item["result"].(map[string]any); ok {
 					if value, ok := nested["response"].(string); ok && strings.TrimSpace(value) != "" {

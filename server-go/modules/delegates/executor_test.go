@@ -794,7 +794,8 @@ func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"agy", "-p", "composed prompt", "--output-format", "stream-json",
-		"--disable-slash-commands", "--mode", "plan", "--sandbox", "--model", "gemini-test"}
+		"--disable-slash-commands", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions",
+		"--model", "gemini-test"}
 	if !slices.Equal(argv, want) {
 		t.Fatalf("agy argv = %q, want %q", argv, want)
 	}
@@ -806,6 +807,12 @@ func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
 		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n")
 	if got := finalOutput("agy", output); got != "remembered from step" {
 		t.Fatalf("agy empty-result fallback = %q", got)
+	}
+	output = []byte("{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"remembered \"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"in parts\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n")
+	if got := finalOutput("agy", output); got != "remembered in parts" {
+		t.Fatalf("agy delta fallback = %q", got)
 	}
 	output = []byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"response\":\"\",\"error\":\"usage limit reached\"}}\n")
 	if got := streamFailureDetail("agy", output); got != "usage limit reached" {

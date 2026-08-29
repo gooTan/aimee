@@ -2189,7 +2189,12 @@ func (r *NativeRunner) prOpen(ctx context.Context, req StepRequest) (StepResult,
 			return StepResult{}, errors.New("base:feature requires a child workflow")
 		}
 		base = "aimee/feat/" + item.ParentID
-	case "trunk", "default":
+	case "trunk":
+		base, err = repoDefaultBranch(ctx, item.Repo)
+		if err != nil {
+			return StepResult{}, err
+		}
+	case "default":
 		// The root repository checkout is the proposal's admitted integration
 		// lane. It need not match origin/HEAD (testing versus main, or a
 		// deliberately pinned batch branch), and the forge resource plane

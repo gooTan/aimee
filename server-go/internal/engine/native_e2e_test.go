@@ -91,6 +91,7 @@ func (r *transientGateRunner) Run(ctx context.Context, request StepRequest) (Ste
 type e2eForge struct {
 	mu       sync.Mutex
 	opens    []PullRequestSpec
+	bases    []string
 	comments []ReviewComment
 }
 
@@ -109,6 +110,7 @@ func (*e2eForge) Push(ctx context.Context, _, workdir, branch string) error {
 func (f *e2eForge) Open(_ context.Context, _ string, _ string, head, base string, spec PullRequestSpec) (PullRequest, error) {
 	f.mu.Lock()
 	f.opens = append(f.opens, spec)
+	f.bases = append(f.bases, base)
 	f.mu.Unlock()
 	return PullRequest{Ref: "pr:" + head, URL: "pr:" + head, Head: head, Base: base}, nil
 }
@@ -146,6 +148,8 @@ func TestNativeSchedulerDrivesConfiguredBuildThroughSliceToFinalPR(t *testing.T)
 	run(repo, "commit", "-m", "init")
 	run(repo, "push", "-u", "origin", "trunk")
 	run(repo, "remote", "set-head", "origin", "trunk")
+	run(repo, "checkout", "-b", "testing")
+	run(repo, "push", "-u", "origin", "testing")
 	workflowDir := filepath.Join(root, "workflows")
 	registry, err := wfe.NewRegistry(workflowDir)
 	if err != nil {
@@ -330,6 +334,7 @@ nodes:
 			}
 			forge.mu.Lock()
 			opens := append([]PullRequestSpec(nil), forge.opens...)
+			bases := append([]string(nil), forge.bases...)
 			forge.mu.Unlock()
 			if len(opens) != 2 {
 				t.Fatalf("opened %d PRs, want slice + final: %+v", len(opens), opens)
@@ -340,6 +345,9 @@ nodes:
 			final := opens[1]
 			if !final.Draft || final.Title != "Build feature" {
 				t.Fatalf("final handoff = %+v, want meaningful draft PR", final)
+			}
+			if len(bases) != 2 || bases[1] != "trunk" {
+				t.Fatalf("PR bases = %v, want final PR against repository trunk", bases)
 			}
 			for _, marker := range []string{"## Human review boundary", "intentionally a draft",
 				"## What this proposal does", "## What changed", "Original request",

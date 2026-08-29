@@ -478,6 +478,7 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 		if agent.Model != "" {
 			argv = append(argv, "--model", agent.Model)
 		}
+		argv = append(argv, "-c", `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`)
 		argv = append(argv, "-")
 	case "claude", "claude-code":
 		argv = append(argv, "-p", "--output-format", "stream-json", "--verbose")

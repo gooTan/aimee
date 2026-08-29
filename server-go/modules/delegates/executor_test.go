@@ -625,6 +625,10 @@ func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	if err != nil || sandbox < 0 || sandbox+1 >= len(argv) || argv[sandbox+1] != "read-only" {
 		t.Fatalf("codex read-only review argv = %q, %v", argv, err)
 	}
+	approval := slices.Index(argv, "-c")
+	if approval < 0 || approval+1 >= len(argv) || argv[approval+1] != `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"` {
+		t.Fatalf("codex read-only review argv missing scoped aimee approval: %q", argv)
+	}
 	_, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "code", Tools: false}, "prompt")
 	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
@@ -642,6 +646,16 @@ func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	if err != nil || mcp < 0 || mcp+1 >= len(argv) || !strings.Contains(argv[mcp+1], `"aimee"`) ||
 		!strings.Contains(argv[mcp+1], `"mcp-serve"`) {
 		t.Fatalf("claude Aimee MCP argv = %q, %v", argv, err)
+	}
+}
+
+func TestExecutorArgvAppendsScopedAimeeApprovalForCodexWriteRole(t *testing.T) {
+	const want = `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`
+	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+		delegatecontract.Invocation{Role: "code", Tools: true}, "prompt")
+	approval := slices.Index(argv, "-c")
+	if err != nil || approval < 0 || approval+1 >= len(argv) || argv[approval+1] != want {
+		t.Fatalf("codex write argv missing scoped aimee approval: %q, %v", argv, err)
 	}
 }
 

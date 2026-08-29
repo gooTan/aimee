@@ -241,12 +241,12 @@
       "repository": "https://github.com/gooTan/aimee-module-git.git",
       "ref": "v0.3.3",
       "version": "0.3.3",
-      "commit": "22738d57673d33f389c8372acd12d909a797ebb3",
+      "commit": "bd51118f388017f060c438c02de818bb1771e8ec",
       "execution": "process",
       "placements": [
         "server"
       ],
-      "source_sha256": "00591ebc744dbe003d0dd143c1bde14023e493e81cc395fd250b090f95af1826",
+      "source_sha256": "3085693c577a29cb3576b60cf931a6b8c50dbeabfc7338fcd38868f83d339bfc",
       "runtime": "go",
       "principal_class": 1,
       "principal_ref": 13,

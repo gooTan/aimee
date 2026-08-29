@@ -164,13 +164,29 @@ func seatPhase(slot string) string {
 	}
 }
 
+func seatWorkflowContext(run panel.Run, request panel.SeatRequest, actor string) *delegate.WorkflowContext {
+	if actor == "" {
+		actor = seatActor(request)
+	}
+	return &delegate.WorkflowContext{
+		WorkItemID: run.ID,
+		Stage:      run.Stage,
+		Model:      actor,
+		Role:       request.Role,
+		Persona:    request.Persona,
+		Phase:      seatPhase(request.DurableSlot),
+		Invocation: run.ExecutionVersion,
+	}
+}
+
 func (s seatBus) observe(run panel.Run, request panel.SeatRequest) func(panel.SeatResult) {
 	if s.observer == nil || run.ID == "" {
 		return func(panel.SeatResult) {}
 	}
 	actor := seatActor(request)
 	started := time.Now()
-	detail := fmt.Sprintf("phase=%s role=%s persona=%s tools=%t", seatPhase(request.DurableSlot), request.Role, request.Persona, request.Tools)
+	detail := delegate.FormatToolDetail(seatWorkflowContext(run, request, actor), delegate.ToolEvent{}, 0) +
+		fmt.Sprintf(" tools=%t", request.Tools)
 	emit := func(kind, eventActor, extra string) {
 		s.observer(ModelEvent{WorkItemID: run.ID, Stage: run.Stage, Kind: kind, Actor: eventActor, Detail: detail + " " + extra})
 	}
@@ -274,18 +290,7 @@ func (s seatBus) emitToolEvents(run panel.Run, seat panel.SeatRequest, actor str
 	if s.observer == nil || len(events) == 0 || run.ID == "" {
 		return
 	}
-	wf := &delegate.WorkflowContext{
-		WorkItemID: run.ID,
-		Stage:      run.Stage,
-		Model:      seat.Selector,
-		Role:       seat.Role,
-		Persona:    seat.Persona,
-		Phase:      seatPhase(seat.DurableSlot),
-		Invocation: run.ExecutionVersion,
-	}
-	if actor != "" {
-		wf.Model = actor
-	}
+	wf := seatWorkflowContext(run, seat, actor)
 	for _, ev := range events {
 		kind := delegate.ToolEventKind(ev.Status)
 		detail := delegate.FormatToolDetail(wf, ev, 0)

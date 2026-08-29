@@ -11,6 +11,8 @@ const (
 	ToolEventStart    = "model_tool_start"
 	ToolEventComplete = "model_tool_complete"
 	ToolEventError    = "model_tool_error"
+	// ModelActivityStaleAfter marks silence for operators without cancelling work.
+	ModelActivityStaleAfter = 2 * time.Minute
 )
 
 // FormatToolDetail builds a safe, redacted detail string for a per-tool-call

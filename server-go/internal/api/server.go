@@ -6,11 +6,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	delegateapi "github.com/JBailes/aimee/server-go/delegate"
 	appconfig "github.com/JBailes/aimee/server-go/internal/config"
@@ -299,6 +301,9 @@ func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if event.Kind == "model_heartbeat" && !strings.Contains(event.Detail, " last_activity=") {
+		event.Detail = s.enrichModelHeartbeat(r.Context(), event.WorkItemID, event.Stage, event.Actor, event.Detail)
+	}
 	// Deduplicate tool events by their stable database identity. The insert is
 	// atomic so live and batch posts cannot race or miss events beyond a page.
 	if event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error" {
@@ -314,6 +319,37 @@ func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) enrichModelHeartbeat(ctx context.Context, workItemID, stage, actor, detail string) string {
+	identity, _, ok := strings.Cut(detail, " tools=")
+	if !ok {
+		return detail
+	}
+	activity := "model_dispatch"
+	activityAge := detailDuration(detail, "elapsed")
+	if event, found, err := s.db.LatestModelActivity(ctx, workItemID, stage, actor, identity); err == nil && found {
+		activity = event.Kind
+		if at, parseErr := time.ParseInLocation("2006-01-02 15:04:05", event.CreatedAt, time.UTC); parseErr == nil {
+			activityAge = max(time.Since(at), 0)
+		}
+	}
+	status := "running"
+	if activityAge >= delegateapi.ModelActivityStaleAfter {
+		status = "possibly_stalled"
+	}
+	detail = strings.Replace(detail, "status=running", "status="+status, 1)
+	return fmt.Sprintf("%s last_activity=%s activity=%s", detail, activityAge.Round(time.Second), activity)
+}
+
+func detailDuration(detail, key string) time.Duration {
+	for _, field := range strings.Fields(detail) {
+		if value, ok := strings.CutPrefix(field, key+"="); ok {
+			duration, _ := time.ParseDuration(value)
+			return duration
+		}
+	}
+	return 0
 }
 
 func (s *Server) proposal(w http.ResponseWriter, r *http.Request) {

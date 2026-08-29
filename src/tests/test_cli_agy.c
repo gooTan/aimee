@@ -37,9 +37,8 @@ static void test_agy_adapter_registered(void)
 }
 
 /* The containment contract, asserted as data: headless print mode, stream-json,
- * slash commands disabled, model pinned from config, and NEVER
- * --dangerously-skip-permissions (headless agy auto-denies permission-gated
- * tools, which is what keeps subagent and mutating tools sealed). */
+ * slash commands disabled, terminal sandbox on, headless permissions approved,
+ * and model pinned from config. */
 static void test_agy_argv_policy(void)
 {
    const provider_cli_adapter_t *agy = provider_cli_adapter_get("agy");
@@ -53,7 +52,8 @@ static void test_agy_argv_policy(void)
    int argc = agy->build_argv(&cfg, tokens, 48, &split);
    assert(argc > 0);
 
-   int saw_print = 0, saw_stream = 0, saw_noslash = 0, saw_model = 0;
+   int saw_print = 0, saw_stream = 0, saw_noslash = 0, saw_plan = 0, saw_sandbox = 0;
+   int saw_permissions = 0, saw_model = 0;
    for (int i = 0; i < argc; i++)
    {
       if (strcmp(tokens[i], "-p") == 0)
@@ -62,14 +62,20 @@ static void test_agy_argv_policy(void)
          saw_stream = 1;
       if (strcmp(tokens[i], "--disable-slash-commands") == 0)
          saw_noslash = 1;
+      if (strcmp(tokens[i], "--mode") == 0 && i + 1 < argc && strcmp(tokens[i + 1], "plan") == 0)
+         saw_plan = 1;
+      if (strcmp(tokens[i], "--sandbox") == 0)
+         saw_sandbox = 1;
+      if (strcmp(tokens[i], "--dangerously-skip-permissions") == 0)
+         saw_permissions = 1;
       if (strcmp(tokens[i], "--model") == 0 && i + 1 < argc &&
           strcmp(tokens[i + 1], "gemini-3.7-flash-low") == 0)
          saw_model = 1;
-      assert(strcmp(tokens[i], "--dangerously-skip-permissions") != 0);
    }
-   assert(saw_print && saw_stream && saw_noslash && saw_model);
+   assert(saw_print && saw_stream && saw_noslash && saw_plan && saw_sandbox && saw_permissions &&
+          saw_model);
    provider_cli_free_tokens(tokens, split);
-   printf("PASS: agy argv pins the model, disables slash commands, keeps permissions on\n");
+   printf("PASS: agy argv pins the model and enables headless tools inside its sandbox\n");
 }
 
 static void test_agy_spawn_refuses_empty_and_oversized_prompts(void)

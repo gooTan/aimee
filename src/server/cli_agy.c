@@ -10,13 +10,10 @@
  *       "duration_seconds":n,"usage":{"input_tokens":n,"output_tokens":n,
  *       "thinking_tokens":n,"cache_read_tokens":n}}}
  *
- * Containment: aimee never passes --dangerously-skip-permissions. In headless
- * print mode agy auto-denies every tool that needs a permission grant, which
- * includes its subagent tools (define_subagent, invoke_subagent,
- * browser_subagent) and mutating shell/file tools — so a delegate cannot spawn
- * nested agents or write outside what the operator granted in agy's own
- * settings. --disable-slash-commands additionally stops prompt-driven skill
- * expansion from smuggling instructions into the turn.
+ * Containment: agy runs in its terminal sandbox with slash expansion disabled.
+ * Headless print mode cannot answer permission prompts, so permissions are
+ * auto-approved inside that sandbox; otherwise every requested tool is silently
+ * denied and a tool-capable seat returns no useful response.
  *
  * The prompt travels in argv because agy's print mode does not read it from
  * stdin. That imposes the platform's per-argument size limit, so spawn refuses
@@ -74,6 +71,10 @@ static int agy_build_argv_with_prompt(const provider_cli_cfg_t *cfg, const char 
    AGY_ADD_ARG("--output-format");
    AGY_ADD_ARG("stream-json");
    AGY_ADD_ARG("--disable-slash-commands");
+   AGY_ADD_ARG("--mode");
+   AGY_ADD_ARG("plan");
+   AGY_ADD_ARG("--sandbox");
+   AGY_ADD_ARG("--dangerously-skip-permissions");
    if (agent && agent->model[0])
    {
       AGY_ADD_ARG("--model");

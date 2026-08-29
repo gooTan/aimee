@@ -186,6 +186,81 @@ func TestFreezeUsesMergedRemoteFeatureTip(t *testing.T) {
 	}
 }
 
+// A root freeze must review the same delta that the final PR will present.
+// When the target branch independently lands patch-equivalent work during a
+// long run, a stale merge base makes three-dot review report that shared work
+// as proposal scope drift even though merging the PR would not change it.
+func TestRootFreezeRefreshesRemoteBaseBeforeReview(t *testing.T) {
+	t.Setenv("AIMEE_GIT_AUTHOR_NAME", "Workflow Test")
+	t.Setenv("AIMEE_GIT_AUTHOR_EMAIL", "workflow@example.test")
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	repo := filepath.Join(root, "repo")
+	updater := filepath.Join(root, "updater")
+	gitRun(t, root, "init", "--bare", "-b", "trunk", origin)
+	gitRun(t, root, "clone", origin, repo)
+	if err := os.WriteFile(filepath.Join(repo, "shared.txt"), []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "shared.txt")
+	gitRun(t, repo, "commit", "-m", "initial")
+	gitRun(t, repo, "push", "-u", "origin", "trunk")
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, db1.CreateWorkItem{ID: "wi_root_refresh", Repo: repo,
+		ProposalPath: "p", WorkflowName: "build", StartStage: "freeze"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.WorkItem(ctx, "wi_root_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir, _, err := manager.Ensure(ctx, item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "shared.txt"), []byte("current\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "proposal.txt"), []byte("proposal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, workdir, "add", "shared.txt", "proposal.txt")
+	gitRun(t, workdir, "commit", "-m", "proposal and shared fix")
+
+	gitRun(t, root, "clone", origin, updater)
+	if err := os.WriteFile(filepath.Join(updater, "shared.txt"), []byte("current\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, updater, "add", "shared.txt")
+	gitRun(t, updater, "commit", "-m", "land shared fix independently")
+	gitRun(t, updater, "push", "origin", "trunk")
+
+	runner := &NativeRunner{db: store, worktrees: manager}
+	result, err := runner.freeze(ctx, StepRequest{WorkItem: item})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced {
+		t.Fatalf("freeze status=%q detail=%q", result.Status, result.Detail)
+	}
+	if strings.Contains(result.Artifact, "shared.txt") {
+		t.Fatalf("freeze reviewed work already present on remote base:\n%s", result.Artifact)
+	}
+	if !strings.Contains(result.Artifact, "proposal.txt") {
+		t.Fatalf("freeze omitted proposal delta:\n%s", result.Artifact)
+	}
+}
+
 func TestIntegrateFeatureBaseNoopWhenAlreadyCurrent(t *testing.T) {
 	repo, slicedir := setupSliceRepo(t)
 	_ = repo

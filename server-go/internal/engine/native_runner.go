@@ -1684,6 +1684,19 @@ func (r *NativeRunner) freeze(ctx context.Context, req StepRequest) (StepResult,
 	if err != nil {
 		return StepResult{}, err
 	}
+	if item.ParentID == "" {
+		base, baseErr := repoIntegrationBranch(ctx, item.Repo)
+		if baseErr != nil {
+			return StepResult{}, baseErr
+		}
+		conflict, detail, refreshErr := r.refreshPullRequestBase(ctx, workdir, base)
+		if refreshErr != nil {
+			return StepResult{}, refreshErr
+		}
+		if conflict {
+			return StepResult{Status: StepPending, PauseReason: "base_integration_conflict", Detail: detail}, nil
+		}
+	}
 	diff, err := frozenWorktreeDiff(ctx, item, workdir)
 	if err != nil {
 		return StepResult{}, err

@@ -802,6 +802,15 @@ func TestExecutorArgvAndOutputSupportAgy(t *testing.T) {
 	if got := finalOutput("agy", output); got != "remembered" {
 		t.Fatalf("agy final output = %q", got)
 	}
+	output = []byte("{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"remembered from step\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n")
+	if got := finalOutput("agy", output); got != "remembered from step" {
+		t.Fatalf("agy empty-result fallback = %q", got)
+	}
+	output = []byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"response\":\"\",\"error\":\"usage limit reached\"}}\n")
+	if got := streamFailureDetail("agy", output); got != "usage limit reached" {
+		t.Fatalf("agy terminal error = %q", got)
+	}
 	if _, err := executorArgv(agent,
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt"); err == nil ||
 		!strings.Contains(err.Error(), "tools-disabled") {

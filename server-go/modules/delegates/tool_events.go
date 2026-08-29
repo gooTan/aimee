@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -505,6 +506,29 @@ func parseAgyToolComplete(line string, col *toolEventCollector) {
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(line), &obj); err != nil {
 		return
+	}
+	if ev, _ := obj["event"].(string); ev == "step_update" {
+		step, _ := obj["step_update"].(map[string]any)
+		stepType, _ := step["step_type"].(string)
+		if stepType == "tool" || stepType == "tool_use" {
+			name, _ := step["tool_name"].(string)
+			if name == "" {
+				info, _ := step["tool_info"].(map[string]any)
+				name, _ = info["name"].(string)
+			}
+			callID := fmt.Sprint(step["conversation_id"], ":", step["step_index"])
+			switch strings.ToUpper(strings.TrimSpace(fmt.Sprint(step["state"]))) {
+			case "DONE", "COMPLETED":
+				col.recordComplete(name, callID, "")
+			case "ERROR", "FAILED":
+				col.recordFailed(name, callID, "")
+			case "CANCELLED", "CANCELED":
+				col.recordCancelled(name, callID, "")
+			default:
+				col.recordStart(name, callID, "")
+			}
+			return
+		}
 	}
 	// Agy stream-json uses {"event":"tool_call","tool":"bash",...} or similar
 	// in practice. We handle the generic shape plus the codex-like fallback.

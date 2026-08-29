@@ -170,6 +170,20 @@ func TestAntigravityToolStreamParserEmitsToolEvents(t *testing.T) {
 	if len(evs) != 2 || evs[0].Status != "started" || evs[1].Status != "completed" || evs[1].CallID != "agy-call-1" {
 		t.Fatalf("antigravity events = %+v", evs)
 	}
+
+	col = newToolCollector()
+	writer = &toolEventStreamWriter{kind: "agy", col: col, underlying: io.Discard}
+	_, err = writer.Write([]byte(
+		`{"event":"step_update","step_update":{"conversation_id":"conversation-1","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"view_file"}}` + "\n" +
+			`{"event":"step_update","step_update":{"conversation_id":"conversation-1","step_index":2,"state":"DONE","step_type":"tool","tool_name":"view_file"}}` + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs = col.result()
+	if len(evs) != 2 || evs[0].Status != "started" || evs[1].Status != "completed" ||
+		evs[0].ToolName != "view_file" || evs[0].CallID != evs[1].CallID {
+		t.Fatalf("antigravity step events = %+v", evs)
+	}
 }
 
 func TestToolCollectorDoesNotStoreRawContent(t *testing.T) {

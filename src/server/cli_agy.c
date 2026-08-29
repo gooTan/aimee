@@ -176,10 +176,14 @@ static int agy_parse_line(const char *line, cli_event_t *event_out)
          snprintf(event_out->text, sizeof(event_out->text), "%s", delta);
          matched = 1;
       }
-      else if (step_type && strcmp(step_type, "tool_use") == 0)
+      else if (step_type && (strcmp(step_type, "tool") == 0 || strcmp(step_type, "tool_use") == 0))
       {
          const char *tool = agy_json_string(step, "tool_name");
-         event_out->type = CLI_EVENT_TOOL_START;
+         const char *state = agy_json_string(step, "state");
+         event_out->type =
+             (state && (strcmp(state, "DONE") == 0 || strcmp(state, "COMPLETED") == 0))
+                 ? CLI_EVENT_TOOL_COMPLETE
+                 : CLI_EVENT_TOOL_START;
          snprintf(event_out->tool_name, sizeof(event_out->tool_name), "%s",
                   (tool && tool[0]) ? tool : "tool");
          event_out->write_event = provider_cli_event_is_write(event_out);

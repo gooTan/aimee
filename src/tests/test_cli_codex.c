@@ -281,7 +281,7 @@ static void test_spawn_failure_captures_stderr_and_exit_status(void)
    int rc = agent_execute_cli_codex(&agent, NULL, "hello", &out);
    assert(rc == -1);
    assert(strstr(out.error, "status 42") != NULL);
-   assert(strstr(out.error, "approval_policy=\"never\"") != NULL);
+   assert(strstr(out.error, "approval_policy=\"on-request\"") != NULL);
    assert(strstr(out.error, "sandbox_mode=\"read-only\"") != NULL);
    assert(
        strstr(
@@ -331,6 +331,33 @@ static void test_parse_tool_action_skips_other_methods(void)
    assert(cli_codex_parse_tool_action(line) == 0);
    assert(cli_codex_parse_tool_action("not json") == 0);
    assert(cli_codex_parse_tool_action(NULL) == 0);
+}
+
+static void test_parse_tool_event_extracts_mcp_fields(void)
+{
+   const char *line = "{\"jsonrpc\":\"2.0\",\"method\":\"item/started\",\"params\":{"
+                      "\"item\":{\"type\":\"mcpToolCall\",\"id\":\"call-7\","
+                      "\"server\":\"aimee\",\"tool\":\"search_memory\"}}}";
+   char tool[128], call_id[64], status[32];
+   assert(cli_codex_parse_tool_event(line, tool, sizeof(tool), call_id, sizeof(call_id), status,
+                                     sizeof(status)) == 1);
+   assert(strcmp(tool, "aimee/search_memory") == 0);
+   assert(strcmp(call_id, "call-7") == 0);
+   assert(strcmp(status, "started") == 0);
+}
+
+static void test_parse_tool_event_extracts_completion_status(void)
+{
+   const char *line = "{\"jsonrpc\":\"2.0\",\"method\":\"item/completed\",\"params\":{"
+                      "\"item\":{\"type\":\"mcpToolCall\",\"id\":\"call-7\","
+                      "\"serverName\":\"aimee\",\"toolName\":\"search_memory\","
+                      "\"status\":\"failed\"}}}";
+   char tool[128], call_id[64], status[32];
+   assert(cli_codex_parse_tool_event(line, tool, sizeof(tool), call_id, sizeof(call_id), status,
+                                     sizeof(status)) == 1);
+   assert(strcmp(tool, "aimee/search_memory") == 0);
+   assert(strcmp(call_id, "call-7") == 0);
+   assert(strcmp(status, "failed") == 0);
 }
 
 static void test_agent_execute_cli_codex_uses_requested_cwd(void)
@@ -823,6 +850,14 @@ int main(void)
 
    printf("test_parse_tool_action_skips_other_methods... ");
    test_parse_tool_action_skips_other_methods();
+   printf("OK\n");
+
+   printf("test_parse_tool_event_extracts_mcp_fields... ");
+   test_parse_tool_event_extracts_mcp_fields();
+   printf("OK\n");
+
+   printf("test_parse_tool_event_extracts_completion_status... ");
+   test_parse_tool_event_extracts_completion_status();
    printf("OK\n");
 
    printf("test_agent_execute_cli_codex_uses_requested_cwd... ");

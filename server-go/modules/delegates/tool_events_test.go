@@ -335,7 +335,7 @@ func TestToolCollectorLiveViaHTTPSocketIsVisibleBeforeBatch(t *testing.T) {
 		close(done)
 	}()
 	<-parsed
-	var liveFound bool
+	var liveFound, progressFound bool
 	for i := 0; i < 100; i++ {
 		events, queryErr := store.Events(t.Context(), "wi_live_http", 0, 20)
 		if queryErr != nil {
@@ -344,16 +344,21 @@ func TestToolCollectorLiveViaHTTPSocketIsVisibleBeforeBatch(t *testing.T) {
 		for _, event := range events {
 			if event.Kind == delegatecontract.ToolEventStart && strings.Contains(event.Detail, "call_id=call_http") {
 				liveFound = true
-				break
+			}
+			if event.Kind == "model_progress" && event.Detail == "status=response_streaming" {
+				progressFound = true
 			}
 		}
-		if liveFound {
+		if liveFound && progressFound {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 	if !liveFound {
 		t.Fatal("live HTTP event was not observed while provider turn was blocked")
+	}
+	if !progressFound {
+		t.Fatal("response stream progress was not observed while provider turn was blocked")
 	}
 	close(release)
 	<-done

@@ -582,6 +582,7 @@ type toolEventStreamWriter struct {
 	underlying io.Writer
 	mu         sync.Mutex
 	pending    []byte
+	progress   sync.Once
 }
 
 func (w *toolEventStreamWriter) Write(p []byte) (int, error) {
@@ -599,6 +600,11 @@ func (w *toolEventStreamWriter) Write(p []byte) (int, error) {
 		}
 		line := string(w.pending[:idx])
 		w.pending = w.pending[idx+1:]
+		if outputResponseStarted(w.kind, []byte(line+"\n")) {
+			w.progress.Do(func() {
+				postModelProgressLive(w.col.liveCtx, w.col.workflow, "response_streaming")
+			})
+		}
 		switch strings.ToLower(strings.TrimSpace(w.kind)) {
 		case "claude", "claude-code":
 			parseClaudeToolStart(line, w.col)

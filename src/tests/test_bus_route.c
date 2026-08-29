@@ -375,6 +375,34 @@ static void test_capability_absent(void)
    printf("  capability_absent: a request with no server is answered, not dropped\n");
 }
 
+static void test_server_departure_answers_pending_request(void)
+{
+   bus_host_config_t c = cfg();
+   bus_host_t h;
+   must(bus_host_create(&h, &c, NULL, NULL) == BUS_HOST_OK, "host");
+
+   client_t req, server;
+   attach(&h, 1, &req);
+   attach(&h, 2, &server);
+   must(bus_host_serve_kind(&h, server.reply.handle_id, KIND_A) == BUS_HOST_OK, "server serves A");
+
+   const uint64_t corr = 0xDEAD;
+   emit(&req, BUS_F_REQUEST, KIND_A, corr, 0, 0);
+   must(bus_host_pump(&h) == 1, "request routed");
+   bus_frame_t f;
+   must(recv_event(&server, &f, NULL, 0) == 1, "server got the request");
+
+   must(bus_host_release_slot(&h, server.reply.handle_id) == BUS_HOST_OK, "server departed");
+   must(recv_event(&req, &f, NULL, 0) == 1 && f.event_kind == BUS_KIND_CAPABILITY_ABSENT &&
+            f.correlation_id == corr && (f.hdr_flags & BUS_F_REPLY),
+        "requester was told the serving module departed");
+
+   detach(&req);
+   detach(&server);
+   bus_host_destroy(&h);
+   printf("  server departure: an in-flight requester is answered, not stranded\n");
+}
+
 static void test_cancel(void)
 {
    bus_host_config_t c = cfg();
@@ -962,6 +990,7 @@ int main(void)
    test_fragmented_request_reply();
    test_reply_and_cancel_spoofing_refused();
    test_capability_absent();
+   test_server_departure_answers_pending_request();
    test_cancel();
    test_tap_order_and_completeness();
    test_arena_notification_fanout();

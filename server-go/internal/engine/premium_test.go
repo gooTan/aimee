@@ -139,7 +139,7 @@ func TestAdmitPremiumPlanningLedgerOnlyCountsDraft(t *testing.T) {
 
 	// Two draft calls consume the limited planning ledger.
 	stepDraft := StepRequest{WorkItem: db1.WorkItem{ID: "wi_premium_review"}, Node: wfe.Node{ID: "plan"}}
-	if err := runner.admitPremium(ctx, stepDraft, DelegateRequest{Delegate: "fable", Role: "draft"}); err != nil {
+	if err := runner.admitPremium(ctx, stepDraft, DelegateRequest{Delegate: "fable", Role: "draft", Tools: true}); err != nil {
 		t.Fatalf("first draft premium call rejected: %v", err)
 	}
 	if count, _ := store.PremiumCallCount(ctx, "wi_premium_review"); count != 1 {
@@ -171,7 +171,6 @@ func TestAdmitPremiumPlanningLedgerOnlyCountsDraft(t *testing.T) {
 	// Premium write roles are still refused and do not record.
 	for _, req := range []DelegateRequest{
 		{Delegate: "fable", Role: "code", Tools: true},
-		{Delegate: "fable", Role: "draft", Tools: true},
 		{Delegate: "sol", Role: "code"},
 		{Delegate: "fable", Role: "code", Persona: "engineer"},
 	} {

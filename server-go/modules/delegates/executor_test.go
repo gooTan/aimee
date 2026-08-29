@@ -859,14 +859,16 @@ func TestAgyReceivesLargePromptOnStdin(t *testing.T) {
 	}
 	var message struct {
 		Event   string `json:"event"`
-		Message string `json:"message"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
 	}
 	if err := json.Unmarshal(input, &message); err != nil {
 		t.Fatal(err)
 	}
 	wantPrompt := "You are acting as qa.\n\n" + prompt
-	if message.Event != "user" || message.Message != wantPrompt {
-		t.Fatalf("agy stdin changed prompt: event=%q bytes=%d want=%d", message.Event, len(message.Message), len(wantPrompt))
+	if message.Event != "user" || message.Message.Content != wantPrompt {
+		t.Fatalf("agy stdin changed prompt: event=%q bytes=%d want=%d", message.Event, len(message.Message.Content), len(wantPrompt))
 	}
 }
 

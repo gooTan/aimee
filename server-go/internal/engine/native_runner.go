@@ -233,7 +233,8 @@ func (r *NativeRunner) admitPremium(ctx context.Context, step StepRequest, reque
 	if !r.premium.IsPremium(request.Delegate) {
 		return nil
 	}
-	if request.Tools || request.Role == "code" {
+	if request.Role == "code" || request.Role == "refactor" ||
+		(request.Role == "draft" && request.Tools) {
 		return fmt.Errorf("%w: delegate %q role %q", ErrPremiumWriteRefused, request.Delegate, request.Role)
 	}
 	if request.Role != "draft" {
@@ -1389,7 +1390,8 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 			return StepResult{}, err
 		}
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir,
+		Tools: paramBool(req.Node, "require_code_review_skill")})
 	if err != nil {
 		return StepResult{}, err
 	}

@@ -111,6 +111,30 @@ func TestCodeReviewSkillFallsBackToCentralAimeeHome(t *testing.T) {
 	}
 }
 
+func TestRequiredCodeReviewSkillEnablesReviewTools(t *testing.T) {
+	worktree := t.TempDir()
+	skill := filepath.Join(worktree, ".agents", "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skill, []byte("inspect the repository"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents := &recordingAgents{}
+	runner := &NativeRunner{agents: agents}
+	_, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{Worktree: worktree},
+		Node:     wfe.Node{Params: map[string]any{"require_code_review_skill": true}},
+		Inputs:   map[string]wfe.Artifact{"src": {Content: []byte("diff"), Hash: "hash"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 1 || !agents.requests[0].Tools {
+		t.Fatalf("review request = %+v, want tools enabled", agents.requests)
+	}
+}
+
 func TestDelegateDeadlineCapLeavesWriteVerificationReserve(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()

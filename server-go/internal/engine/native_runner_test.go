@@ -826,6 +826,29 @@ func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
 	}
 }
 
+func TestContextBriefCorrectsWriteAccessBlockWithinScoutStep(t *testing.T) {
+	blocked := `{"schema_version":2,"status":"blocked","summary":"scope","acceptance_criteria":["done"],"blocked_reason":"Write access is unavailable, so the requested file cannot be added."}`
+	ready := `{"schema_version":2,"status":"ready","summary":"scope","acceptance_criteria":["done"]}`
+	agents := &recordingAgents{draftResponses: []string{blocked, ready}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "scout", Params: map[string]any{
+			"brief": true, "delegate": "luna",
+		}},
+		Proposal: "inspect before planning",
+	}, "intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced || len(agents.requests) != 2 {
+		t.Fatalf("result=%+v requests=%d", result, len(agents.requests))
+	}
+	if !strings.Contains(agents.requests[1].Prompt, "cannot be blocked by intentionally unavailable write access") {
+		t.Fatalf("corrective prompt omitted the scout contract: %q", agents.requests[1].Prompt)
+	}
+}
+
 func TestContextBriefBlocksFailedMandatoryPrecondition(t *testing.T) {
 	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed","detail":"memory route unavailable"}]}`}}
 	runner := &NativeRunner{agents: agents}

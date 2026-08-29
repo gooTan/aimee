@@ -1352,8 +1352,9 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 		return StepResult{}, errors.New("review missing src input")
 	}
 	persona := paramString(req.Node, "persona", paramString(req.Node, "reviewer", "reviewer"))
-	prompt := "Review this complete artifact against the proposal. Return only JSON shaped {\"verdict\":\"approve\" or \"changes\" or \"blocked\",\"findings\":[{\"id\":\"...\",\"severity\":\"blocking\",\"location\":\"...\",\"summary\":\"...\",\"recommendation\":\"...\"}]}. " +
-		"Write every recommendation as a bounded, directly actionable fix instruction: name the file and location and state the exact change, because a small implementation model will execute it literally and must not have to interpret intent.\n\nPROPOSAL:\n" + req.Proposal + "\n\nARTIFACT:\n" + string(reviewed.Content)
+	prompt := "Review this complete artifact against the immutable original request. Return only JSON shaped {\"verdict\":\"approve\" or \"changes\" or \"blocked\",\"findings\":[{\"id\":\"...\",\"severity\":\"blocking\",\"location\":\"...\",\"summary\":\"...\",\"recommendation\":\"...\"}]}. " +
+		"The original request outranks repository conventions: never recommend changing, removing, relocating, or expanding an explicit requested path, content, or scope. If the artifact exactly satisfies an explicit constraint, a conflicting convention is not a blocking artifact defect. " +
+		"Write every recommendation as a bounded, directly actionable fix instruction: name the file and location and state the exact change, because a small implementation model will execute it literally and must not have to interpret intent.\n\nORIGINAL REQUEST:\n" + req.Proposal + "\n\nARTIFACT:\n" + string(reviewed.Content)
 	if req.Node.OnEscalate != "" {
 		prompt = strings.Replace(prompt,
 			"\"recommendation\":\"...\"}]}.",

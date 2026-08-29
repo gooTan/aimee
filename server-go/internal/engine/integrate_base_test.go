@@ -184,6 +184,30 @@ func TestFreezeUsesMergedRemoteFeatureTip(t *testing.T) {
 	if !strings.Contains(result.Artifact, "child.txt") {
 		t.Fatalf("freeze omitted this slice's change:\n%s", result.Artifact)
 	}
+
+	// During a long run the integration branch can advance past the feature tip.
+	// If the child also contains that newer tip, freeze must not attribute those
+	// already-landed integration changes to the child.
+	gitRun(t, repo, "fetch", "origin", feature)
+	gitRun(t, repo, "merge", "--ff-only", "origin/"+feature)
+	if err := os.WriteFile(filepath.Join(repo, "integration.txt"), []byte("already landed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "integration.txt")
+	gitRun(t, repo, "commit", "-m", "integration fix")
+	gitRun(t, repo, "push", "origin", "trunk")
+	gitRun(t, workdir, "fetch", "origin", "trunk")
+	gitRun(t, workdir, "merge", "--no-edit", "origin/trunk")
+	result, err = runner.freeze(ctx, StepRequest{WorkItem: child})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Artifact, "integration.txt") {
+		t.Fatalf("freeze leaked work already present on integration base:\n%s", result.Artifact)
+	}
+	if !strings.Contains(result.Artifact, "child.txt") {
+		t.Fatalf("freeze omitted child delta:\n%s", result.Artifact)
+	}
 }
 
 // A root freeze must review the same delta that the final PR will present.

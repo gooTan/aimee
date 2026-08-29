@@ -1749,6 +1749,15 @@ func frozenWorktreeBase(ctx context.Context, item db1.WorkItem, workdir string) 
 		if base == "" {
 			return "", errors.New("parent feature branch is unavailable")
 		}
+		integration, e := repoIntegrationBranch(ctx, item.Repo)
+		if e == nil {
+			remote := "origin/" + integration
+			_, _ = gitText(ctx, workdir, "fetch", "--quiet", "origin",
+				"+refs/heads/"+integration+":refs/remotes/"+remote)
+			if _, err := gitText(ctx, workdir, "merge-base", "--is-ancestor", base, remote); err == nil {
+				base = remote
+			}
+		}
 	} else {
 		integration, e := repoIntegrationBranch(ctx, item.Repo)
 		if e != nil {

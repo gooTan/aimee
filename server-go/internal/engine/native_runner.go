@@ -1403,11 +1403,11 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	}
 	doc, err := extractReviewVerdict(result.Response)
 	if err != nil {
-		return malformedReview(reviewed.Hash, persona, err, result.CostUSD), nil
+		return StepResult{}, fmt.Errorf("parse review response: %w", err)
 	}
 	var parsed panelResponse
 	if err := json.Unmarshal(doc, &parsed); err != nil {
-		return malformedReview(reviewed.Hash, persona, err, result.CostUSD), nil
+		return StepResult{}, fmt.Errorf("parse review response: %w", err)
 	}
 	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: reviewed.Hash,
 		Escalation: normalizeEscalation(parsed.Escalation)}
@@ -2526,14 +2526,6 @@ func stringMap(value any) map[string]string {
 		}
 	}
 	return out
-}
-
-func malformedReview(hash, persona string, err error, cost float64) StepResult {
-	feedback := &wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: hash, Findings: []wfe.Finding{{
-		ID: "malformed-review", Persona: persona, Severity: "blocking",
-		Summary: "reviewer returned an invalid structured response", Recommendation: err.Error(),
-	}}}
-	return StepResult{Status: StepChanges, Feedback: feedback, Detail: err.Error(), CostUSD: cost}
 }
 
 func prInputRef(req StepRequest) (string, error) {

@@ -302,6 +302,68 @@ static void test_spawn_failure_captures_stderr_and_exit_status(void)
    unlink(path);
 }
 
+static void test_agent_execute_cli_codex_approval(int write_capable, const char *method,
+                                                  const char *expected_response)
+{
+   char path[256];
+   snprintf(path, sizeof path, "%s/aimee-codex-approval-XXXXXX", platform_tmpdir());
+   int fd = mkstemp(path);
+   assert(fd >= 0);
+   const char *script =
+       "#!/bin/sh\n"
+       "i=0\n"
+       "while IFS= read -r line; do\n"
+       "  i=$((i + 1))\n"
+       "  case \"$i\" in\n"
+       "    1) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}' ;;\n"
+       "    2) printf '%s\\n' "
+       "'{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"thread\":{\"id\":\"t1\"}}}' ;;\n"
+       "    3) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}'\n"
+       "       printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"item/started\",\"params\":{\"item\":{\"type\":\"commandExecution\",\"id\":\"tool-1\"}}}'\n"
+       "       printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"item/updated\",\"params\":{\"item\":{\"type\":\"commandExecution\",\"id\":\"tool-1\",\"status\":\"completed\"}}}'\n"
+       "       printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"item/completed\",\"params\":{\"item\":{\"type\":\"commandExecution\",\"id\":\"tool-1\",\"status\":\"completed\"}}}'\n"
+       "       printf '{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"%s\",\"params\":{\"permissions\":{\"filesystem\":\"write\"}}}\\n' \"$AIMEE_TEST_CODEX_APPROVAL_METHOD\" ;;\n"
+       "    4) printf '%s\\n' \"$line\" > \"$AIMEE_TEST_CODEX_APPROVAL_OUT\"\n"
+       "       printf '%s\\n' "
+       "'{\"jsonrpc\":\"2.0\",\"method\":\"item/completed\",\"params\":{\"item\":{\"type\":\"agentMessage\",\"text\":\"ok\"}}}'\n"
+       "       printf '%s\\n' "
+       "'{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"completed\"}}}'\n"
+       "       exit 0 ;;\n"
+       "  esac\n"
+       "done\n";
+   assert(write(fd, script, strlen(script)) == (ssize_t)strlen(script));
+   close(fd);
+   assert(chmod(path, 0700) == 0);
+
+   char marker[256];
+   snprintf(marker, sizeof marker, "%s.out", path);
+   assert(setenv("AIMEE_TEST_CODEX_APPROVAL_OUT", marker, 1) == 0);
+   assert(setenv("AIMEE_TEST_CODEX_APPROVAL_METHOD", method, 1) == 0);
+
+   agent_t agent = {0};
+   snprintf(agent.name, sizeof(agent.name), "fake-codex");
+   snprintf(agent.cli_cmd, sizeof(agent.cli_cmd), "%s", path);
+   agent.cli_idle_timeout_ms = 5000;
+   agent.write_capable = write_capable;
+
+   agent_result_t out;
+   assert(agent_execute_cli_codex(&agent, NULL, "hello", &out) == 0);
+   assert(out.tool_calls == 1);
+   free(out.response);
+
+   char seen[512];
+   FILE *fp = fopen(marker, "r");
+   assert(fp != NULL);
+   assert(fgets(seen, sizeof(seen), fp) != NULL);
+   fclose(fp);
+   assert(strstr(seen, expected_response) != NULL);
+
+   unsetenv("AIMEE_TEST_CODEX_APPROVAL_OUT");
+   unsetenv("AIMEE_TEST_CODEX_APPROVAL_METHOD");
+   unlink(marker);
+   unlink(path);
+}
+
 static void test_parse_tool_action_counts_non_agent_items(void)
 {
    /* Any item/completed whose type isn't agentMessage is a tool action
@@ -358,6 +420,13 @@ static void test_parse_tool_event_extracts_completion_status(void)
    assert(strcmp(tool, "aimee/search_memory") == 0);
    assert(strcmp(call_id, "call-7") == 0);
    assert(strcmp(status, "failed") == 0);
+
+   line = "{\"jsonrpc\":\"2.0\",\"method\":\"item/updated\",\"params\":{"
+          "\"item\":{\"type\":\"mcpToolCall\",\"id\":\"call-7\","
+          "\"status\":\"completed\"}}}";
+   assert(cli_codex_parse_tool_event(line, tool, sizeof(tool), call_id, sizeof(call_id), status,
+                                     sizeof(status)) == 1);
+   assert(strcmp(status, "completed") == 0);
 }
 
 static void test_agent_execute_cli_codex_uses_requested_cwd(void)
@@ -862,6 +931,27 @@ int main(void)
 
    printf("test_agent_execute_cli_codex_uses_requested_cwd... ");
    test_agent_execute_cli_codex_uses_requested_cwd();
+   printf("OK\n");
+
+   printf("test_agent_execute_cli_codex_declines_read_only_file_change... ");
+   test_agent_execute_cli_codex_approval(0, "item/fileChange/requestApproval",
+                                         "\"decision\":\"decline\"");
+   printf("OK\n");
+
+   printf("test_agent_execute_cli_codex_accepts_write_capable_file_change... ");
+   test_agent_execute_cli_codex_approval(1, "item/fileChange/requestApproval",
+                                         "\"decision\":\"accept\"");
+   printf("OK\n");
+
+   printf("test_agent_execute_cli_codex_limits_read_only_permissions... ");
+   test_agent_execute_cli_codex_approval(0, "item/permissions/requestApproval",
+                                         "\"permissions\":{},\"scope\":\"turn\"");
+   printf("OK\n");
+
+   printf("test_agent_execute_cli_codex_accepts_write_capable_permissions... ");
+   test_agent_execute_cli_codex_approval(
+       1, "item/permissions/requestApproval",
+       "\"permissions\":{\"filesystem\":\"write\"},\"scope\":\"session\"");
    printf("OK\n");
 
    printf("test_agent_execute_cli_codex_honours_cancellation... ");

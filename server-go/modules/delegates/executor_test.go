@@ -618,20 +618,16 @@ func TestRegistryRejectsMissingCLIKind(t *testing.T) {
 	}
 }
 
-func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
+func TestExecutorArgvUsesRoleScopedCodexApprovalBoundary(t *testing.T) {
 	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
 	if err != nil {
 		t.Fatalf("codex read-only review argv = %q, %v", argv, err)
 	}
-	if slices.Contains(argv, "--approve-for-me") {
-		t.Fatalf("codex read-only review argv contains --approve-for-me: %q", argv)
+	if slices.Contains(argv, `approvals_reviewer="auto_review"`) {
+		t.Fatalf("codex read-only review argv contains approvals_reviewer: %q", argv)
 	}
-	if slices.Contains(argv, "--sandbox") {
-		t.Fatalf("codex read-only review argv contains conflicting --sandbox: %q", argv)
-	}
-	wants := []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
-		`sandbox_mode="read-only"`,
+	wants := []string{`approval_policy="never"`, `sandbox_mode="read-only"`,
 		`plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`}
 	for _, want := range wants {
 		idx := slices.Index(argv, want)
@@ -639,12 +635,34 @@ func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 			t.Fatalf("codex read-only review argv missing -c for %q: %q", want, argv)
 		}
 	}
+
+	argv, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
+		delegatecontract.Invocation{Role: "code", Tools: true}, "prompt")
+	if err != nil {
+		t.Fatalf("codex write argv = %q, %v", argv, err)
+	}
+	if slices.Contains(argv, "--approve-for-me") || slices.Contains(argv, "--sandbox") {
+		t.Fatalf("codex write argv contains conflicting approval/sandbox flag: %q", argv)
+	}
+	wants = []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
+		`sandbox_mode="workspace-write"`,
+		`plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`}
+	for _, want := range wants {
+		idx := slices.Index(argv, want)
+		if idx < 1 || argv[idx-1] != "-c" {
+			t.Fatalf("codex write argv missing -c for %q: %q", want, argv)
+		}
+	}
+
 	_, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "code", Tools: false}, "prompt")
 	if err == nil || !strings.Contains(err.Error(), "tools-disabled") {
 		t.Fatalf("codex write-role tools-disabled error = %v", err)
 	}
-	argv, err = executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
+}
+
+func TestExecutorArgvDisablesClaudeTools(t *testing.T) {
+	argv, err := executorArgv(agentEntry{CLIKind: "claude", CLICmd: "claude"},
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
 	tools := slices.Index(argv, "--tools")
 	if err != nil || tools < 0 || tools+1 >= len(argv) || argv[tools+1] != "" {
@@ -656,29 +674,6 @@ func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	if err != nil || mcp < 0 || mcp+1 >= len(argv) || !strings.Contains(argv[mcp+1], `"aimee"`) ||
 		!strings.Contains(argv[mcp+1], `"mcp-serve"`) {
 		t.Fatalf("claude Aimee MCP argv = %q, %v", argv, err)
-	}
-}
-
-func TestExecutorArgvAppendsScopedAimeeApprovalForCodexWriteRole(t *testing.T) {
-	const want = `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`
-	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
-		delegatecontract.Invocation{Role: "code", Tools: true}, "prompt")
-	if err != nil {
-		t.Fatalf("codex write argv = %q, %v", argv, err)
-	}
-	if slices.Contains(argv, "--approve-for-me") {
-		t.Fatalf("codex write argv contains --approve-for-me: %q", argv)
-	}
-	if slices.Contains(argv, "--sandbox") {
-		t.Fatalf("codex write argv contains conflicting --sandbox: %q", argv)
-	}
-	wants := []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
-		`sandbox_mode="workspace-write"`, want}
-	for _, wantCfg := range wants {
-		idx := slices.Index(argv, wantCfg)
-		if idx < 1 || argv[idx-1] != "-c" {
-			t.Fatalf("codex write argv missing -c for %q: %q", wantCfg, argv)
-		}
 	}
 }
 

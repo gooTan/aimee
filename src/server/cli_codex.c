@@ -80,6 +80,7 @@ typedef struct
    int err_log_fd;
    char err_log_path[64];
    int autonomous;
+   int native_approval_autonomous;
    int child_reaped;
    int child_status;
    cli_codex_read_status_t last_read_status;
@@ -874,6 +875,10 @@ static int cli_codex_tool_name_from_item(cJSON *item, char *out, size_t outsz)
 
 int cli_codex_parse_tool_action(const char *line)
 {
+   char method[64];
+   if (!cli_codex_parse_method(line, method, sizeof(method)) ||
+       strcmp(method, "item/completed") != 0)
+      return 0;
    char tool_name[256];
    char call_id[128];
    char status[64];
@@ -1186,7 +1191,7 @@ static int cli_codex_send_approval_decision(cli_codex_t *c, cJSON *obj, cJSON *i
    if (!result)
       return -1;
    char decision[32];
-   int autonomous = c->autonomous;
+   int autonomous = c->native_approval_autonomous;
    int deny_self_restart = autonomous && cli_codex_method_is_shell_approval(method) &&
                            cli_codex_json_has_server_restart(obj);
    if (!cli_codex_approval_decision(method, deny_self_restart ? 0 : autonomous, decision,
@@ -1210,7 +1215,7 @@ static int cli_codex_send_permissions_decision(cli_codex_t *c, cJSON *obj, cJSON
 {
    cJSON *result = cJSON_CreateObject();
    cJSON *permissions = NULL;
-   if (c->autonomous)
+   if (c->native_approval_autonomous)
    {
       cJSON *params = cJSON_GetObjectItemCaseSensitive(obj, "params");
       cJSON *requested = cJSON_GetObjectItemCaseSensitive(params, "permissions");
@@ -1226,7 +1231,8 @@ static int cli_codex_send_permissions_decision(cli_codex_t *c, cJSON *obj, cJSON
       return -1;
    }
    cJSON_AddItemToObject(result, "permissions", permissions);
-   cJSON_AddStringToObject(result, "scope", c->autonomous ? "session" : "turn");
+   cJSON_AddStringToObject(result, "scope",
+                           c->native_approval_autonomous ? "session" : "turn");
    return cli_codex_send_jsonrpc_result(c, id, result);
 }
 
@@ -1260,7 +1266,8 @@ static void cli_codex_record_tool_event(const char *tool_name, const char *call_
    int job_id = agent_get_durable_job_id();
    if (job_id <= 0)
       return;
-   if (status && strcmp(status, "completed") == 0)
+   if (status && (strcmp(status, "completed") == 0 || strcmp(status, "failed") == 0 ||
+                  strcmp(status, "cancelled") == 0 || strcmp(status, "canceled") == 0))
       db1_agent_job_heartbeat_ext(job_id, "", api_call_count);
    else
       db1_agent_job_heartbeat_ext(job_id, (tool_name && tool_name[0]) ? tool_name : "tool",
@@ -1291,7 +1298,7 @@ static int cli_codex_send_elicitation_decision(cli_codex_t *c, cJSON *id)
 
 /* Aimee drives codex app-server headlessly. If the server asks the client for
  * approval or user input and we ignore it, the nested delegate waits forever.
- * Reply explicitly, approving only when Aimee autonomous mode is active. */
+ * Reply explicitly, approving native writes only for write-capable delegates. */
 static int cli_codex_handle_server_request(cli_codex_t *c, const char *line)
 {
    if (!line)
@@ -1494,6 +1501,7 @@ int cli_codex_chat_stream(const cli_codex_chat_request_t *req, cli_codex_chat_ev
    c.err_fd = -1;
    c.err_log_fd = -1;
    c.autonomous = req->autonomous;
+   c.native_approval_autonomous = c.autonomous;
    const char *sandbox_config =
        req->autonomous ? CLI_CODEX_SANDBOX_DANGER_CONFIG : CLI_CODEX_SANDBOX_WORKSPACE_WRITE_CONFIG;
    if (cli_codex_spawn(&c, NULL, req->cwd, sandbox_config) != 0)
@@ -1678,7 +1686,7 @@ int cli_codex_chat_stream(const cli_codex_chat_request_t *req, cli_codex_chat_ev
       if (cli_codex_parse_tool_event(line, tool_name, sizeof(tool_name), call_id, sizeof(call_id),
                                      tool_status, sizeof(tool_status)))
       {
-         if (out && strcmp(tool_status, "started") != 0)
+         if (out && cli_codex_parse_tool_action(line))
             out->tool_calls++;
          cli_codex_record_tool_event(tool_name, call_id, tool_status, out ? out->tool_calls : 0);
       }
@@ -1805,6 +1813,7 @@ int cli_codex_compact_thread(const cli_codex_compact_request_t *req,
    c.err_fd = -1;
    c.err_log_fd = -1;
    c.autonomous = req->autonomous;
+   c.native_approval_autonomous = c.autonomous;
    const char *sandbox_config =
        req->autonomous ? CLI_CODEX_SANDBOX_DANGER_CONFIG : CLI_CODEX_SANDBOX_WORKSPACE_WRITE_CONFIG;
    if (cli_codex_spawn(&c, NULL, req->cwd, sandbox_config) != 0)
@@ -1946,10 +1955,8 @@ int agent_execute_cli_codex_at_cwd(const agent_t *agent, const char *cwd, const 
    c.out_fd = -1;
    c.err_fd = -1;
    c.err_log_fd = -1;
-   /* Provider-CLI execution is a headless delegate turn. It must resolve
-    * Codex approval requests itself; primary interactive chat has a separate
-    * request path that still honours its autonomous flag. */
    c.autonomous = 1;
+   c.native_approval_autonomous = agent->write_capable ? 1 : 0;
    const char *cli_cmd = agent->cli_cmd[0] ? agent->cli_cmd : "codex";
    const char *sandbox_config = agent->write_capable ? CLI_CODEX_SANDBOX_WORKSPACE_WRITE_CONFIG
                                                      : CLI_CODEX_SANDBOX_READ_ONLY_CONFIG;
@@ -2058,7 +2065,7 @@ int agent_execute_cli_codex_at_cwd(const agent_t *agent, const char *cwd, const 
       if (cli_codex_parse_tool_event(line, tool_name, sizeof(tool_name), call_id, sizeof(call_id),
                                      tool_status, sizeof(tool_status)))
       {
-         if (strcmp(tool_status, "started") != 0)
+         if (cli_codex_parse_tool_action(line))
             out->tool_calls++;
          cli_codex_record_tool_event(tool_name, call_id, tool_status, out->tool_calls);
       }

@@ -1396,18 +1396,32 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 			return StepResult{}, err
 		}
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir,
-		Tools: paramBool(req.Node, "require_code_review_skill")})
-	if err != nil {
-		return StepResult{}, err
-	}
-	doc, err := extractReviewVerdict(result.Response)
-	if err != nil {
-		return StepResult{}, fmt.Errorf("parse review response: %w", err)
-	}
+	var result DelegateResult
 	var parsed panelResponse
-	if err := json.Unmarshal(doc, &parsed); err != nil {
-		return StepResult{}, fmt.Errorf("parse review response: %w", err)
+	var parseErr error
+	var cost float64
+	costUnknown := false
+	for attempt := 0; attempt < 2; attempt++ {
+		next, delegateErr := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir,
+			Tools: paramBool(req.Node, "require_code_review_skill")})
+		if delegateErr != nil {
+			return StepResult{}, delegateErr
+		}
+		result = next
+		cost += result.CostUSD
+		costUnknown = costUnknown || result.CostUnknown
+		var doc []byte
+		doc, parseErr = extractReviewVerdict(result.Response)
+		if parseErr == nil {
+			parseErr = json.Unmarshal(doc, &parsed)
+		}
+		if parseErr == nil {
+			break
+		}
+		prompt += "\n\nYOUR PREVIOUS RESPONSE WAS INVALID (" + parseErr.Error() + "). Repair it and return one complete review JSON object only.\n\nCOMPLETE INVALID RESPONSE:\n" + result.Response
+	}
+	if parseErr != nil {
+		return StepResult{}, fmt.Errorf("parse review response: %w", parseErr)
 	}
 	feedback := wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: reviewed.Hash,
 		Escalation: normalizeEscalation(parsed.Escalation)}
@@ -1419,7 +1433,7 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 		// along as recorded feedback, and the engine persists them on advance so
 		// delivery surfaces them (pull request review history, inline comments)
 		// instead of silently dropping reviewer commentary.
-		step := StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved", ContentHash: reviewed.Hash, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}
+		step := StepResult{Status: StepAdvanced, ArtifactType: "verdict", Artifact: "approved", ContentHash: reviewed.Hash, CostUSD: cost, CostUnknown: costUnknown}
 		if len(feedback.Findings) > 0 {
 			step.Feedback = &feedback
 		}
@@ -1428,7 +1442,7 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	if len(feedback.Findings) == 0 {
 		feedback.Findings = append(feedback.Findings, wfe.Finding{ID: "review-invalid", Persona: persona, Severity: "blocking", Summary: "review did not approve and supplied no finding", Recommendation: "review the artifact and provide an actionable finding"})
 	}
-	return StepResult{Status: StepChanges, Feedback: &feedback, CostUSD: result.CostUSD, CostUnknown: result.CostUnknown}, nil
+	return StepResult{Status: StepChanges, Feedback: &feedback, CostUSD: cost, CostUnknown: costUnknown}, nil
 }
 
 func (r *NativeRunner) checkMergeable(ctx context.Context, req StepRequest) (StepResult, error) {

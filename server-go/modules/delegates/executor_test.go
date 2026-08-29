@@ -621,12 +621,14 @@ func TestRegistryRejectsMissingCLIKind(t *testing.T) {
 func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
-	sandbox := slices.Index(argv, "--sandbox")
-	if err != nil || sandbox < 0 || sandbox+1 >= len(argv) || argv[sandbox+1] != "read-only" {
+	approve := slices.Index(argv, "--approve-for-me")
+	if err != nil || approve < 0 || approve+2 >= len(argv) || argv[approve+1] != "-c" || argv[approve+2] != `sandbox_mode="read-only"` {
 		t.Fatalf("codex read-only review argv = %q, %v", argv, err)
 	}
-	approval := slices.Index(argv, "-c")
-	if approval < 0 || approval+1 >= len(argv) || argv[approval+1] != `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"` {
+	if slices.Index(argv, "--sandbox") >= 0 {
+		t.Fatalf("codex read-only review argv contains conflicting --sandbox: %q", argv)
+	}
+	if !slices.Contains(argv, `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`) {
 		t.Fatalf("codex read-only review argv missing scoped aimee approval: %q", argv)
 	}
 	_, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
@@ -653,8 +655,14 @@ func TestExecutorArgvAppendsScopedAimeeApprovalForCodexWriteRole(t *testing.T) {
 	const want = `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`
 	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "code", Tools: true}, "prompt")
-	approval := slices.Index(argv, "-c")
-	if err != nil || approval < 0 || approval+1 >= len(argv) || argv[approval+1] != want {
+	approve := slices.Index(argv, "--approve-for-me")
+	if err != nil || approve < 0 || approve+2 >= len(argv) || argv[approve+1] != "-c" || argv[approve+2] != `sandbox_mode="workspace-write"` {
+		t.Fatalf("codex write argv = %q, %v", argv, err)
+	}
+	if slices.Index(argv, "--sandbox") >= 0 {
+		t.Fatalf("codex write argv contains conflicting --sandbox: %q", argv)
+	}
+	if !slices.Contains(argv, want) {
 		t.Fatalf("codex write argv missing scoped aimee approval: %q, %v", argv, err)
 	}
 }

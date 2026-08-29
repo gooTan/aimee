@@ -470,11 +470,11 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 			return nil, errors.New("codex CLI cannot guarantee a tools-disabled invocation")
 		}
 		argv = append(argv, "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never")
+		sandboxMode := "read-only"
 		if RoleIsWrite(request.Role) {
-			argv = append(argv, "--sandbox", "workspace-write")
-		} else {
-			argv = append(argv, "--sandbox", "read-only")
+			sandboxMode = "workspace-write"
 		}
+		argv = append(argv, "--approve-for-me", "-c", fmt.Sprintf("sandbox_mode=%q", sandboxMode))
 		if agent.Model != "" {
 			argv = append(argv, "--model", agent.Model)
 		}

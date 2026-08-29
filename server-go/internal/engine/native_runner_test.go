@@ -166,6 +166,11 @@ func TestRequiredCodeReviewSkillEnablesReviewTools(t *testing.T) {
 	if len(agents.requests) != 1 || !agents.requests[0].Tools {
 		t.Fatalf("review request = %+v, want tools enabled", agents.requests)
 	}
+	prompt := agents.requests[0].Prompt
+	if !strings.Contains(prompt, "ORIGINAL REQUEST:") ||
+		!strings.Contains(prompt, "never recommend changing, removing, relocating, or expanding an explicit requested path, content, or scope") {
+		t.Fatalf("review prompt does not preserve explicit request constraints: %q", prompt)
+	}
 }
 
 func TestDelegateDeadlineCapLeavesWriteVerificationReserve(t *testing.T) {

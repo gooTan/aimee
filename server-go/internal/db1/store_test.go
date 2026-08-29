@@ -534,6 +534,21 @@ func TestReplayUnrecoverableCanBeResumedByOperator(t *testing.T) {
 	}
 }
 
+func TestPremiumWriteRefusalCanBeRetriedAfterPolicyRepair(t *testing.T) {
+	store := newTestStore(t)
+	createTestItem(t, store, "wi_premium_policy")
+	if err := store.Park(context.Background(), "wi_premium_policy", "plan_gate", "premium_write_refused", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Resume(context.Background(), "wi_premium_policy"); err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.WorkItem(context.Background(), "wi_premium_policy")
+	if err != nil || item.PauseReason != "" || item.State != "active" {
+		t.Fatalf("item=%+v err=%v", item, err)
+	}
+}
+
 func TestBaseIntegrationConflictCanBeResumedAfterOperatorRepair(t *testing.T) {
 	store := newTestStore(t)
 	createTestItem(t, store, "wi_base_conflict")

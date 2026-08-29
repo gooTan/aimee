@@ -1615,6 +1615,8 @@ install:
 	install -m 755 $(GATEWAY) $(PREFIX)/bin/aimee-gateway
 	@mkdir -p $(DATADIR)
 	install -m 644 ../data/models_dev_snapshot.json $(DATADIR)/models_dev_snapshot.json
+	@mkdir -p $(PREFIX)/scripts
+	install -m 644 ../scripts/curator-extract.py ../scripts/llm-chat.py $(PREFIX)/scripts/
 
 # --- Embedded docs (compiled into binary) ---
 

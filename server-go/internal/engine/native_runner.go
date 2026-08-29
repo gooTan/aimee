@@ -233,8 +233,7 @@ func (r *NativeRunner) admitPremium(ctx context.Context, step StepRequest, reque
 	if !r.premium.IsPremium(request.Delegate) {
 		return nil
 	}
-	if request.Role == "code" || request.Role == "refactor" ||
-		(request.Role == "draft" && request.Tools) {
+	if request.Role == "code" || request.Role == "refactor" {
 		return fmt.Errorf("%w: delegate %q role %q", ErrPremiumWriteRefused, request.Delegate, request.Role)
 	}
 	if request.Role != "draft" {

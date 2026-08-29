@@ -115,6 +115,20 @@ func TestRequiredCodeReviewSkillParksWhenUnavailable(t *testing.T) {
 	}
 }
 
+func TestMalformedReviewIsExecutionFailureNotChangeRequest(t *testing.T) {
+	runner := &NativeRunner{agents: fixedResponseAgents{response: "prose without a verdict"}}
+	reviewed := wfe.Artifact{Type: "frozen_diff", Content: []byte("diff")}
+	reviewed.Hash = wfe.Hash(reviewed.Content)
+	_, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi", Worktree: t.TempDir()},
+		Node:     wfe.Node{ID: "review", Params: map[string]any{"delegate": "fable"}},
+		Proposal: "review the change", Inputs: map[string]wfe.Artifact{"src": reviewed},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parse review response") {
+		t.Fatalf("malformed response err=%v, want parse failure", err)
+	}
+}
+
 func TestCodeReviewSkillFallsBackToCentralAimeeHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AIMEE_HOME", home)

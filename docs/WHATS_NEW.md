@@ -86,6 +86,9 @@ See [Event bus](EVENT_BUS.md).
 - Agent admission limits apply globally and per workflow. Saturated agents are routed around.
 - A merge conflict, missing commit, lost replay, or exhausted gate returns a named terminal or
   parked state instead of silently advancing.
+- Large delegate and watchdog payload transport no longer depends on argv or environment-size
+  limits, transient event-bus backpressure is retried without duplicating frames, and verifier
+  lifecycle and heartbeat events are visible in workflow watch output.
 
 ## Delegates run sandboxed, and a roundtable's findings feed the next pass
 

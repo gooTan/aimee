@@ -201,6 +201,10 @@ int kb_curator_queue_code_units_for_project(const char *project, const char *roo
     * Ordering by line makes the survivor the first definition, deterministically,
     * rather than whichever row the scan happened to emit first.
     *
+    * Terminal failures remain visible until an operator explicitly retries them.
+    * Treating failed rows as absent made every autonomous sweep report them as
+    * newly queued even though the conflict update left them failed.
+    *
     * NOT EXISTS (anti-join), not `(f.path, t.name) NOT IN (subquery)`: the
     * row-constructor NOT IN can't be planned as a hash anti-join (it degrades to a
     * per-row subquery scan — observed holding a pooled connection for minutes on a
@@ -217,7 +221,7 @@ int kb_curator_queue_code_units_for_project(const char *project, const char *roo
        " AND f.generation = p.current_generation"
        " AND NOT EXISTS ("
        "   SELECT 1 FROM kb_code_unit_jobs j"
-       "   WHERE j.project = ?1 AND j.status IN ('pending','running','done')"
+       "   WHERE j.project = ?1"
        "     AND j.generation = p.current_generation"
        "     AND j.file_path = f.path AND j.symbol = t.name"
        " )"

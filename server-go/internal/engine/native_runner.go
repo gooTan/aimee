@@ -794,7 +794,7 @@ func (r *NativeRunner) author(ctx context.Context, req StepRequest, kind string)
 		encoded, _ := json.Marshal(req.Feedback)
 		prompt += "\n\nPRIOR REVIEW FEEDBACK TO RESOLVE:\n" + string(encoded)
 	}
-	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem)})
+	result, err := r.delegate(ctx, req, DelegateRequest{Role: "draft", Persona: paramString(req.Node, "persona", "architect"), Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workflowDelegateWorkdir(req.WorkItem), Tools: true})
 	if err != nil {
 		return StepResult{}, err
 	}

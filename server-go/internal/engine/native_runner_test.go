@@ -1233,7 +1233,7 @@ func TestNativeRunnerUsesCompleteArtifactsAndOnlyPositiveUIPins(t *testing.T) {
 	if len(agents.requests) != 1 || !strings.Contains(plannerPrompt, "ORIGINAL REQUEST:\n"+proposal) || strings.Contains(plannerPrompt, "\n\nPROPOSAL:\n") {
 		t.Fatalf("planner did not frame its source as the original request: %+v", agents.requests)
 	}
-	if agents.requests[0].Workdir != "/wfe-worktree" {
+	if agents.requests[0].Workdir != "/wfe-worktree" || !agents.requests[0].Tools {
 		t.Fatalf("planner workdir=%q, want managed workflow worktree", agents.requests[0].Workdir)
 	}
 	customBlock := wfe.BlockDefinition{Name: "custom", Custom: true, Produces: "report", Prompt: "Do the work."}

@@ -86,6 +86,7 @@ See [Event bus](EVENT_BUS.md).
 - Agent admission limits apply globally and per workflow. Saturated agents are routed around.
 - A merge conflict, missing commit, lost replay, or exhausted gate returns a named terminal or
   parked state instead of silently advancing.
+- The build workflow's final PR now targets `trunk`.
 
 ## Delegates run sandboxed, and a roundtable's findings feed the next pass
 

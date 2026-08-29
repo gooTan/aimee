@@ -13,6 +13,7 @@ nodes:
     block: understand
     params:
       with_user: false
+      delegate: luna
     next: impl
     on_fail: scope
   # Implement the packet on the slice branch.

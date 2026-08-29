@@ -109,6 +109,12 @@ func wfeHTTPSocket() string {
 }
 
 func postToolEventLive(ctx context.Context, wf *delegatecontract.WorkflowContext, ev delegatecontract.ToolEvent) bool {
+	kind := delegatecontract.ToolEventKind(ev.Status)
+	detail := delegatecontract.FormatToolDetail(wf, ev, 0)
+	return postModelEventLive(ctx, wf, kind, detail)
+}
+
+func postModelEventLive(ctx context.Context, wf *delegatecontract.WorkflowContext, kind, detail string) bool {
 	if wf == nil || strings.TrimSpace(wf.WorkItemID) == "" || strings.TrimSpace(wf.Stage) == "" {
 		return false
 	}
@@ -119,8 +125,6 @@ func postToolEventLive(ctx context.Context, wf *delegatecontract.WorkflowContext
 	if _, err := os.Stat(socket); err != nil {
 		return false
 	}
-	kind := delegatecontract.ToolEventKind(ev.Status)
-	detail := delegatecontract.FormatToolDetail(wf, ev, 0)
 	actor := strings.TrimSpace(wf.Model)
 	if actor == "" {
 		actor = "unknown"
@@ -155,6 +159,15 @@ func postToolEventLive(ctx context.Context, wf *delegatecontract.WorkflowContext
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK
+}
+
+func postModelProgressLive(ctx context.Context, wf *delegatecontract.WorkflowContext, status string) bool {
+	status = delegatecontract.SafeDiagnostic(strings.TrimSpace(status))
+	if status == "" {
+		return false
+	}
+	detail := "status=" + strings.ReplaceAll(status, " ", "_")
+	return postModelEventLive(ctx, wf, "model_progress", detail)
 }
 
 func (c *toolEventCollector) tryLive(ev delegatecontract.ToolEvent) bool {
@@ -299,6 +312,10 @@ func (c *toolEventCollector) recordStart(toolName, callID, phase string) {
 }
 
 func (c *toolEventCollector) recordComplete(toolName, callID, phase string) {
+	c.recordFinish(toolName, callID, "completed", phase)
+}
+
+func (c *toolEventCollector) recordFinish(toolName, callID, status, phase string) {
 	if c == nil {
 		return
 	}
@@ -317,10 +334,18 @@ func (c *toolEventCollector) recordComplete(toolName, callID, phase string) {
 	}
 	if elapsed == 0 {
 		// No matching start — this protocol may only emit completions (codex).
-		c.add(toolName, callID, "completed", phase, 0)
+		c.add(toolName, callID, status, phase, 0)
 	} else {
-		c.add(toolName, callID, "completed", phase, elapsed)
+		c.add(toolName, callID, status, phase, elapsed)
 	}
+}
+
+func (c *toolEventCollector) recordCancelled(toolName, callID, phase string) {
+	c.recordFinish(toolName, callID, "cancelled", phase)
+}
+
+func (c *toolEventCollector) recordFailed(toolName, callID, phase string) {
+	c.recordFinish(toolName, callID, "failed", phase)
 }
 
 func (c *toolEventCollector) recordError(toolName, callID, phase string) {
@@ -448,11 +473,7 @@ func parseCodexToolComplete(line string, col *toolEventCollector) {
 	if itemType == "" || itemType == "agent_message" || itemType == "reasoning" {
 		return
 	}
-	// Codex exec item.completed is already a completed tool invocation.
-	// We emit completed directly; started is not available, so we do not
-	// fabricate it.
 	toolName := itemType
-	// Some items carry a nested tool name.
 	if n, ok := item["name"].(string); ok && n != "" {
 		toolName = n
 	} else if n, ok := item["tool"].(string); ok && n != "" {
@@ -462,7 +483,17 @@ func parseCodexToolComplete(line string, col *toolEventCollector) {
 	if callID == "" {
 		callID, _ = item["call_id"].(string)
 	}
-	col.recordComplete(toolName, callID, "")
+	status, _ := item["status"].(string)
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed":
+		col.recordFailed(toolName, callID, "")
+	case "error":
+		col.recordError(toolName, callID, "")
+	case "cancelled", "canceled":
+		col.recordCancelled(toolName, callID, "")
+	default:
+		col.recordComplete(toolName, callID, "")
+	}
 }
 
 // parseAgyToolComplete handles `agy -p --output-format stream-json` similarly
@@ -505,8 +536,12 @@ func parseACPToolEvent(updateKind, toolName, callID, status string, col *toolEve
 	callID = strings.TrimSpace(callID)
 	if status == "completed" || status == "done" {
 		col.recordComplete(toolName, callID, "")
-	} else if status == "failed" || status == "error" {
+	} else if status == "failed" {
+		col.recordFailed(toolName, callID, "")
+	} else if status == "error" {
 		col.recordError(toolName, callID, "")
+	} else if status == "cancelled" || status == "canceled" {
+		col.recordCancelled(toolName, callID, "")
 	} else {
 		col.recordStart(toolName, callID, "")
 	}

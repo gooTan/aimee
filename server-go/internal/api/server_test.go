@@ -61,6 +61,23 @@ func TestInternalModelEventIsRecorded(t *testing.T) {
 	}
 }
 
+func TestInternalModelProgressIsRecorded(t *testing.T) {
+	server, store, _ := newTestServer(t)
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_progress", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/internal/model-events", strings.NewReader(`{"work_item_id":"wi_progress","stage":"impl","kind":"model_progress","actor":"muse","detail":"status=acp_prompt_sent"}`))
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := store.Events(t.Context(), "wi_progress", 0, 10)
+	if err != nil || len(events) != 2 || events[1].Kind != "model_progress" || events[1].Detail != "status=acp_prompt_sent" {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}
+
 func TestProposalEndpointImportsLegacySourceWithoutTruncation(t *testing.T) {
 	server, store, _ := newTestServer(t)
 	tail := "ACCEPTANCE_CRITERION_AFTER_ALL_PRIOR_BYTE_LIMITS"

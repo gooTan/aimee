@@ -861,7 +861,8 @@ static int cli_codex_tool_name_from_item(cJSON *item, char *out, size_t outsz)
       tool = cJSON_GetObjectItemCaseSensitive(item, "name");
    cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
    const char *tool_s = cJSON_IsString(tool) && tool->valuestring ? tool->valuestring : NULL;
-   const char *server_s = cJSON_IsString(server) && server->valuestring ? server->valuestring : NULL;
+   const char *server_s =
+       cJSON_IsString(server) && server->valuestring ? server->valuestring : NULL;
    if (server_s && server_s[0] && tool_s && tool_s[0])
       snprintf(out, outsz, "%s/%s", server_s, tool_s);
    else if (tool_s && tool_s[0])
@@ -903,10 +904,9 @@ int cli_codex_parse_tool_event(const char *line, char *tool_name, size_t tool_na
       return 0;
    int rc = 0;
    cJSON *method = cJSON_GetObjectItemCaseSensitive(obj, "method");
-   if (cJSON_IsString(method) &&
-       (strcmp(method->valuestring, "item/completed") == 0 ||
-        strcmp(method->valuestring, "item/started") == 0 ||
-        strcmp(method->valuestring, "item/updated") == 0))
+   if (cJSON_IsString(method) && (strcmp(method->valuestring, "item/completed") == 0 ||
+                                  strcmp(method->valuestring, "item/started") == 0 ||
+                                  strcmp(method->valuestring, "item/updated") == 0))
    {
       cJSON *params = cJSON_GetObjectItemCaseSensitive(obj, "params");
       cJSON *item = cli_codex_tool_item(params);
@@ -1231,8 +1231,7 @@ static int cli_codex_send_permissions_decision(cli_codex_t *c, cJSON *obj, cJSON
       return -1;
    }
    cJSON_AddItemToObject(result, "permissions", permissions);
-   cJSON_AddStringToObject(result, "scope",
-                           c->native_approval_autonomous ? "session" : "turn");
+   cJSON_AddStringToObject(result, "scope", c->native_approval_autonomous ? "session" : "turn");
    return cli_codex_send_jsonrpc_result(c, id, result);
 }
 

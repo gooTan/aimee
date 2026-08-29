@@ -285,7 +285,7 @@ func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
 		return
 	}
-	allowed := event.Kind == "model_dispatch" || event.Kind == "model_heartbeat" || event.Kind == "model_complete" || event.Kind == "model_error" || event.Kind == "model_fallback" ||
+	allowed := event.Kind == "model_dispatch" || event.Kind == "model_heartbeat" || event.Kind == "model_progress" || event.Kind == "model_complete" || event.Kind == "model_error" || event.Kind == "model_fallback" ||
 		event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error"
 	if !allowed || event.WorkItemID == "" || event.Stage == "" || event.Actor == "" || len(event.Detail) > 4096 {
 		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))

@@ -55,13 +55,13 @@
  * thread; the coord DISPATCHER runs the task on its own thread through the shared
  * delegate path, so this only waits — it never executes the delegate. Returns
  * OK and fills result_out on 'done', NO_CHANGE for the write-role detector's
- * stable no-op outcome, or ERROR (+err) on other failures/cancellation/timeout. */
+ * stable no-op outcome, or ERROR (+err) on failure/cancellation. Model progress
+ * is observable through delegate events, so elapsed wall time is not failure. */
 static wfe_delegate_result_t wfe_coord_task_wait(int job_id, int task_id, char *result_out,
                                                  size_t result_cap, char *err, size_t errlen)
 {
-   (void)task_id;              /* the job holds exactly one task */
-   const int max_polls = 1600; /* 1600 * 750ms ~= 20 min, matching the delegate timeout ceiling */
-   for (int i = 0; i < max_polls; i++)
+   (void)task_id; /* the job holds exactly one task */
+   for (;;)
    {
       db1_coord_task_t task;
       memset(&task, 0, sizeof task);
@@ -86,9 +86,6 @@ static wfe_delegate_result_t wfe_coord_task_wait(int job_id, int task_id, char *
       struct timespec ts = {0, 750L * 1000L * 1000L};
       nanosleep(&ts, NULL);
    }
-   if (err && errlen)
-      snprintf(err, errlen, "wfe delegate task timed out");
-   return WFE_DELEGATE_ERROR;
 }
 
 /* The live delegate run. Contract per wfe_delegate_provider_t.
@@ -119,7 +116,20 @@ static int wfe_live_delegate_run(const char *workdir, const char *role, const ch
       return -1;
    }
 
-   const char *persona = (role && role[0]) ? role : "engineer";
+   char persona_buf[DB1_COORD_ROLE_LEN] = "engineer";
+   char via[DB1_COORD_ROLE_LEN] = "";
+   if (role && role[0])
+   {
+      const char *marker = strstr(role, "|via=");
+      size_t persona_len = marker ? (size_t)(marker - role) : strlen(role);
+      if (persona_len >= sizeof persona_buf)
+         persona_len = sizeof persona_buf - 1;
+      memcpy(persona_buf, role, persona_len);
+      persona_buf[persona_len] = '\0';
+      if (marker)
+         snprintf(via, sizeof via, "%s", marker + 5);
+   }
+   const char *persona = persona_buf;
    /* Produce-via-reply vs worktree-mutating, keyed on whether the block named a
     * captured artifact_path:
     *   - artifact_path set (author/understand/split/review): the delegate's OUTPUT
@@ -140,7 +150,17 @@ static int wfe_live_delegate_run(const char *workdir, const char *role, const ch
          snprintf(err, errlen, "wfe live delegate: could not create coord job");
       return -1;
    }
-   int task_id = db1_coord_job_add_task(job_id, 0, "[]", delegate_role, prompt, workdir, persona);
+   char coord_role[DB1_COORD_ROLE_LEN];
+   int role_n = via[0] ? snprintf(coord_role, sizeof coord_role, "%s|via=%s", delegate_role, via)
+                       : snprintf(coord_role, sizeof coord_role, "%s", delegate_role);
+   if (role_n < 0 || role_n >= (int)sizeof coord_role)
+   {
+      db1_coord_job_cancel(job_id);
+      if (err && errlen)
+         snprintf(err, errlen, "wfe live delegate: routed role is too long");
+      return -1;
+   }
+   int task_id = db1_coord_job_add_task(job_id, 0, "[]", coord_role, prompt, workdir, persona);
    if (task_id <= 0)
    {
       db1_coord_job_cancel(job_id);
@@ -154,7 +174,7 @@ static int wfe_live_delegate_run(const char *workdir, const char *role, const ch
        wfe_coord_task_wait(job_id, task_id, result, sizeof result, err, errlen);
    if (task_result != WFE_DELEGATE_OK)
    {
-      /* A timed-out/failed coord wait must not leave an admitted delegate
+      /* A failed/cancelled coord wait must not leave an admitted delegate
        * running after the workflow has moved on. Cancellation is idempotent for
        * an already-terminal job, and the agent loop observes it cooperatively. */
       if (task_result == WFE_DELEGATE_ERROR)

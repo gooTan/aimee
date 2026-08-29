@@ -160,6 +160,30 @@ func TestACPTransportRejectsUnacceptedPins(t *testing.T) {
 	}
 }
 
+func TestACPTransportRejectsHandshakeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		scenario string
+		want     string
+	}{
+		{"refuse-initialize", "initialize: acp error: unsupported protocol"},
+		{"refuse-session", "session/new: acp error: session refused"},
+		{"missing-session-id", "session/new returned no session id"},
+	} {
+		t.Run(tc.scenario, func(t *testing.T) {
+			exec, workdir := newMuseExecutor(t, tc.scenario, 0)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			result := exec.Execute(ctx, delegatecontract.Invocation{
+				Version: delegatecontract.WireVersion,
+				Role:    "draft", Persona: "architect", Prompt: "hello", Workdir: workdir,
+			})
+			if result.Status != "failed" || !strings.Contains(result.Error, tc.want) {
+				t.Fatalf("result = %+v, want failed containing %q", result, tc.want)
+			}
+		})
+	}
+}
+
 func TestACPTransportCallerDeadline(t *testing.T) {
 	exec, workdir := newMuseExecutor(t, "stall-after-new", 1000)
 	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)

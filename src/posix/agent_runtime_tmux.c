@@ -30,6 +30,8 @@ extern void run_cmd_set_cwd(const char *cwd);
  * across concurrent delegate threads. */
 const char *delegation_active_id(void);
 
+static int cli_session_terminal_failure(const agent_t *agent, const char *response);
+
 static int cli_session_execute_inner(const agent_t *agent, const agent_network_t *network,
                                      const char *system_prompt, const char *user_prompt,
                                      int max_tokens, double temperature, agent_result_t *out)
@@ -314,6 +316,13 @@ static int cli_session_execute_inner(const agent_t *agent, const agent_network_t
       return -1;
    }
 
+   if (cli_session_terminal_failure(agent, clean))
+   {
+      snprintf(out->error, sizeof(out->error), "%s", clean);
+      free(clean);
+      return -1;
+   }
+
    /* Unified message: fold the CLI's screen-scraped answer into the canonical
     * message IR (one assistant TEXT block), then project it back onto the
     * agent_result. The tmux/CLI TUI is now just another producer of an
@@ -378,4 +387,29 @@ int agent_execute_cli_session(const agent_t *agent, const agent_network_t *netwo
    if (fell_back)
       run_cmd_set_cwd(saved_cwd[0] ? saved_cwd : NULL);
    return rc;
+}
+static int cli_session_terminal_failure(const agent_t *agent, const char *response)
+{
+   if (!agent || !response)
+      return 0;
+   const char *kind = agent->cli_kind[0] ? agent->cli_kind : agent->name;
+   if (!kind || (strcmp(kind, "claude") != 0 && strncmp(kind, "claude-", 7) != 0))
+      return 0;
+   while (*response == ' ' || *response == '\t' || *response == '\r' || *response == '\n')
+      response++;
+   static const char *const prefixes[] = {
+       "Login expired",
+       "You have hit your session limit",
+       "You've hit your session limit",
+       "You have hit your usage limit",
+       "You've hit your usage limit",
+       "You have reached your usage limit",
+       "You've reached your usage limit",
+       "Reached your usage limit",
+       "Usage limit for this billing cycle",
+   };
+   for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+      if (strncmp(response, prefixes[i], strlen(prefixes[i])) == 0)
+         return 1;
+   return 0;
 }

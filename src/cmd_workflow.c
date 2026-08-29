@@ -151,6 +151,20 @@ static int cmd_show(const char *path)
    return 0;
 }
 
+static int workflow_is_version_snapshot(const char *name)
+{
+   size_t n = name ? strlen(name) : 0;
+   if (n < 72 || strcmp(name + n - 5, ".yaml") != 0)
+      return 0;
+   const char *version = name + n - 69;
+   if (version <= name || version[-2] != '.' || version[-1] != 'v')
+      return 0;
+   for (int i = 0; i < 64; i++)
+      if (!((version[i] >= '0' && version[i] <= '9') || (version[i] >= 'a' && version[i] <= 'f')))
+         return 0;
+   return version[64] == '.';
+}
+
 static int cmd_list(void)
 {
 #ifndef _WIN32
@@ -167,7 +181,7 @@ static int cmd_list(void)
    while ((e = readdir(d)))
    {
       const char *dot = strrchr(e->d_name, '.');
-      if (dot && strcmp(dot, ".yaml") == 0)
+      if (dot && strcmp(dot, ".yaml") == 0 && !workflow_is_version_snapshot(e->d_name))
       {
          char path[2048];
          snprintf(path, sizeof path, "%s/%s", dir, e->d_name);

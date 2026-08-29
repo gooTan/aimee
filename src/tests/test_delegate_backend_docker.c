@@ -604,8 +604,10 @@ static void test_acquire_creates_and_starts_container(void)
    assert(strlen(sockpath) < sizeof(addr.sun_path));
    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sockpath);
    assert(bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
-   setenv("AIMEE_FAKE_DOCKER_INSPECT_MOUNTS", "/tmp\t/var/lib/docker/volumes/aimee_home/_data\\n",
-          1);
+   char inspect_mounts[768];
+   snprintf(inspect_mounts, sizeof(inspect_mounts),
+            "%s\t/var/lib/docker/volumes/aimee_home/_data\\n", platform_tmpdir());
+   setenv("AIMEE_FAKE_DOCKER_INSPECT_MOUNTS", inspect_mounts, 1);
 
    delegate_backend_config_t cfg = {0};
    cfg.image = "ubuntu:22.04";

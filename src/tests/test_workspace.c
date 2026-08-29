@@ -454,7 +454,7 @@ int main(void)
       assert(strcmp(resolved, repo) == 0);
    }
 
-   /* --- count_active_worktrees_for_root: counts repo-local .aimee/worktrees entries --- */
+   /* --- count_active_worktrees_for_root: counts external managed entries --- */
    {
       char parent[512];
       snprintf(parent, sizeof(parent), "%s/wt-count-parent", tmpdir);
@@ -466,13 +466,30 @@ int main(void)
 
       assert(count_active_worktrees_for_root(repo) == 0);
 
-      char aimee_dir[512], managed[512], sid1[512], sid2[512], wt1[512], wt2[512];
-      snprintf(aimee_dir, sizeof(aimee_dir), "%s/.aimee", repo);
-      snprintf(managed, sizeof(managed), "%s/worktrees", aimee_dir);
+      char probe[MAX_PATH_LEN], state_dir[MAX_PATH_LEN], aimee_dir[MAX_PATH_LEN];
+      char managed[MAX_PATH_LEN];
+      char sid1[MAX_PATH_LEN], sid2[MAX_PATH_LEN], wt1[MAX_PATH_LEN], wt2[MAX_PATH_LEN];
+      assert(worktree_sibling_path(repo, "probe", NULL, probe, sizeof(probe)) == 0);
+      snprintf(managed, sizeof(managed), "%s", probe);
+      char *slash = strrchr(managed, '/');
+      assert(slash != NULL);
+      *slash = '\0';
+      slash = strrchr(managed, '/');
+      assert(slash != NULL);
+      *slash = '\0';
+      snprintf(aimee_dir, sizeof(aimee_dir), "%s", managed);
+      slash = strrchr(aimee_dir, '/');
+      assert(slash != NULL);
+      *slash = '\0';
+      snprintf(state_dir, sizeof(state_dir), "%s", aimee_dir);
+      slash = strrchr(state_dir, '/');
+      assert(slash != NULL);
+      *slash = '\0';
       snprintf(sid1, sizeof(sid1), "%s/aabbccdd", managed);
       snprintf(sid2, sizeof(sid2), "%s/11223344", managed);
       snprintf(wt1, sizeof(wt1), "%s/main", sid1);
       snprintf(wt2, sizeof(wt2), "%s/task01", sid2);
+      mkdir(state_dir, 0755);
       mkdir(aimee_dir, 0755);
       mkdir(managed, 0755);
       mkdir(sid1, 0755);
@@ -494,10 +511,21 @@ int main(void)
 
    /* --- worktree_managed_git_root: maps managed worktrees back to the owner repo --- */
    {
-      char repo[512], managed_path[512], resolved[MAX_PATH_LEN];
+      char repo[512], managed_path[512], nested[512], tracked[512], cmd[2048];
+      char resolved[MAX_PATH_LEN];
       snprintf(repo, sizeof(repo), "%s/managed-root-repo", tmpdir);
-      snprintf(managed_path, sizeof(managed_path), "%s/.aimee/worktrees/abcdef12/main/src", repo);
-      assert(worktree_managed_git_root(managed_path, resolved, sizeof(resolved)) == 0);
+      snprintf(managed_path, sizeof(managed_path), "%s/managed-root-worktree", tmpdir);
+      init_real_git_repo(repo);
+      snprintf(tracked, sizeof(tracked), "%s/tracked.txt", repo);
+      write_text_file(tracked, "base\n");
+      snprintf(cmd, sizeof(cmd), "git -C '%s' add tracked.txt && git -C '%s' commit -q -m base",
+               repo, repo);
+      assert(system(cmd) == 0);
+      snprintf(cmd, sizeof(cmd), "git -C '%s' worktree add -q '%s' HEAD", repo, managed_path);
+      assert(system(cmd) == 0);
+      snprintf(nested, sizeof(nested), "%s/src", managed_path);
+      assert(mkdir(nested, 0755) == 0);
+      assert(worktree_managed_git_root(nested, resolved, sizeof(resolved)) == 0);
       assert(strcmp(resolved, repo) == 0);
       assert(worktree_managed_git_root(repo, resolved, sizeof(resolved)) != 0);
    }

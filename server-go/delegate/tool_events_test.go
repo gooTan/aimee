@@ -51,6 +51,7 @@ func TestToolEventKind(t *testing.T) {
 		"completed": ToolEventComplete,
 		"error":     ToolEventError,
 		"failed":    ToolEventError,
+		"cancelled": ToolEventError,
 		"":          ToolEventStart,
 		"unknown":   ToolEventStart,
 	}

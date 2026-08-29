@@ -149,11 +149,19 @@ func (e *ContextBriefBlockedError) Error() string {
 const maxContextBriefBytes = 32 * 1024
 
 func contextBriefPrompt(proposal string) string {
-	return "Prepare a concise ContextBrief for a senior planning reviewer. Return only JSON shaped " +
+	return contextBriefPromptWithRetry(proposal, "")
+}
+
+func contextBriefPromptWithRetry(proposal, retryDetail string) string {
+	prompt := "Prepare a concise ContextBrief for a senior planning reviewer. Return only JSON shaped " +
 		`{"schema_version":2,"status":"ready|blocked","summary":"...","files":["path or path:symbol"],"interfaces":["..."],"constraints":["..."],"decisions":["..."],"risks":["..."],"open_questions":["..."],"acceptance_criteria":["..."],"artifacts":["..."],"mandatory_preconditions":[{"id":"...","status":"satisfied|failed","detail":"..."}],"blocked_reason":"..."}. ` +
 		"Use status=ready only when every mandatory precondition needed to plan is satisfied. Use status=blocked and name each failed mandatory precondition when required context, memory, access, or retrieval is unavailable. " +
 		"List only the files, symbols, interfaces, constraints, prior decisions, risks, open questions, acceptance requirements, and artifact references that are relevant to this task. " +
-		"Never include full repository listings, raw logs, complete diffs, or conversation history. The whole brief must stay under 32768 bytes. You may use Aimee memory search through the available tools when prior decisions or memory keys are required.\n\nTASK:\n" + proposal
+		"Never include full repository listings, raw logs, complete diffs, or conversation history. The whole brief must stay under 32768 bytes. You may use Aimee memory search through the available tools when prior decisions or memory keys are required."
+	if detail := retryDetailForPrompt(retryDetail); detail != "" {
+		prompt += "\n\nPREVIOUS BLOCKED REASON TO ADDRESS:\n" + detail
+	}
+	return prompt + "\n\nTASK:\n" + proposal
 }
 
 func validateContextBrief(doc []byte) error {

@@ -24,8 +24,11 @@ func ValidateToolEventDetail(kind, detail string) (string, bool) {
 	if values["tool"] == "" || values["call_id"] == "" || values["status"] == "" {
 		return "", false
 	}
-	wantStatus := map[string]string{ToolEventStart: "started", ToolEventComplete: "completed", ToolEventError: "error"}[kind]
+	wantStatus := map[string]string{ToolEventStart: "started", ToolEventComplete: "completed", ToolEventError: values["status"]}[kind]
 	if wantStatus == "" || values["status"] != wantStatus {
+		return "", false
+	}
+	if kind == ToolEventError && values["status"] != "error" && values["status"] != "failed" && values["status"] != "cancelled" && values["status"] != "canceled" {
 		return "", false
 	}
 	if elapsed := values["elapsed"]; elapsed != "" {

@@ -33,6 +33,8 @@ nodes:
   - id: draft
     block: author.proposal
 YAML
+cp "$tmp/workflows/demo.yaml" \
+  "$tmp/workflows/demo.v0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.yaml"
 
 fails=0
 check() {
@@ -51,6 +53,8 @@ AIMEE_HOME="$tmp"; export AIMEE_HOME
 out=$("$bin" workflow list 2>&1 || true)
 case "$out" in *demo.yaml*) r=listed ;; *) r=absent ;; esac
 check "list prints the workflow name" "listed" "$r"
+case "$out" in *demo.v0123456789abcdef*) r=listed ;; *) r=absent ;; esac
+check "list hides immutable version snapshots" "absent" "$r"
 
 # 2. show accepts exactly that name.
 out=$("$bin" workflow show demo.yaml 2>&1 || true)

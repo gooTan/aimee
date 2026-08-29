@@ -8,6 +8,8 @@
  * invisible to a mocked git.
  */
 #include "client_session_worktree.h"
+#include "session_worktree_key.h"
+#include "aimee_home.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -204,8 +206,9 @@ static void test_ensure_creates_branch_and_worktree(void)
    /* It lands at the agreed path... */
    char key[80];
    client_session_worktree_key(sid, key, sizeof key);
-   char expect[4200];
-   snprintf(expect, sizeof expect, "%s/.aimee/worktrees/%s/main", clone, key);
+   char expect[4200], repo_key[SESSION_WORKTREE_REPO_KEY_MAX];
+   session_worktree_repo_key(clone, repo_key, sizeof repo_key);
+   snprintf(expect, sizeof expect, "%s/.aimee/worktrees/%s/%s/main", aimee_home(), repo_key, key);
    assert(strcmp(wt, expect) == 0);
    struct stat st;
    assert(stat(wt, &st) == 0 && S_ISDIR(st.st_mode));
@@ -539,6 +542,10 @@ int main(void)
    snprintf(g_tmp_root, sizeof g_tmp_root, "%s/aimee-csw-test-%d", (tmp && tmp[0]) ? tmp : "/tmp",
             (int)getpid());
    shell("rm -rf '%s' && mkdir -p '%s'", g_tmp_root, g_tmp_root);
+   char test_home[512];
+   snprintf(test_home, sizeof test_home, "%s/aimee-home", g_tmp_root);
+   shell("mkdir -p '%s'", test_home);
+   setenv("AIMEE_HOME", test_home, 1);
    /* Keep the harness's own env from steering base resolution. */
    unsetenv("AIMEE_SESSION_WORKTREE_BASE");
 

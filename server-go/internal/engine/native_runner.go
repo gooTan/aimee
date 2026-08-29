@@ -779,7 +779,7 @@ func (r *NativeRunner) structured(ctx context.Context, req StepRequest, kind str
 	}
 	var prompt string
 	if brief {
-		prompt = contextBriefPrompt(req.Proposal)
+		prompt = contextBriefPromptWithRetry(req.Proposal, req.RetryDetail)
 	} else if kind == "intent" {
 		prompt = "Scope the engineering task below. Return only JSON shaped {\"schema_version\":1,\"status\":\"unconfirmed\",\"summary\":\"...\",\"rationale\":\"...\",\"acceptance_criteria\":[\"...\"]}. Describe the task, never the bookkeeping record.\n\nTASK:\n" + req.Proposal
 	} else {

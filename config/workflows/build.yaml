@@ -143,4 +143,4 @@ nodes:
     in:
       src: doc_freeze.out
     params:
-      base: default
+      base: trunk

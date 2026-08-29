@@ -292,6 +292,11 @@ int main(void)
          if (rc != 0)
             printf("\n  build.yaml invalid: %s\n", err);
          assert(rc == 0);
+         const wfe_node_t *final_pr = wfe_def_node(d, "final_pr");
+         const cJSON *base = final_pr && final_pr->params
+                                 ? cJSON_GetObjectItemCaseSensitive(final_pr->params, "base")
+                                 : NULL;
+         assert(cJSON_IsString(base) && strcmp(base->valuestring, "trunk") == 0);
          char v[65] = "";
          assert(wfe_def_compute_version(d, v) == 0);
          wfe_def_free(d);

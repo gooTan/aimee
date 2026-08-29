@@ -621,15 +621,23 @@ func TestRegistryRejectsMissingCLIKind(t *testing.T) {
 func TestExecutorArgvFailsClosedWhenToolsCannotBeDisabled(t *testing.T) {
 	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "review", Tools: false}, "prompt")
-	approve := slices.Index(argv, "--approve-for-me")
-	if err != nil || approve < 0 || approve+2 >= len(argv) || argv[approve+1] != "-c" || argv[approve+2] != `sandbox_mode="read-only"` {
+	if err != nil {
 		t.Fatalf("codex read-only review argv = %q, %v", argv, err)
 	}
-	if slices.Index(argv, "--sandbox") >= 0 {
+	if slices.Contains(argv, "--approve-for-me") {
+		t.Fatalf("codex read-only review argv contains --approve-for-me: %q", argv)
+	}
+	if slices.Contains(argv, "--sandbox") {
 		t.Fatalf("codex read-only review argv contains conflicting --sandbox: %q", argv)
 	}
-	if !slices.Contains(argv, `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`) {
-		t.Fatalf("codex read-only review argv missing scoped aimee approval: %q", argv)
+	wants := []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
+		`sandbox_mode="read-only"`,
+		`plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`}
+	for _, want := range wants {
+		idx := slices.Index(argv, want)
+		if idx < 1 || argv[idx-1] != "-c" {
+			t.Fatalf("codex read-only review argv missing -c for %q: %q", want, argv)
+		}
 	}
 	_, err = executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "code", Tools: false}, "prompt")
@@ -655,15 +663,22 @@ func TestExecutorArgvAppendsScopedAimeeApprovalForCodexWriteRole(t *testing.T) {
 	const want = `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`
 	argv, err := executorArgv(agentEntry{CLIKind: "codex", CLICmd: "codex"},
 		delegatecontract.Invocation{Role: "code", Tools: true}, "prompt")
-	approve := slices.Index(argv, "--approve-for-me")
-	if err != nil || approve < 0 || approve+2 >= len(argv) || argv[approve+1] != "-c" || argv[approve+2] != `sandbox_mode="workspace-write"` {
+	if err != nil {
 		t.Fatalf("codex write argv = %q, %v", argv, err)
 	}
-	if slices.Index(argv, "--sandbox") >= 0 {
+	if slices.Contains(argv, "--approve-for-me") {
+		t.Fatalf("codex write argv contains --approve-for-me: %q", argv)
+	}
+	if slices.Contains(argv, "--sandbox") {
 		t.Fatalf("codex write argv contains conflicting --sandbox: %q", argv)
 	}
-	if !slices.Contains(argv, want) {
-		t.Fatalf("codex write argv missing scoped aimee approval: %q, %v", argv, err)
+	wants := []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`,
+		`sandbox_mode="workspace-write"`, want}
+	for _, wantCfg := range wants {
+		idx := slices.Index(argv, wantCfg)
+		if idx < 1 || argv[idx-1] != "-c" {
+			t.Fatalf("codex write argv missing -c for %q: %q", wantCfg, argv)
+		}
 	}
 }
 

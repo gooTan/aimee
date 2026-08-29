@@ -474,7 +474,10 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 		if RoleIsWrite(request.Role) {
 			sandboxMode = "workspace-write"
 		}
-		argv = append(argv, "--approve-for-me", "-c", fmt.Sprintf("sandbox_mode=%q", sandboxMode))
+		argv = append(argv,
+			"-c", `approval_policy="on-request"`,
+			"-c", `approvals_reviewer="auto_review"`,
+			"-c", fmt.Sprintf("sandbox_mode=%q", sandboxMode))
 		if agent.Model != "" {
 			argv = append(argv, "--model", agent.Model)
 		}

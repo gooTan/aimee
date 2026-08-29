@@ -702,14 +702,35 @@ func streamErrorDetail(kind string, output []byte) string {
 }
 
 func streamFailureDetail(kind string, output []byte) string {
-	if kind = strings.ToLower(strings.TrimSpace(kind)); kind != "claude" && kind != "claude-code" {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind != "claude" && kind != "claude-code" && kind != "agy" {
 		return ""
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
 	for scanner.Scan() {
 		var item map[string]any
-		if json.Unmarshal(scanner.Bytes(), &item) != nil || item["type"] != "result" {
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		if kind == "agy" {
+			if item["event"] != "result" {
+				continue
+			}
+			nested, _ := item["result"].(map[string]any)
+			status, _ := nested["status"].(string)
+			if strings.EqualFold(strings.TrimSpace(status), "SUCCESS") {
+				continue
+			}
+			if detail, _ := nested["error"].(string); strings.TrimSpace(detail) != "" {
+				return detail
+			}
+			if status == "" {
+				status = "unknown"
+			}
+			return "agy result status " + status
+		}
+		if item["type"] != "result" {
 			continue
 		}
 		result, _ := item["result"].(string)
@@ -765,6 +786,7 @@ func finalOutput(kind string, output []byte) string {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
 	var final string
+	var agyStepResponse string
 	for scanner.Scan() {
 		var item map[string]any
 		if json.Unmarshal(scanner.Bytes(), &item) != nil {
@@ -785,13 +807,26 @@ func finalOutput(kind string, output []byte) string {
 				}
 			}
 		}
-		if kind == "agy" && item["event"] == "result" {
-			if nested, ok := item["result"].(map[string]any); ok {
-				if value, ok := nested["response"].(string); ok {
-					final = value
+		if kind == "agy" {
+			if item["event"] == "step_update" {
+				nested, _ := item["step_update"].(map[string]any)
+				if nested["step_type"] == "agent_response" {
+					if value, ok := nested["text_delta"].(string); ok && strings.TrimSpace(value) != "" {
+						agyStepResponse = value
+					}
+				}
+			}
+			if item["event"] == "result" {
+				if nested, ok := item["result"].(map[string]any); ok {
+					if value, ok := nested["response"].(string); ok && strings.TrimSpace(value) != "" {
+						final = value
+					}
 				}
 			}
 		}
+	}
+	if kind == "agy" && strings.TrimSpace(final) == "" {
+		final = agyStepResponse
 	}
 	return strings.TrimSpace(final)
 }

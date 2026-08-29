@@ -82,7 +82,7 @@ nodes:
       require_code_review_skill: true
       task: Apply the repository code-review skill across the Standards and Spec axes.
     next: sol_review
-    on_fail: split
+    on_fail: sol_review
   - id: sol_review
     block: review
     in:
@@ -92,7 +92,7 @@ nodes:
       require_code_review_skill: true
       task: Apply the repository code-review skill across the Standards and Spec axes.
     next: fable_judgment
-    on_fail: split
+    on_fail: fable_judgment
   - id: fable_judgment
     block: review
     in:

@@ -290,11 +290,11 @@ func TestCanonicalBuildWorkflowBindings(t *testing.T) {
 	}
 
 	geminiReview, ok := find("gemini_review")
-	if !ok || mustParamString(geminiReview, "delegate") != "antigravity" || !mustParamBool(geminiReview, "require_code_review_skill") || geminiReview.Next != "sol_review" {
+	if !ok || mustParamString(geminiReview, "delegate") != "antigravity" || !mustParamBool(geminiReview, "require_code_review_skill") || geminiReview.Next != "sol_review" || geminiReview.OnFail != "sol_review" {
 		t.Fatalf("gemini_review binding=%+v", geminiReview)
 	}
 	solReview, ok := find("sol_review")
-	if !ok || mustParamString(solReview, "delegate") != "sol" || !mustParamBool(solReview, "require_code_review_skill") || solReview.Next != "fable_judgment" {
+	if !ok || mustParamString(solReview, "delegate") != "sol" || !mustParamBool(solReview, "require_code_review_skill") || solReview.Next != "fable_judgment" || solReview.OnFail != "fable_judgment" {
 		t.Fatalf("sol_review binding=%+v", solReview)
 	}
 	fableJudgment, ok := find("fable_judgment")

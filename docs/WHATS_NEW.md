@@ -72,6 +72,9 @@ See [Event bus](EVENT_BUS.md).
 
 - The Go workflow engine schedules parallel slices, retries, review loops, live forge work, and
   merge recovery.
+- The shipped factory is one validated `build` workflow plus its `slice` child. Model calls and
+  workflow wall time are unbounded by default; delegate status distinguishes heartbeat from
+  progress and reports suspected stalls without cancelling them.
 - Typed workflow blocks replace implicit pipeline steps. Validation checks edge targets, input ports,
   artifact types, required parameters, and roundtable structure before a run starts.
 - Watched-proposal triggers can create runs. Trigger mode is recorded, but current Go scheduling does

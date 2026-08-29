@@ -35,6 +35,11 @@ type ReviewFeedback struct {
 	SchemaVersion int       `json:"schema_version"`
 	ArtifactHash  string    `json:"artifact_hash"`
 	Findings      []Finding `json:"findings"`
+	// Escalation names the decision class that makes these findings a matter for
+	// a senior reviewer rather than a routine repair: architecture, security,
+	// migration, contract, or requirement. Empty means routine. The workflow
+	// engine only honors it on nodes that declare an on_escalate edge.
+	Escalation string `json:"escalation,omitempty"`
 }
 
 // Hash is the artifact identity every seat echoes back, so a report about

@@ -295,6 +295,18 @@ int git_pr_merge_via_api_slug_ex(const char *principal, const char *slug, int nu
  * built yet, so poll merge_status before merging), 1 when the head already
  * contains the base (422, nothing to do), -1 on error with err set. */
 int git_pr_update_branch_via_api_slug(const char *principal, const char *slug, int number,
-                                      const char *expected_head_sha, char *err, size_t errlen);
+                                       const char *expected_head_sha, char *err, size_t errlen);
+
+/* Fork OWNER/REPO into the authenticated user's personal account via the forge.
+ * POST /repos/{owner}/{repo}/forks with no body, 2xx = success. Writes the fork
+ * URL (html_url, falling back to full_name) to out and returns 0, or -1 + err. */
+int git_repo_fork_via_api_slug(const char *principal, const char *slug, char *out, size_t out_cap,
+                               char *err, size_t errlen);
+
+/* Canonicalize any github.com URL (https, http, ssh, scp) to
+ * https://github.com/<owner>/<repo>.git via parse_github_slug.
+ * Returns 0 on success, -1 with a concise error on invalid/non-GitHub input
+ * or truncation. No network, no credential resolution. */
+int git_pr_canonical_github_url(const char *url, char *out, size_t out_cap, char *err, size_t errlen);
 
 #endif /* GIT_PR_API_H */

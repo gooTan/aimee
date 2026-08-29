@@ -1,0 +1,19 @@
+{
+  "name": "implementation",
+  "seats": [
+    {"model": "sol", "persona": "reviewer"},
+    {"model": "sol", "persona": "qa"},
+    {"model": "opus-ui", "persona": "reviewer"},
+    {"model": "opus-ui", "persona": "qa"},
+    {"model": "antigravity", "persona": "reviewer"},
+    {"model": "antigravity", "persona": "qa"},
+    {"model": "sol", "persona": "architect", "optional": true},
+    {"model": "opus-ui", "persona": "architect", "optional": true},
+    {"model": "antigravity", "persona": "architect", "optional": true}
+  ],
+  "chairman": "fable",
+  "chairman_fallback": "sol",
+  "chairman_enabled": true,
+  "min_successful": 4,
+  "discussion": true
+}

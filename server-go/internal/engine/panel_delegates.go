@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/JBailes/aimee/server-go/delegate"
 	roundtablecfg "github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
@@ -43,9 +44,10 @@ func (p panelDelegates) request(run roundtablecfg.Run, seat roundtablecfg.SeatRe
 
 // result classifies and redacts here rather than in the panel, so the panel
 // never grows a second copy of this taxonomy to keep in step with these errors.
-func panelSeatResult(participant, response string, cost float64, costUnknown bool, err error) roundtablecfg.SeatResult {
+func panelSeatResult(participant, response string, cost float64, costUnknown bool, availability delegate.AvailabilityClass, err error, started ...bool) roundtablecfg.SeatResult {
+	responseStarted := len(started) > 0 && started[0]
 	out := roundtablecfg.SeatResult{Participant: participant, Response: response,
-		CostUSD: cost, CostUnknown: costUnknown, Err: err}
+		CostUSD: cost, CostUnknown: costUnknown, AvailabilityClass: availability, ResponseStarted: responseStarted, Err: err}
 	if err == nil {
 		return out
 	}
@@ -76,19 +78,23 @@ func (p panelDelegates) Group(ctx context.Context, run roundtablecfg.Run, seats 
 		// without the generic group contract simply cannot host one.
 		unavailable := errors.New("delegate service does not support grouped delegation")
 		for i := range out {
-			out[i] = panelSeatResult("", "", 0, false, unavailable)
+			out[i] = panelSeatResult("", "", 0, false, "", unavailable, false)
 		}
 		return out
 	}
 	for i, call := range group.DelegateGroup(ctx, requests) {
-		out[i] = panelSeatResult(call.Participant, call.Response, call.CostUSD, call.CostUnknown, call.Err)
+		out[i] = panelSeatResult(call.Participant, call.Response, call.CostUSD, call.CostUnknown, call.AvailabilityClass, call.Err, call.ResponseStarted)
 	}
 	return out
 }
 
 func (p panelDelegates) One(ctx context.Context, run roundtablecfg.Run, seat roundtablecfg.SeatRequest) roundtablecfg.SeatResult {
+	if seat.FallbackFrom != "" {
+		p.runner.recordModelEvent(run.ID, run.Stage, "model_fallback", seat.FallbackFrom,
+			"to="+seat.Selector+" reason="+seat.FallbackReason)
+	}
 	request := p.request(run, seat)
 	request.MaxCostUSD = run.CostLimitUSD
 	result, err := p.runner.agents.Delegate(ctx, request)
-	return panelSeatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, err)
+	return panelSeatResult(result.Participant, result.Response, result.CostUSD, result.CostUnknown, result.AvailabilityClass, err, result.ResponseStarted)
 }

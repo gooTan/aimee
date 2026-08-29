@@ -66,8 +66,8 @@ int dev_submit_run(const char *proposal_md, const char *workflow_opt, const char
 
    /* Workflow selection. Explicit `workflow_opt` ALWAYS wins (backwards-compat).
     * When NULL, S4 autonomous parity (default-OFF via AIMEE_WORKFLOW_AUTONOMOUS_ROUTER)
-    * routes the proposal through the router (clamped to the full-spine set, floor
-    * managed-change) instead of silently defaulting to "build". */
+    * routes the proposal through the router (clamped to the configured set, floor
+    * build) instead of silently defaulting. */
    char wf_choice[64];
    int autoroute = 0, autoroute_clamped = 0;
    char autoroute_src[16] = "", autoroute_raw[64] = "", autoroute_tag[9] = "";

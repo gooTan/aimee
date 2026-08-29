@@ -219,7 +219,7 @@ int main(void)
           "/bin/sh", "-c",
           "cat /proc/self/fd/" STR(
               GIT_CRED_TOKEN_TARGET_FD) "; printf '\\n--ENVIRON--\\n'; tr '\\0' '\\n' < "
-                                        "/proc/self/environ",
+                                        "/proc/$$/environ",
           NULL};
       char *out = NULL;
       int rc = safe_exec_capture_cwd_env_fd_timeout(argv, NULL, fe, &out, 1 << 16, 10000, tfd,

@@ -8,11 +8,9 @@ package workflows
 // carries a human gate.
 //
 // The rulings it encodes come from the S4 design roundtable (2026-07-03) and are
-// preserved exactly:
-//   - Q2: the omitted-workflow floor is `managed-change`, a FULL-SPINE enforced
-//     workflow (review + gate.roundtable + terminal gate.deliver), NOT `build`.
-//     `build` keeps the weaker pre-gate.deliver posture and is reachable only by
-//     explicit name.
+// The retired workflow aliases were removed: autonomous intake now uses the one
+// supported full lifecycle (`build`), and sweep filing is disabled until a
+// human-only intake workflow exists again.
 //   - Q5: the selectable set is a fixed full-spine allowlist that excludes
 //     read-only AND review-bypassing lanes, so a shaped proposal can at worst
 //     pick among spine-carrying lanes, never bypass review.
@@ -25,12 +23,12 @@ import (
 )
 
 // AutonomousFloor is the omitted-workflow floor: a full-spine enforced workflow.
-const AutonomousFloor = "managed-change"
+const AutonomousFloor = "build"
 
 // SweepWorkflowFloor is the sweep human-gate floor. Sweep candidates are
 // unvetted heuristic finds, so filing is a fixed floor rather than a content
 // router, which would only add misroute risk for no safety benefit.
-const SweepWorkflowFloor = "manual-review"
+const SweepWorkflowFloor = ""
 
 // readOnlyLanes are never auto-selected even if a catalog entry were mis-marked
 // enforced. By the I2 loader invariant an enforced workflow must terminate in

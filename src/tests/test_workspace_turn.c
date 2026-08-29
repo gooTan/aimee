@@ -353,7 +353,7 @@ int main(void)
           *
           * Every failure path in mirror_reconstruct_cwd used to return 0 in silence.
           * The caller then left the client-side path in place, the request fell
-          * through to the workspace runner, waited out WS_RUNNER_OP_MS (600s) and
+          * through to the workspace runner, waited out WS_RUNNER_OP_MS (1800s) and
           * failed with "unavailable through the registered workspace runner" -- an
           * error naming a subsystem that was never the problem, with nothing in the
           * log to contradict it. Diagnosing that took hours and produced three wrong

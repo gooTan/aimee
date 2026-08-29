@@ -161,6 +161,7 @@ static const wfe_judge_provider_t MOCK_JUDGE = {mock_judge};
 
 static const char *WF = "name: ds\nstart: au\nnodes:\n"
                         "  - id: au\n    block: author.proposal\n    next: pr\n"
+                        "    params:\n      delegate: fable\n"
                         "  - id: pr\n    block: pr.open\n    in:\n      src: au.out\n";
 
 /* base:feature -> a slice sub-PR targets the PARENT feature branch aimee/feat/<parent>. */
@@ -246,9 +247,9 @@ int main(void)
    g_deleg_rc = 0;
    g_open_rc = 0;
    assert(run_fresh("a") == 0);
-   assert(g_deleg_calls == 1);                          /* author dispatched a delegate */
-   assert(strcmp(g_deleg_last_role, "architect") == 0); /* author uses architect */
-   assert(g_open_calls == 1);                           /* pr.open used the forge open seam */
+   assert(g_deleg_calls == 1); /* author dispatched a delegate */
+   assert(strcmp(g_deleg_last_role, "architect|via=fable") == 0);
+   assert(g_open_calls == 1); /* pr.open used the forge open seam */
    /* base-targeting: a top-level pr.open (no base param) targets the autonomous base. */
    assert(strcmp(g_open_base, wfe_autonomous_base()) == 0);
 

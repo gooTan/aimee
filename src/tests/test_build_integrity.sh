@@ -414,7 +414,7 @@ if [ -z "$missing_server_verify_deps" ] &&
    grep -qF 'COPY --from=wfe-build /usr/local/go/ /usr/local/go/' ../Dockerfile.server &&
    grep -qF 'ENV PATH=/var/lib/aimee/.npm-global/bin:/usr/local/go/bin:$PATH' ../Dockerfile.server &&
    grep -qF 'ENV AIMEE_VERIFY_MAKE_JOBS=2' ../Dockerfile.server &&
-   grep -qF 'ENV AIMEE_VERIFY_TEST_JOBS=2' ../Dockerfile.server; then
+   grep -qF 'ENV AIMEE_VERIFY_TEST_JOBS=1' ../Dockerfile.server; then
     pass "server runtime carries the complete workflow verification toolchain"
 else
     fail "server runtime is missing workflow verification packages or Go 1.25:$missing_server_verify_deps"
@@ -767,6 +767,56 @@ if [ -z "$missing_systemd_units" ]; then
     pass "install/update scripts refresh all systemd user units"
 else
     fail "install/update scripts miss systemd user units:$missing_systemd_units"
+fi
+
+# Native installs must ship the same Go workflow control plane and managed
+# factory definitions as the container image. Otherwise `aimee workflow list`
+# is empty after a successful source install even though config/workflows is
+# present in the checkout.
+native_factory_install_ok=1
+[ -f ../systemd/user/aimee-wfe.service ] || native_factory_install_ok=0
+grep -q 'AIMEE_WFE_ENGINE=go' ../systemd/user/aimee-server.service || native_factory_install_ok=0
+for script in ../install.sh ../update.sh; do
+    grep -q 'aimee-wfe' "$script" || native_factory_install_ok=0
+    grep -q 'seed-managed-defaults.sh' "$script" || native_factory_install_ok=0
+    grep -q 'config/workflows' "$script" || native_factory_install_ok=0
+done
+if [ "$native_factory_install_ok" -eq 1 ]; then
+    pass "native installs ship the Go WFE and seed factory workflows"
+else
+    fail "native installs omit the Go WFE or shipped factory workflows"
+fi
+
+# WFE must serve the workflow control stage over the module bus: the unit must
+# both pass --module-bus-socket and export AIMEE_MODULE_BUS_SOCKET with the same value.
+wfe_unit="../systemd/user/aimee-wfe.service"
+wfe_env_socket=$(grep -F 'Environment=AIMEE_MODULE_BUS_SOCKET=' "$wfe_unit" 2>/dev/null | sed -n 's/.*Environment=AIMEE_MODULE_BUS_SOCKET=//p' | head -1 | tr -d '\r' || true)
+wfe_flag_socket=$(grep -F -- '--module-bus-socket' "$wfe_unit" 2>/dev/null | sed -n 's/.*--module-bus-socket \([^ ]*\).*/\1/p' | head -1 | tr -d '\r' || true)
+if [ -n "$wfe_env_socket" ] && [ "$wfe_env_socket" = "$wfe_flag_socket" ] && [ "$wfe_env_socket" = "%h/.config/aimee/server-module-bus.sock" ]; then
+    pass "aimee-wfe.service exports the same module-bus socket it passes by flag"
+else
+    fail "aimee-wfe.service must export AIMEE_MODULE_BUS_SOCKET=%h/.config/aimee/server-module-bus.sock matching --module-bus-socket (env=$wfe_env_socket flag=$wfe_flag_socket)"
+fi
+
+managed_defaults_tmp=$(mktemp -d /tmp/aimee-managed-defaults.XXXXXX)
+mkdir -p "$managed_defaults_tmp/source"
+printf 'first\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+printf 'second\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+managed_update=$(cat "$managed_defaults_tmp/installed/demo.yaml")
+printf 'operator edit\n' > "$managed_defaults_tmp/installed/demo.yaml"
+printf 'third\n' > "$managed_defaults_tmp/source/demo.yaml"
+../scripts/seed-managed-defaults.sh \
+    "$managed_defaults_tmp/source" .yaml "$managed_defaults_tmp/installed"
+operator_update=$(cat "$managed_defaults_tmp/installed/demo.yaml")
+rm -rf "$managed_defaults_tmp"
+if [ "$managed_update" = "second" ] && [ "$operator_update" = "operator edit" ]; then
+    pass "managed workflow defaults update without overwriting operator edits"
+else
+    fail "managed workflow default seeding overwrites or fails to refresh definitions"
 fi
 
 # 7c2. update.sh must refresh hooks/support files even when binaries are current.

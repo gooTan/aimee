@@ -24,15 +24,9 @@ struct cJSON;
 #define MAX_CRED_NAME_LEN        32
 #define MAX_CRED_ENV_VAR_LEN     64
 #define MAX_FALLBACK             8
-#define AGENT_DEFAULT_TIMEOUT_MS 180000
-/* Default per-call timeout for a REASONING model when the operator pins none.
- * Reasoning models (e.g. MiniMax-M3) emit a large hidden reasoning trace before
- * the visible answer, so a single completion routinely runs several minutes —
- * past the 3-minute standard default, which then fails as a spurious
- * "read_response failed" (HTTP -1) and burns the retry budget. A non-reasoning
- * model keeps the standard default; an explicit agents.json/--timeout value
- * always wins over either. */
-#define AGENT_REASONING_TIMEOUT_MS 600000
+#define AGENT_DEFAULT_TIMEOUT_MS 0
+/* No implicit completion deadline. Operators may still set an explicit bound. */
+#define AGENT_REASONING_TIMEOUT_MS 0
 /* Floor for the per-call HTTP timeout inside the multi-turn tool loop. Once the
  * remaining loop budget drops below this, the loop stops cleanly instead of
  * issuing a doomed short-timeout call that the provider-health tracker would
@@ -93,6 +87,8 @@ static inline int agent_require_initial_tool_choice(int policy_enabled, int succ
 static inline int agent_loop_per_call_timeout_ms(int agent_timeout_ms, int total_timeout_ms,
                                                  int elapsed_ms)
 {
+   if (total_timeout_ms <= 0)
+      return agent_timeout_ms > 0 ? agent_timeout_ms : 0;
    int remaining = total_timeout_ms - elapsed_ms;
    int min_call =
        agent_timeout_ms < AGENT_LOOP_MIN_CALL_MS ? agent_timeout_ms : AGENT_LOOP_MIN_CALL_MS;
@@ -133,23 +129,14 @@ static inline int agent_timeout_cap_ms(int timeout_ms, int request_cap_ms)
    return timeout_ms;
 }
 
-/* Effective per-call timeout for a delegate run. A delegate must NEVER run with
- * a non-positive timeout: a timeout_ms <= 0 reaching the HTTP layer disables the
- * read deadline (agent_bridge conn_open sets deadline_ns = 0), so conn_read
- * loops on its per-recv timeout forever and a stalled provider hangs the worker
- * permanently — leaking its compute-pool thread + provider concurrency slot and
- * eventually wedging the whole background-delegate queue (jobs stuck "pending").
- * Resolve to the explicit request timeout if positive, else the agent's
- * configured timeout if positive, else a hard default ceiling — guaranteeing a
- * positive value so the run always returns. Pure function — unit-tested in
- * test_agent.c. */
+/* Effective per-call timeout for a delegate run. Zero means unbounded. */
 static inline int delegate_effective_timeout_ms(int request_timeout_ms, int agent_timeout_ms)
 {
    if (request_timeout_ms > 0)
       return request_timeout_ms;
    if (agent_timeout_ms > 0)
       return agent_timeout_ms;
-   return AGENT_DEFAULT_TIMEOUT_MS;
+   return 0;
 }
 
 typedef struct
@@ -300,6 +287,10 @@ typedef struct
    char name[MAX_AGENT_NAME];
    char endpoint[MAX_ENDPOINT_LEN];
    char model[MAX_MODEL_LEN];
+   /* Per-seat reasoning effort for CLI agents that expose one (codex turn
+    * "effort", claude --effort). Empty = the CLI's own configured default, so
+    * existing agents.json files keep their behavior. */
+   char reasoning_effort[16];
    char api_key[MAX_API_KEY_LEN];
    /* The verbatim on-disk api_key — a "$VAR" reference (or, during boot-time
     * migration only, a legacy literal).

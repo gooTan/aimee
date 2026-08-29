@@ -23,6 +23,7 @@ KB_JWKS_PUBLISHER = ../aimee-kb-jwks-publish$(EXEEXT)
 KB_STATUS_AUTHORITY = ../aimee-kb-status-authority$(EXEEXT)
 KB_TOKEN_AUTHORITY = ../aimee-kb-token-authority$(EXEEXT)
 RUNTIME_WEB = ../aimee-runtime-web$(EXEEXT)
+WFE     = ../aimee-wfe$(EXEEXT)
 GATEWAY = ../aimee-gateway$(EXEEXT)
 # Binaries a rename left behind. `all` removes these first so a renamed artifact
 # does not sit in the repo root forever: aimee-webchat became aimee-runtime-web
@@ -39,8 +40,10 @@ RETIRED_ROOT_BINARIES = ../aimee-client$(EXEEXT) ../aimee-worker$(EXEEXT) \
 HAVE_GO := $(shell command -v go >/dev/null 2>&1 && echo 1)
 ifeq ($(HAVE_GO),1)
 ALL_RUNTIME_WEB = $(RUNTIME_WEB)
+ALL_WFE = $(WFE)
 else
 ALL_RUNTIME_WEB =
+ALL_WFE =
 endif
 
 define AIMEE_RUNTIME_MUTATION_GUARD
@@ -104,7 +107,7 @@ endif
 # would fail trying to write .d dependency files into non-existent subdirectories.
 _DUMMY := $(shell mkdir -p $(OBJDIR) $(OBJDIR)/posix $(OBJDIR)/linux $(OBJDIR)/mac $(OBJDIR)/windows $(OBJDIR)/tests $(OBJDIR)/db1 $(OBJDIR)/db2)
 
-C_FLAGS = -Os -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -s -Wall -Wextra -Werror -Wno-unused-parameter -Wno-format-truncation -Wno-unused-result -MMD -MP -I. -Iheaders -Ivendor/headers -Idb1 -Idb2 -Imodules/config -Imodules/economizer -Imodules/learning/include -Imodules/roadmap -iquote modules/sandbox -Imodules/sandbox/include -Imodules/lsp -Imodules/skill -Imodules/css -Imodules/webuser -Imodules/memory/include -iquote modules/governance -Imodules/governance/include -iquote modules/workflows -Imodules/workflows/include -Imodules/vault -Imodules/git/include -Imodules/workspace/include -Imodules/guardrails -iquote modules/roundtable -Imodules/roundtable/include -Imodules/kb_client -Imodules/agent_eval -Ipipeline -Imodules/audit/include -Icore/connection/include -Icore/event_bus/include -iquote modules/benchmarks -Imodules/benchmarks/include -Imodules/delegates/include -Imodules/gateway/include -Imodules/ir/include -iquote modules/kb-synthesis -Imodules/kb-synthesis/include -Imodules/runtime-web/include -Imodules/control-web/include -Imodules/module-runtime/include -Imodules/providers/include -Imodules/protocols/include -Imodules/response-composition/include -Imodules/routing/include -Imodules/skills/include -Imodules/tools/include -Imodules/translation/include -DAIMEE_WITH_ROUNDTABLE=1 $(VERSION_FLAGS) $(EXTRA_C_FLAGS)
+C_FLAGS = -std=gnu11 -Os -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -s -Wall -Wextra -Werror -Wno-unused-parameter -Wno-format-truncation -Wno-unused-result -MMD -MP -I. -Iheaders -Ivendor/headers -Idb1 -Idb2 -Imodules/config -Imodules/economizer -Imodules/learning/include -Imodules/roadmap -iquote modules/sandbox -Imodules/sandbox/include -Imodules/lsp -Imodules/skill -Imodules/css -Imodules/webuser -Imodules/memory/include -iquote modules/governance -Imodules/governance/include -iquote modules/workflows -Imodules/workflows/include -Imodules/vault -Imodules/git/include -Imodules/workspace/include -Imodules/guardrails -iquote modules/roundtable -Imodules/roundtable/include -Imodules/kb_client -Imodules/agent_eval -Ipipeline -Imodules/audit/include -Icore/connection/include -Icore/event_bus/include -iquote modules/benchmarks -Imodules/benchmarks/include -Imodules/delegates/include -Imodules/gateway/include -Imodules/ir/include -iquote modules/kb-synthesis -Imodules/kb-synthesis/include -Imodules/runtime-web/include -Imodules/control-web/include -Imodules/module-runtime/include -Imodules/providers/include -Imodules/protocols/include -Imodules/response-composition/include -Imodules/routing/include -Imodules/skills/include -Imodules/tools/include -Imodules/translation/include -DAIMEE_WITH_ROUNDTABLE=1 $(VERSION_FLAGS) $(EXTRA_C_FLAGS)
 
 # DB2 client flags are discovered with pkg-config because provider headers are
 # not always installed under the compiler default include path. See
@@ -453,7 +456,7 @@ $(OBJDIR)/modules/audit/audit_replay.o: C_FLAGS += -Icore/event_bus/include
 AGENT_SRCS = server/agent_runtime.c server/agent_request_build.c server/agent_logging.c server/agent_parallel.c server/agent_runtime_liveness.c server/agent_fallback.c server/agent_context_budget.c server/agent_bridge.c server/tool_call_args.c server/agent_request_shaping.c server/agent_adapter.c server/primary_session_adapter.c server/primary_cli_ingestor.c server/agent_policy.c modules/execution-policy/execution_policy.c server/agent_policy_intercept.c modules/benchmarks/agent_eval.c modules/benchmarks/agent_eval_memory_support.c modules/benchmarks/agent_eval_baseline.c modules/benchmarks/agent_eval_benchmarks.c server/agent_coord.c \
              server/agent_tasks.c server/agent_tools.c server/computer_use.c server/script_runner.c server/script_rpc.c toolset.c server/tool_args_coerce.c server/tool_schema_sanitizer.c server/osv_check.c server/http_retry.c server/failover.c \
              server/web_search.c server/web_search_fuse.c server/web_search_breaker.c server/token_tracker.c server/token_tracker_registry.c server/token_tracker_db1.c server/middleware.c server/agent_pipeline.c \
-             server/process_mgr.c server/agent_loop.c server/liveness.c server/cli_session.c server/cli_session_pty.c server/cli_codex.c server/provider_cli_adapter.c server/cli_claude.c  server/cli_mistral.c server/cli_acp.c server/session_compact.c server/rounds_to_resume.c server/compact_prune.c server/context_engine.c \
+             server/process_mgr.c server/agent_loop.c server/liveness.c server/cli_session.c server/cli_session_pty.c server/cli_codex.c server/provider_cli_adapter.c server/cli_claude.c  server/cli_mistral.c server/cli_acp.c server/cli_agy.c server/cli_oracle.c server/session_compact.c server/rounds_to_resume.c server/compact_prune.c server/context_engine.c \
              modules/delegates/delegate_backend.c modules/delegates/delegate_backend_docker.c modules/delegates/delegate_launch_args.c modules/delegates/delegate_driver.c modules/delegates/delegate_openai.c  modules/delegates/delegate_xml_fallback.c modules/delegates/delegate_verify.c \
              server/model_provider.c server/model_sampling.c server/openrouter_profile.c server/openai_profile.c server/anthropic_profile.c  server/ollama_profile.c server/llama_native_profile.c server/mistral_profile.c server/minimax_profile.c server/aux_router.c \
              server/otel.c server/oauth_pkce.c server/oauth_tokens.c modules/protocols/mcp/mcp_client.c modules/protocols/mcp/mcp_client_registry.c \
@@ -873,7 +876,7 @@ DEPS = $(ALL_OBJS:.o=.d) $(shell find $(OBJDIR) -name '*.d' 2>/dev/null)
 
 .PHONY: optional-tool-ownership-check refactor-baseline-check module-source-ownership-check module-bus-boundary-check cleanup-ledger-check repository-lock-check all clean install inc-check forge-app-token-validation lint code-vector-graph-corpus-check line-check schema-sync-check config-schema-drift-check config-uninitialized-check cmd-srcs-compile-check charter-tables-check tier-deps-check module-boundary-check module-inventory-check background-skill-curator-absence-check guidance-tool-parity-check capability-ownership-check panel-contract-boundary-check published-compose-images-check dispatch-caps-check kb-v1-coverage-check kb-target-isolation-check kb-container-packaging-check deploy-env-consumed-check sidecar-clients-check docs-check docs-gen docs-gen-check api-conformance-check server-api-conformance-check v1-method-coverage-check cli-v1-routes-check async-op-handlers-check v1-route-order-check cli-help-coverage-check kb-intelligence-surfaced-check proposal-links-check pending-audit-manifest-check proposal-reconcile-check dev-accept-check curator-sidecar-parse-check git-cred-centralized-check sanitizer-callsites-check lessons-isolation-check md-store-retired-check models-dev-snapshot-check test-tmpdir-check model-fallback-shadow-check p1-tenant-guard-check p1-rls-gate-check bus-blast-radius-check entrypoint-exit-report-check webchat-bootstrap-login-check deployed-image-check gen-sdks sdk-parity-check v1-ws-test format unit-tests go-unit-tests verify-local integration-tests wizard-bootstrap-e2e v1-third-party-test v1-sdk-smoke v1-ws-test init-migrate-service-test server lean fuzz coverage static-analysis cppcheck clang-tidy bench bench-check bench-baseline memory-retrieval-eval-check virtual-context-eval-check virtual-context-inspect curator-eval curator-eval-check build-integrity build-variants check-linking retire-obsolete-binaries kb
 
-all: retire-obsolete-binaries $(BINARY) $(ALL_RUNTIME_WEB) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY) $(FORWARDER)
+all: retire-obsolete-binaries $(BINARY) $(ALL_RUNTIME_WEB) $(ALL_WFE) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY) $(FORWARDER)
 
 # The forwarder is a standalone static binary (libc only, no aimee objects); it is
 # shipped in the aimee-server image and docker-cp'd into a delegate sandbox.
@@ -902,7 +905,7 @@ include tests/Rules.mk
 # Keep a conservative per-run default; operators can still raise it explicitly.
 # The command-line value intentionally overrides TEST_RUN_JOBS inherited from a
 # (possibly stale) auto-generated verify config.
-AIMEE_VERIFY_TEST_JOBS ?= 2
+AIMEE_VERIFY_TEST_JOBS ?= 1
 
 # Keep the local repository gate complete as new Go services are added. The C
 # Makefile is the curated entrypoint used by `aimee git verify`, so omitting a Go
@@ -935,7 +938,7 @@ verify-local: all
 	@$(MAKE) go-unit-tests
 	@echo "verify-local: ok"
 
-server: retire-obsolete-binaries $(SERVER) $(KB) $(KB_RESOLVER) $(FORWARDER)
+server: retire-obsolete-binaries $(SERVER) $(ALL_WFE) $(KB) $(KB_RESOLVER) $(FORWARDER)
 
 wizard-bootstrap-e2e: $(BINARY) $(SERVER)
 	@cd .. && ./scripts/test-wizard-first-user-bootstrap.sh
@@ -1293,6 +1296,12 @@ $(RUNTIME_WEB): $(RUNTIME_WEB_GO_SRCS)
 	$(AIMEE_RUNTIME_MUTATION_GUARD)
 	cd ../runtime-web && go build -buildvcs=false -o "$(CURDIR)/$@" .
 
+# Go owns workflow definition validation, scheduling, and factory execution.
+WFE_GO_SRCS := $(shell find ../server-go -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \))
+$(WFE): $(WFE_GO_SRCS)
+	$(AIMEE_RUNTIME_MUTATION_GUARD)
+	cd ../server-go && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$(CURDIR)/$@" ./cmd/aimee-server
+
 # Server (daemon). DB2-bound work routes through kb_client to aimee-kb;
 # keep this target free of DB2_OBJS and libpq.
 #
@@ -1594,10 +1603,11 @@ CFLAGS_DATADIR = -DAIMEE_DATADIR='"$(DATADIR)"'
 install:
 	$(AIMEE_RUNTIME_MUTATION_GUARD)
 	@mkdir -p build && date +%s > $(BUILD_ID_FILE)
-	$(MAKE) $(BINARY) $(RUNTIME_WEB) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY)
+	$(MAKE) $(BINARY) $(RUNTIME_WEB) $(ALL_WFE) $(SERVER) $(KB) $(KB_RESOLVER) $(GATEWAY) $(FORWARDER)
 	rm -f $(PREFIX)/bin/aimee-client $(PREFIX)/bin/aimee-worker
 	install -m 755 $(BINARY) $(PREFIX)/bin/aimee
 	install -m 755 $(RUNTIME_WEB) $(PREFIX)/bin/aimee-runtime-web
+	@if [ -x "$(WFE)" ]; then install -m 755 $(WFE) $(PREFIX)/bin/aimee-wfe; fi
 	install -m 755 $(SERVER) $(PREFIX)/bin/aimee-server
 	install -m 755 $(FORWARDER) $(PREFIX)/bin/aimee-forwarder
 	install -m 755 $(KB) $(PREFIX)/bin/aimee-kb
@@ -1605,6 +1615,8 @@ install:
 	install -m 755 $(GATEWAY) $(PREFIX)/bin/aimee-gateway
 	@mkdir -p $(DATADIR)
 	install -m 644 ../data/models_dev_snapshot.json $(DATADIR)/models_dev_snapshot.json
+	@mkdir -p $(PREFIX)/scripts
+	install -m 644 ../scripts/curator-extract.py ../scripts/llm-chat.py $(PREFIX)/scripts/
 
 # --- Embedded docs (compiled into binary) ---
 

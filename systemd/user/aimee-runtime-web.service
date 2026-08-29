@@ -1,0 +1,23 @@
+[Unit]
+Description=Aimee local browser interface
+After=aimee-server.service
+Requires=aimee-server.service
+PartOf=aimee.slice
+
+[Service]
+Type=simple
+Slice=aimee.slice
+Environment=AIMEE_RUNTIME_WEB_LOCAL=1
+Environment=AIMEE_HOME=%h/.config/aimee
+Environment=AIMEE_WEBCHAT_PAM_SERVICE=aimee
+ExecStart=%h/.local/bin/aimee-runtime-web --port 8080 --spa %h/.local/share/aimee/frontend/dist/index.html
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=256
+
+[Install]
+WantedBy=default.target

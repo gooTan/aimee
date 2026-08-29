@@ -610,6 +610,7 @@ static const struct
     {"revert", "git_revert", "ref", NULL, 0},
     {"switch", "git_switch", "ref", NULL, 0},
     {"checkout", "git_checkout", NULL, NULL, 1},
+    {"fork", "git_fork", "repo", NULL, 0},
     {NULL, NULL, NULL, NULL, 0},
 };
 
@@ -664,7 +665,7 @@ static cJSON *marshal_git_cli(int argc, char **argv)
       fprintf(stderr, "usage: aimee git <command> [primary] [key=value ...]\n"
                       "  status commit push pull fetch branch log diff pr issue clone stash\n"
                       "  tag reset restore verify add merge rebase sync cherry-pick revert\n"
-                      "  switch checkout\n");
+                      "  switch checkout fork\n");
       return NULL;
    }
 
@@ -681,7 +682,7 @@ static cJSON *marshal_git_cli(int argc, char **argv)
       fprintf(stderr,
               "aimee: '%s' is not a git command. Try: status commit push pull fetch "
               "branch log diff pr issue clone stash tag reset restore verify add merge "
-              "rebase sync cherry-pick revert switch checkout\n",
+              "rebase sync cherry-pick revert switch checkout fork\n",
               sub);
       return NULL;
    }
@@ -707,7 +708,7 @@ static cJSON *marshal_git_cli(int argc, char **argv)
          continue;
 
       /* key=value / --key=value, typed exactly as verify types its arguments. */
-      const char *raw = arg;
+      char *raw = arg;
       if (strncmp(raw, "--", 2) == 0)
          raw += 2;
       char *eq = strchr(raw, '=');
@@ -815,7 +816,7 @@ static cJSON *marshal_git_verify(int argc, char **argv)
          continue;
       }
 
-      const char *raw = argv[i];
+      char *raw = argv[i];
       if (strncmp(raw, "--", 2) == 0)
          raw += 2;
 

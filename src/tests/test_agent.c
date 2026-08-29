@@ -1005,14 +1005,17 @@ static void test_agent_config_provider_cli_roundtrip(void)
             "{\"name\":\"claude-code\",\"provider\":\"claude-code\","
             "\"roles\":[\"code\"],\"backend\":\"tmux-cli\","
             "\"cli_kind\":\"claude-code\",\"cli_cmd\":\"/bin/echo\","
-            "\"session_reuse\":true}]}\n",
+            "\"session_reuse\":true},"
+            "{\"name\":\"fable\",\"provider\":\"claude\",\"model\":\"claude-fable-5\","
+            "\"roles\":[\"draft\"],\"backend\":\"provider-cli\","
+            "\"cli_kind\":\"claude\",\"cli_cmd\":\"claude --model claude-fable-5\"}]}\n",
             f);
       fclose(f);
    }
 
    agent_config_t loaded;
    assert(agent_load_config(&loaded) == 0);
-   assert(loaded.agent_count == 6);
+   assert(loaded.agent_count == 7);
    assert(strcmp(loaded.agents[0].backend, AGENT_BACKEND_PROVIDER_CLI) == 0);
    assert(strcmp(loaded.agents[0].cli_kind, "codex") == 0);
    assert(strcmp(loaded.agents[0].cli_cmd, "codex") == 0);
@@ -1054,12 +1057,15 @@ static void test_agent_config_provider_cli_roundtrip(void)
     * claude has no server session to drive, so dispatch could only fail. This
     * short-circuits before any tmux/PATH probing, so it holds everywhere. */
    assert(agent_is_available_for_routing(&loaded.agents[5]) == 0);
+   assert(strcmp(loaded.agents[6].backend, AGENT_BACKEND_PROVIDER_CLI) == 0);
+   assert(strcmp(loaded.agents[6].cli_kind, "claude") == 0);
+   assert(strcmp(loaded.agents[6].cli_cmd, "claude --model claude-fable-5") == 0);
 
    assert(agent_save_config(&loaded) == 0);
 
    agent_config_t reloaded;
    assert(agent_load_config(&reloaded) == 0);
-   assert(reloaded.agent_count == 6);
+   assert(reloaded.agent_count == 7);
    assert(strcmp(reloaded.agents[0].backend, AGENT_BACKEND_PROVIDER_CLI) == 0);
    assert(strcmp(reloaded.agents[0].cli_kind, "codex") == 0);
    assert(strcmp(reloaded.agents[0].cli_cmd, "codex") == 0);
@@ -1094,6 +1100,9 @@ static void test_agent_config_provider_cli_roundtrip(void)
    assert(reloaded.agents[5].session_reuse == 1);
    /* Still excluded after the save/reload roundtrip (see the load-side assert). */
    assert(agent_is_available_for_routing(&reloaded.agents[5]) == 0);
+   assert(strcmp(reloaded.agents[6].backend, AGENT_BACKEND_PROVIDER_CLI) == 0);
+   assert(strcmp(reloaded.agents[6].cli_kind, "claude") == 0);
+   assert(strcmp(reloaded.agents[6].cli_cmd, "claude --model claude-fable-5") == 0);
 
    if (old_path)
    {
@@ -1390,7 +1399,7 @@ static void test_tool_bash(void)
    free(result);
 
    /* Timeout */
-   result = tool_bash("sleep 60", 200);
+   result = tool_bash("while :; do :; done", 200);
    json = cJSON_Parse(result);
    assert(json != NULL);
    ec = cJSON_GetObjectItem(json, "exit_code");
@@ -1398,7 +1407,7 @@ static void test_tool_bash(void)
    cJSON_Delete(json);
    free(result);
 
-   result = tool_bash("yes x | head -c 65536", 5000);
+   result = tool_bash("printf '%65536s' x", 5000);
    assert(result && strstr(result, "\"exit_code\":0") != NULL);
    free(result);
 }

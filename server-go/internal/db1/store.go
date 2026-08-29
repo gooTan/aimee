@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS lifecycle_work_item (
   override_count INTEGER NOT NULL DEFAULT 0,
   parent_id TEXT NOT NULL DEFAULT '',
   source_path TEXT NOT NULL DEFAULT '',
+  packet_schema_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(repo, proposal_path)
@@ -124,7 +125,16 @@ CREATE TABLE IF NOT EXISTS lifecycle_delegate_job (
   participant_token TEXT NOT NULL DEFAULT '',
   cancel_attempts INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);`
+);
+CREATE TABLE IF NOT EXISTS wfe_premium_call (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  root_id TEXT NOT NULL,
+  work_item_id TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT '',
+  delegate TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_wfe_premium_call_root ON wfe_premium_call(root_id);`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate DB1 WFE schema: %w", err)
 	}
@@ -137,6 +147,7 @@ CREATE TABLE IF NOT EXISTS lifecycle_delegate_job (
 		{"reservation_state", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_state TEXT NOT NULL DEFAULT ''`},
 		{"reservation_owner", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_owner TEXT NOT NULL DEFAULT ''`},
 		{"reservation_lease_until", `ALTER TABLE lifecycle_work_item ADD COLUMN reservation_lease_until TEXT NOT NULL DEFAULT ''`},
+		{"packet_schema_version", `ALTER TABLE lifecycle_work_item ADD COLUMN packet_schema_version INTEGER NOT NULL DEFAULT 0`},
 	} {
 		has, err := s.hasWorkItemColumn(ctx, migration.column)
 		if err != nil {
@@ -255,17 +266,18 @@ func (s *Store) hasWorkItemColumn(ctx context.Context, wanted string) (bool, err
 }
 
 type CreateWorkItem struct {
-	ID              string
-	Repo            string
-	ProposalPath    string
-	WorkflowName    string
-	WorkflowVersion string
-	StartStage      string
-	Mode            string
-	Submitter       string
-	ParentID        string
-	SourcePath      string
-	MaxCostUSD      float64
+	ID                  string
+	Repo                string
+	ProposalPath        string
+	WorkflowName        string
+	WorkflowVersion     string
+	StartStage          string
+	Mode                string
+	Submitter           string
+	ParentID            string
+	SourcePath          string
+	MaxCostUSD          float64
+	PacketSchemaVersion int
 }
 
 var ErrAdmissionFull = errors.New("trigger admission full")
@@ -310,9 +322,9 @@ func (s *Store) createWorkItem(ctx context.Context, in CreateWorkItem, cap int) 
 		inserted, err = tx.ExecContext(ctx, `
 INSERT INTO lifecycle_work_item
   (work_item_id, repo, proposal_path, workflow_name, workflow_version,
-   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.WorkflowName,
-			in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID, in.SourcePath, in.MaxCostUSD)
+   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd, packet_schema_version)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.WorkflowName,
+			in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID, in.SourcePath, in.MaxCostUSD, in.PacketSchemaVersion)
 	} else {
 		// Parent eligibility and insertion are one SQLite statement. A concurrent
 		// StopTree therefore either includes this child or wins first and makes the
@@ -320,12 +332,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.ID, in.Repo, in.ProposalPath, in.W
 		inserted, err = tx.ExecContext(ctx, `
 INSERT INTO lifecycle_work_item
   (work_item_id, repo, proposal_path, workflow_name, workflow_version,
-   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+   current_stage, mode, submitter, parent_id, source_path, work_item_max_cost_usd, packet_schema_version)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 FROM lifecycle_work_item parent
 WHERE parent.work_item_id=? AND parent.state='active'`, in.ID, in.Repo, in.ProposalPath,
 			in.WorkflowName, in.WorkflowVersion, in.StartStage, in.Mode, in.Submitter, in.ParentID,
-			in.SourcePath, in.MaxCostUSD, in.ParentID)
+			in.SourcePath, in.MaxCostUSD, in.PacketSchemaVersion, in.ParentID)
 	}
 	if err != nil {
 		return fmt.Errorf("insert work item: %w", err)
@@ -347,27 +359,28 @@ VALUES (?, ?, 'create', ?, ?, ?)`, in.ID, in.StartStage, in.Submitter, in.Workfl
 }
 
 type WorkItem struct {
-	ID                string  `json:"id"`
-	Repo              string  `json:"repo"`
-	ProposalPath      string  `json:"-"`
-	WorkflowName      string  `json:"workflow"`
-	WorkflowVersion   string  `json:"version"`
-	Stage             string  `json:"stage"`
-	State             string  `json:"state"`
-	Mode              string  `json:"mode"`
-	PauseReason       string  `json:"pause_reason"`
-	ContentHash       string  `json:"content_hash,omitempty"`
-	PRRef             string  `json:"pr_ref"`
-	Submitter         string  `json:"submitter"`
-	CumulativeCostUSD float64 `json:"cum_cost_usd"`
-	ReservedCostUSD   float64 `json:"reserved_cost_usd"`
-	ReservationState  string  `json:"-"`
-	MaxCostUSD        float64 `json:"work_item_max_cost_usd"`
-	OverrideCount     int     `json:"override_count"`
-	ParentID          string  `json:"parent_id,omitempty"`
-	Worktree          string  `json:"worktree,omitempty"`
-	SourcePath        string  `json:"-"`
-	UpdatedAt         string  `json:"updated_at"`
+	ID                  string  `json:"id"`
+	Repo                string  `json:"repo"`
+	ProposalPath        string  `json:"-"`
+	WorkflowName        string  `json:"workflow"`
+	WorkflowVersion     string  `json:"version"`
+	Stage               string  `json:"stage"`
+	State               string  `json:"state"`
+	Mode                string  `json:"mode"`
+	PauseReason         string  `json:"pause_reason"`
+	ContentHash         string  `json:"content_hash,omitempty"`
+	PRRef               string  `json:"pr_ref"`
+	Submitter           string  `json:"submitter"`
+	CumulativeCostUSD   float64 `json:"cum_cost_usd"`
+	ReservedCostUSD     float64 `json:"reserved_cost_usd"`
+	ReservationState    string  `json:"-"`
+	MaxCostUSD          float64 `json:"work_item_max_cost_usd"`
+	OverrideCount       int     `json:"override_count"`
+	ParentID            string  `json:"parent_id,omitempty"`
+	Worktree            string  `json:"worktree,omitempty"`
+	SourcePath          string  `json:"-"`
+	PacketSchemaVersion int     `json:"packet_schema_version,omitempty"`
+	UpdatedAt           string  `json:"updated_at"`
 }
 
 func (s *Store) WorkItem(ctx context.Context, id string) (WorkItem, error) {
@@ -375,11 +388,11 @@ func (s *Store) WorkItem(ctx context.Context, id string) (WorkItem, error) {
 	err := s.db.QueryRowContext(ctx, `
 SELECT work_item_id, repo, proposal_path, workflow_name, workflow_version, current_stage,
        state, mode, pause_reason, content_hash, pr_ref, submitter, cum_cost_usd, reserved_cost_usd, reservation_state,
-       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, updated_at
+       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, packet_schema_version, updated_at
 FROM lifecycle_work_item WHERE work_item_id = ?`, id).Scan(
 		&item.ID, &item.Repo, &item.ProposalPath, &item.WorkflowName, &item.WorkflowVersion,
 		&item.Stage, &item.State, &item.Mode, &item.PauseReason, &item.ContentHash, &item.PRRef,
-		&item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD, &item.ReservationState, &item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath,
+		&item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD, &item.ReservationState, &item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.PacketSchemaVersion,
 		&item.UpdatedAt)
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("get work item: %w", err)
@@ -424,7 +437,7 @@ func (s *Store) WorkItems(ctx context.Context) ([]WorkItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT work_item_id, repo, proposal_path, workflow_name, workflow_version, current_stage,
        state, mode, pause_reason, content_hash, pr_ref, submitter, cum_cost_usd, reserved_cost_usd,
-       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, updated_at
+       work_item_max_cost_usd, override_count, parent_id, worktree, source_path, packet_schema_version, updated_at
 FROM lifecycle_work_item ORDER BY id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list work items: %w", err)
@@ -436,7 +449,7 @@ FROM lifecycle_work_item ORDER BY id DESC`)
 		if err := rows.Scan(&item.ID, &item.Repo, &item.ProposalPath, &item.WorkflowName,
 			&item.WorkflowVersion, &item.Stage, &item.State, &item.Mode, &item.PauseReason,
 			&item.ContentHash, &item.PRRef, &item.Submitter, &item.CumulativeCostUSD, &item.ReservedCostUSD,
-			&item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.UpdatedAt); err != nil {
+			&item.MaxCostUSD, &item.OverrideCount, &item.ParentID, &item.Worktree, &item.SourcePath, &item.PacketSchemaVersion, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan work item: %w", err)
 		}
 		items = append(items, item)
@@ -529,14 +542,95 @@ type Event struct {
 	CreatedAt   string  `json:"created_at"`
 }
 
+// RecordEvent appends an operational event without changing workflow state.
+// Model liveness uses this path so status --watch can remain informative while
+// a long-running delegate call is still in flight.
+func (s *Store) RecordEvent(ctx context.Context, workItemID, stage, kind, actor, detail string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail)
+VALUES (?, ?, ?, ?, ?)`, workItemID, stage, kind, actor, detail)
+	if err != nil {
+		return fmt.Errorf("record lifecycle event: %w", err)
+	}
+	return nil
+}
+
+// RecordToolEventIfAbsent atomically appends a tool event when its durable
+// identity is not already present. The NOT EXISTS predicate is evaluated by
+// SQLite as part of the insert, so live and batch writers cannot race between
+// a read and a write, and the lookup is not artificially bounded.
+// Identity includes actor and the stable delegate invocation encoded in detail
+// (via FormatToolDetail's invocation key). Distinct actors or distinct
+// invocations with the same provider call_id are therefore retained, while a
+// duplicate transport delivery for the same invocation remains idempotent.
+func (s *Store) RecordToolEventIfAbsent(ctx context.Context, workItemID, stage, kind, actor, detail string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+INSERT INTO lifecycle_event (work_item_id, stage, kind, actor, detail)
+SELECT ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+  SELECT 1 FROM lifecycle_event
+  WHERE work_item_id = ? AND stage = ? AND kind = ? AND actor = ? AND detail = ?
+)`, workItemID, stage, kind, actor, detail, workItemID, stage, kind, actor, detail)
+	if err != nil {
+		return false, fmt.Errorf("record lifecycle tool event: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check lifecycle tool event insert: %w", err)
+	}
+	return rows > 0, nil
+}
+
 func (s *Store) Events(ctx context.Context, workItemID string, after int64, limit int) ([]Event, error) {
+	return s.events(ctx, workItemID, after, limit, false)
+}
+
+// LatestModelActivity returns the newest progress or tool event for one model
+// invocation. Identity is the canonical model/role/persona/phase/invocation
+// prefix shared by those event details.
+func (s *Store) LatestModelActivity(ctx context.Context, workItemID, stage, actor, identity string) (Event, bool, error) {
+	var event Event
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, work_item_id, stage, kind, actor, detail, content_hash, cost_usd, created_at
+FROM lifecycle_event
+WHERE work_item_id=? AND stage=? AND actor=?
+  AND kind IN ('model_progress', 'model_tool_start', 'model_tool_complete', 'model_tool_error')
+  AND (?='' OR instr(detail || ' ', ? || ' ')=1)
+ORDER BY id DESC LIMIT 1`, workItemID, stage, actor, identity, identity).Scan(
+		&event.ID, &event.WorkItemID, &event.Stage, &event.Kind, &event.Actor,
+		&event.Detail, &event.ContentHash, &event.CostUSD, &event.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, false, nil
+	}
+	if err != nil {
+		return Event{}, false, fmt.Errorf("find latest model activity: %w", err)
+	}
+	return event, true, nil
+}
+
+// EventsTree returns one globally ordered cursor across a workflow and all of
+// its slice descendants, so watching a build also shows its implementation.
+func (s *Store) EventsTree(ctx context.Context, workItemID string, after int64, limit int) ([]Event, error) {
+	return s.events(ctx, workItemID, after, limit, true)
+}
+
+func (s *Store) events(ctx context.Context, workItemID string, after int64, limit int, descendants bool) ([]Event, error) {
 	if limit < 1 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 SELECT id, work_item_id, stage, kind, actor, detail, content_hash, cost_usd, created_at
-FROM lifecycle_event WHERE work_item_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-		workItemID, after, limit)
+FROM lifecycle_event WHERE work_item_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+	args := []any{workItemID, after, limit}
+	if descendants {
+		query = `WITH RECURSIVE tree(id) AS (
+  SELECT ? UNION ALL
+  SELECT child.work_item_id FROM lifecycle_work_item child JOIN tree parent ON child.parent_id = parent.id
+)
+SELECT id, work_item_id, stage, kind, actor, detail, content_hash, cost_usd, created_at
+FROM lifecycle_event WHERE work_item_id IN (SELECT id FROM tree) AND id > ? ORDER BY id ASC LIMIT ?`
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list lifecycle events: %w", err)
 	}
@@ -1228,8 +1322,8 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var stage, reason string
-	if err := tx.QueryRowContext(ctx, `SELECT current_stage, pause_reason FROM lifecycle_work_item WHERE work_item_id=? AND state='active'`, workItemID).Scan(&stage, &reason); err != nil {
+	var stage, reason, pausedState string
+	if err := tx.QueryRowContext(ctx, `SELECT current_stage, pause_reason, paused_state FROM lifecycle_work_item WHERE work_item_id=? AND state='active'`, workItemID).Scan(&stage, &reason, &pausedState); err != nil {
 		return fmt.Errorf("load resumable workflow: %w", err)
 	}
 	if reason == "" {
@@ -1237,7 +1331,7 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 	}
 	// delegate_failed parks explicitly for a human, so a human must be able to
 	// release it once the underlying delegate problem is addressed.
-	operatorReasons := map[string]bool{"manual": true, "wall_cap": true, "turn_cap": true, "retry_limit": true, "convergence_limit": true, "convergence_no_progress": true, "budget_cap": true, "fanout_limit": true, "workflow_definition_invalid": true, "workflow_block_unavailable": true, "delegate_failed": true, "replay_unrecoverable": true,
+	operatorReasons := map[string]bool{"manual": true, "wall_cap": true, "turn_cap": true, "retry_limit": true, "convergence_limit": true, "convergence_no_progress": true, "budget_cap": true, "fanout_limit": true, "workflow_definition_invalid": true, "workflow_block_unavailable": true, "delegate_failed": true, "replay_unrecoverable": true, "premium_write_refused": true,
 		// A conflicting parent integration is deliberately aborted and parked with
 		// a clean worktree. An operator must resolve/commit the integration before
 		// releasing the item; no scheduler-owned transition can do that work.
@@ -1251,11 +1345,20 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE lifecycle_work_item SET pause_reason='', paused_state='', updated_at=datetime('now') WHERE work_item_id=? AND state='active'`, workItemID); err != nil {
 		return err
 	}
-	if reason == "retry_limit" {
+	if reason == "retry_limit" || reason == "convergence_limit" || reason == "convergence_no_progress" {
 		// A human resume is an explicit request for another bounded repair cycle.
 		// Keeping the exhausted value made the very next failed repair park again,
 		// effectively reducing recovery to one attempt per manual resume.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_stage_attempt WHERE work_item_id=? AND stage=?`, workItemID, stage); err != nil {
+		attemptStage := stage
+		if pausedState != "" {
+			attemptStage = pausedState
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lifecycle_stage_attempt WHERE work_item_id=? AND stage=?`, workItemID, attemptStage); err != nil {
+			return err
+		}
+	}
+	if reason == "convergence_limit" || reason == "convergence_no_progress" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM wfe_convergence WHERE work_item_id=? AND gate=?`, workItemID, pausedState); err != nil {
 			return err
 		}
 	}
@@ -1266,7 +1369,9 @@ func (s *Store) Resume(ctx context.Context, workItemID string) error {
 }
 
 func (s *Store) ResolveGate(ctx context.Context, workItemID, fromStage, toStage, decision, contentHash string) error {
-	if decision != "approve" && decision != "reject" {
+	// "changes" is the human's request-changes decision: the run stays active
+	// and moves to the gate's repair stage carrying the human's findings.
+	if decision != "approve" && decision != "reject" && decision != "changes" {
 		return errors.New("invalid gate decision")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

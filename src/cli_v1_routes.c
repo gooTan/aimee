@@ -1962,6 +1962,12 @@ cJSON *marshal_roundtable_review(int argc, char **argv)
    const char *workdir = rpc_get(&opts, "workdir");
    if (workdir)
       cJSON_AddStringToObject(req, "workdir", workdir);
+   else
+   {
+      char cwd[4096];
+      if (getcwd(cwd, sizeof(cwd)))
+         cJSON_AddStringToObject(req, "workdir", cwd);
+   }
    const char *run_id = rpc_get(&opts, "run-id");
    if (run_id)
       cJSON_AddStringToObject(req, "run_id", run_id);

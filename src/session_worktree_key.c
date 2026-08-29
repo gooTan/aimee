@@ -10,6 +10,17 @@
 #define SESSION_WORKTREE_KEY_PREFIX_LEN 8
 #define SESSION_WORKTREE_KEY_LEGACY_LEN 16
 
+static unsigned long long stable_hash(const char *value)
+{
+   unsigned long long h = 1469598103934665603ULL;
+   for (const char *p = value; p && *p; p++)
+   {
+      h ^= (unsigned char)*p;
+      h *= 1099511628211ULL;
+   }
+   return h;
+}
+
 void session_worktree_key(const char *sid, char *out, size_t cap)
 {
    if (!out || cap == 0)
@@ -19,12 +30,7 @@ void session_worktree_key(const char *sid, char *out, size_t cap)
       return;
    /* The full id, not a prefix of it: this is what makes the key collision-free
     * for ids minted on a shared prefix. */
-   unsigned long long h = 1469598103934665603ULL;
-   for (const char *p = sid; *p; p++)
-   {
-      h ^= (unsigned char)*p;
-      h *= 1099511628211ULL;
-   }
+   unsigned long long h = stable_hash(sid);
    /* Readability only. Drops anything outside [A-Za-z0-9] rather than mapping it
     * to '_', so the output alphabet stays closed and no id can inject a path
     * separator or a leading '-' that git would read as an option. */
@@ -45,6 +51,16 @@ void session_worktree_key(const char *sid, char *out, size_t cap)
       return;
    }
    snprintf(out, cap, "%s%s%016llx", pre, k ? "-" : "", h);
+}
+
+void session_worktree_repo_key(const char *git_root, char *out, size_t cap)
+{
+   if (!out || cap == 0)
+      return;
+   out[0] = '\0';
+   if (!git_root || !git_root[0] || cap < SESSION_WORKTREE_REPO_KEY_MAX)
+      return;
+   snprintf(out, cap, "%016llx", stable_hash(git_root));
 }
 
 void session_worktree_key_legacy(const char *sid, char *out, size_t cap)

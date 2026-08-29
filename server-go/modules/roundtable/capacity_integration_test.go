@@ -15,6 +15,13 @@ import (
 	"github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
+func TestMain(m *testing.M) {
+	if handled, code := delegatemodule.RunWatchdog(os.Args); handled {
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
+}
+
 // moduleStageBridge crosses the same JSON stage contract as the process bus.
 // Holding successful group-plan replies until every campaign has planned makes
 // the subsequent limiter contention a real admission race rather than ten
@@ -61,8 +68,23 @@ func (b *moduleStageBridge) Call(ctx context.Context, _ uint32, stage uint32, _ 
 func TestTenOverlappingPanelsCrossGoProducerAdmissionWithoutUnreachable(t *testing.T) {
 	const campaigns = 10
 	home := t.TempDir()
-	script := filepath.Join(home, "slow-reviewer")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 2\nprintf done\n"), 0o700); err != nil {
+	workdir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptFile, err := os.CreateTemp(workdir, ".slow-reviewer-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := scriptFile.Name()
+	t.Cleanup(func() { _ = os.Remove(script) })
+	if _, err := scriptFile.WriteString("#!/bin/sh\nsleep 2\nprintf done\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := scriptFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	registry := map[string]any{"agents": []map[string]any{{
@@ -96,6 +118,7 @@ func TestTenOverlappingPanelsCrossGoProducerAdmissionWithoutUnreachable(t *testi
 		go func(i int) {
 			defer wg.Done()
 			run := panel.Run{ID: "live-capacity-" + string(rune('a'+i)),
+				Workdir:         workdir,
 				OriginalRequest: "review the implementation under overlapping delegate load",
 				Reviewed:        panel.Artifact{Stage: "frozen_diff", Content: content, Hash: panel.Hash([]byte(content))}}
 			result, err := panel.Convene(t.Context(), delegates, run, reviewPanel, "")

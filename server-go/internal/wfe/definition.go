@@ -34,6 +34,11 @@ type Node struct {
 	Next   string            `yaml:"next,omitempty" json:"next,omitempty"`
 	OnPass string            `yaml:"on_pass,omitempty" json:"on_pass,omitempty"`
 	OnFail string            `yaml:"on_fail,omitempty" json:"on_fail,omitempty"`
+	// OnEscalate routes a review's requested changes to a distinct node when the
+	// reviewer flags an escalation class (architecture, security, migration,
+	// contract, requirement). Ordinary findings still take on_fail; a node
+	// without this edge treats escalations as ordinary findings.
+	OnEscalate string `yaml:"on_escalate,omitempty" json:"on_escalate,omitempty"`
 }
 
 func ParseDefinition(content []byte) (Definition, error) {
@@ -100,6 +105,7 @@ func (d Definition) Validate() error {
 	for _, node := range d.Nodes {
 		for edgeName, target := range map[string]string{
 			"next": node.Next, "on_pass": node.OnPass, "on_fail": node.OnFail,
+			"on_escalate": node.OnEscalate,
 		} {
 			if target == "" {
 				continue
@@ -107,6 +113,9 @@ func (d Definition) Validate() error {
 			if _, ok := nodes[target]; !ok {
 				return fmt.Errorf("node %q %s target %q does not exist", node.ID, edgeName, target)
 			}
+		}
+		if node.OnEscalate != "" && node.Block != "review" && node.Block != "gate.roundtable" {
+			return fmt.Errorf("node %q on_escalate is only supported on review and gate.roundtable blocks", node.ID)
 		}
 		for input, binding := range node.In {
 			producer, output, ok := ParseBinding(binding)

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JBailes/aimee/server-go/delegate"
 	appconfig "github.com/JBailes/aimee/server-go/internal/config"
 	"github.com/JBailes/aimee/server-go/internal/db1"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
@@ -74,8 +75,96 @@ func configuredTestRoundtable(t *testing.T) *roundtablecfg.Store {
 
 func TestDefaultVerifyCommandUsesGitVerifyKeyValueSyntax(t *testing.T) {
 	got := strings.Join(defaultVerifyCommand(), " ")
-	if got != "aimee git verify format=json" {
+	if got != "aimee git verify force_in_scope=true format=json" {
 		t.Fatalf("default verifier command = %q, want supported git verify syntax", got)
+	}
+}
+
+func TestImplementationSatisfiedNoChangeAcceptsPromptContract(t *testing.T) {
+	for _, response := range []string{
+		"Worktree already satisfies task — no changes made.",
+		"The current branch already fully satisfies the task; I left the worktree unchanged.",
+	} {
+		if !implementationPartialIsSatisfiedNoChange(response) {
+			t.Fatalf("valid satisfied no-op was rejected: %q", response)
+		}
+	}
+	for _, response := range []string{
+		"No changes made because I could not find the requested file.",
+		"Task already complete, but I also modified a generated file.",
+	} {
+		if implementationPartialIsSatisfiedNoChange(response) {
+			t.Fatalf("ambiguous no-op was accepted: %q", response)
+		}
+	}
+}
+
+func TestRequiredCodeReviewSkillParksWhenUnavailable(t *testing.T) {
+	t.Setenv("AIMEE_HOME", "")
+	runner := &NativeRunner{}
+	result, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{Repo: t.TempDir()},
+		Node:     wfe.Node{Params: map[string]any{"require_code_review_skill": true}},
+		Inputs:   map[string]wfe.Artifact{"src": {Content: []byte("diff"), Hash: "hash"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepPending || result.PauseReason != "required_skill_unavailable" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestMalformedReviewIsExecutionFailureNotChangeRequest(t *testing.T) {
+	runner := &NativeRunner{agents: fixedResponseAgents{response: "prose without a verdict"}}
+	reviewed := wfe.Artifact{Type: "frozen_diff", Content: []byte("diff")}
+	reviewed.Hash = wfe.Hash(reviewed.Content)
+	_, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi", Worktree: t.TempDir()},
+		Node:     wfe.Node{ID: "review", Params: map[string]any{"delegate": "fable"}},
+		Proposal: "review the change", Inputs: map[string]wfe.Artifact{"src": reviewed},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parse review response") {
+		t.Fatalf("malformed response err=%v, want parse failure", err)
+	}
+}
+
+func TestCodeReviewSkillFallsBackToCentralAimeeHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AIMEE_HOME", home)
+	path := filepath.Join(home, "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("central Matt Pocock review skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoCodeReviewSkill(t.TempDir()); got != "central Matt Pocock review skill" {
+		t.Fatalf("skill=%q", got)
+	}
+}
+
+func TestRequiredCodeReviewSkillEnablesReviewTools(t *testing.T) {
+	worktree := t.TempDir()
+	skill := filepath.Join(worktree, ".agents", "skills", "code-review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skill, []byte("inspect the repository"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents := &recordingAgents{}
+	runner := &NativeRunner{agents: agents}
+	_, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{Worktree: worktree},
+		Node:     wfe.Node{Params: map[string]any{"require_code_review_skill": true}},
+		Inputs:   map[string]wfe.Artifact{"src": {Content: []byte("diff"), Hash: "hash"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 1 || !agents.requests[0].Tools {
+		t.Fatalf("review request = %+v, want tools enabled", agents.requests)
 	}
 }
 
@@ -309,6 +398,8 @@ func TestImplementationPromptUsesNoOpForSiblingSatisfiedTask(t *testing.T) {
 		"work merged by a sibling",
 		"leave the worktree unchanged",
 		"do not manufacture cosmetic changes",
+		"Do not change Aimee or global configuration",
+		"do not run `aimee git verify`",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("implementation prompt missing %q: %q", want, prompt)
@@ -447,7 +538,7 @@ func testDelegateGroup(ctx context.Context, requests []DelegateRequest, run func
 			if err == nil && requests[i].Role == roundtableDelegateRole {
 				result.Response = withTestRoundtableIdentity(result.Response, requests[i])
 			}
-			out[i].Response, out[i].CostUSD, out[i].Err = result.Response, result.CostUSD, err
+			out[i].Response, out[i].CostUSD, out[i].AvailabilityClass, out[i].Err = result.Response, result.CostUSD, result.AvailabilityClass, err
 			if out[i].Err == nil {
 				out[i].Participant = fmt.Sprintf("test-participant:%d", i)
 			}
@@ -545,6 +636,8 @@ type deadlineDiscussionAgents struct{}
 
 type chairmanFailureAgents struct{}
 
+type optionalFableFailureAgents struct{}
+
 type chairmanDeadlineAgents struct{}
 
 func chairmanApprovalFor(request DelegateRequest) string {
@@ -593,7 +686,14 @@ func (deadlineDiscussionAgents) Delegate(ctx context.Context, request DelegateRe
 
 func (chairmanFailureAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
 	if request.Persona == "chairman" {
-		return DelegateResult{}, errors.New("chairman unavailable")
+		return DelegateResult{AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}, fmt.Errorf("%s chairman unavailable", request.Delegate)
+	}
+	return DelegateResult{Response: `{"artifact_stage":"plan","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`}, nil
+}
+
+func (optionalFableFailureAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
+	if request.Persona == "architect" {
+		return DelegateResult{}, errors.New("fable unavailable")
 	}
 	return DelegateResult{Response: `{"artifact_stage":"plan","original_request_alignment":{"status":"aligned","summary":"implements the request"},"verdict":"approve","findings":[]}`}, nil
 }
@@ -671,6 +771,10 @@ func (a chairmanFailureAgents) DelegateGroup(ctx context.Context, requests []Del
 	return testDelegateGroup(ctx, requests, a.Delegate)
 }
 
+func (a optionalFableFailureAgents) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	return testDelegateGroup(ctx, requests, a.Delegate)
+}
+
 func (a chairmanDeadlineAgents) DelegateGroup(ctx context.Context, requests []DelegateRequest) []DelegateGroupResult {
 	return testDelegateGroup(ctx, requests, a.Delegate)
 }
@@ -697,6 +801,57 @@ func TestStructuredCorrectiveSynthesisIncludesCompleteInvalidResponse(t *testing
 	repairPrompt := agents.requests[1].Prompt
 	if !strings.Contains(repairPrompt, invalid) || !strings.Contains(repairPrompt, "PREVIOUS RESPONSE WAS INVALID") {
 		t.Fatalf("repair prompt omitted complete invalid artifact or validation feedback: %q", repairPrompt)
+	}
+}
+
+func TestContextBriefUsesPinnedReadOnlySearchScout(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","files":["src/a.c"],"acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "scout", Params: map[string]any{
+			"brief": true, "delegate": "luna",
+		}},
+		Proposal: "inspect the relevant implementation before planning",
+	}, "intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced || len(agents.requests) != 1 {
+		t.Fatalf("result=%+v requests=%+v", result, agents.requests)
+	}
+	request := agents.requests[0]
+	if request.Delegate != "luna" || request.Role != "search" || !request.Tools || request.Persona != "architect" {
+		t.Fatalf("scout dispatch=%+v, want pinned Luna search with read-only tools", request)
+	}
+}
+
+func TestContextBriefBlocksFailedMandatoryPrecondition(t *testing.T) {
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"status":"ready","summary":"scope","acceptance_criteria":["done"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"failed","detail":"memory route unavailable"}]}`}}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.structured(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_scout", Repo: "/repo", Worktree: "/worktree"},
+		Node: wfe.Node{ID: "scout", Params: map[string]any{
+			"brief": true, "delegate": "luna",
+		}},
+		Proposal: "inspect the relevant implementation before planning",
+	}, "intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepChanges || !strings.Contains(result.Detail, "routing-e2e-20260824-l1") {
+		t.Fatalf("result=%+v, want repairable scout changes for failed mandatory precondition", result)
+	}
+	if len(agents.requests) != 1 {
+		t.Fatalf("requests=%d, want blocked scout to stop without corrective retries", len(agents.requests))
+	}
+	if strings.Contains(agents.requests[len(agents.requests)-1].Prompt, "ORIGINAL REQUEST") {
+		t.Fatalf("blocked scout was routed to planner instead of scout repair: %q", agents.requests[len(agents.requests)-1].Prompt)
+	}
+	for _, request := range agents.requests {
+		if request.Role != "search" || request.Delegate != "luna" || !request.Tools {
+			t.Fatalf("repair attempt left scout path: %+v", request)
+		}
 	}
 }
 
@@ -817,9 +972,36 @@ func TestConfiguredRoundtableHonorsMinimumWhenASeatIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestConfiguredRoundtableOptionalSeatFailureDoesNotBlockRequiredQuorum(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"name":"default","seats":[{"model":"sol","persona":"reviewer"},{"model":"antigravity","persona":"reviewer"},{"model":"fable","persona":"architect","optional":true}],"min_successful":2}`
+	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := roundtablecfg.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := withPanel(&NativeRunner{agents: optionalFableFailureAgents{}}, store)
+	reviewed := wfe.Artifact{Type: "plan", Content: []byte("complete implementation plan")}
+	reviewed.Hash = wfe.Hash(reviewed.Content)
+	result, err := runner.roundtable(context.Background(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi", Repo: "/repo", Worktree: "/worktree"},
+		Node:     wfe.Node{ID: "gate", Block: "gate.roundtable", Params: map[string]any{"roundtable": "default"}},
+		Proposal: "implement the requested change", Inputs: map[string]wfe.Artifact{"src": reviewed},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced || result.Roundtable == nil || !result.Roundtable.Approved || !result.Roundtable.Degraded ||
+		result.Roundtable.ParticipantsTotal != 3 || result.Roundtable.ParticipantsUsed != 2 || result.Roundtable.ParticipantsFailed != 1 {
+		t.Fatalf("optional seat failure blocked required quorum: %+v", result)
+	}
+}
+
 func TestConfiguredRoundtableUsesOverallDeadlineWithoutCancellingSlowHealthySeat(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"minimax","persona":"qa"}],"min_successful":1,"discussion":true,"chairman":"codex","chairman_enabled":true,"deadline_ms":120}`
+	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"minimax","persona":"qa"}],"min_successful":1,"discussion":true,"chairman":"codex","chairman_fallback":"minimax","chairman_enabled":true,"deadline_ms":120}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +1081,7 @@ func TestConfiguredRoundtableReportsEveryPhaseDeadline(t *testing.T) {
 		},
 		{
 			name:      "chairman",
-			preset:    `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_enabled":true,"deadline_ms":80}`,
+			preset:    `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_fallback":"codex","chairman_enabled":true,"deadline_ms":80}`,
 			agents:    chairmanDeadlineAgents{},
 			wantPause: "roundtable_chairman",
 		},
@@ -934,7 +1116,7 @@ func TestConfiguredRoundtableReportsEveryPhaseDeadline(t *testing.T) {
 
 func TestConfiguredRoundtableChairmanFailureIsVisiblyDegraded(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"kimi","chairman_enabled":true,"deadline_ms":100}`
+	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"kimi","chairman_fallback":"codex","chairman_enabled":true,"deadline_ms":100}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +1135,8 @@ func TestConfiguredRoundtableChairmanFailureIsVisiblyDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != StepPending || result.PauseReason != "roundtable_chairman" || result.Roundtable == nil || !result.Roundtable.Degraded {
+	if result.Status != StepPending || result.PauseReason != "roundtable_chairman" || result.Roundtable == nil || !result.Roundtable.Degraded ||
+		!strings.Contains(result.Detail, "kimi") || !strings.Contains(result.Detail, "codex") {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -973,7 +1156,7 @@ func (a *budgetExhaustionAgents) DelegateGroup(ctx context.Context, requests []D
 
 func TestRoundtableDoesNotLaunchChairmanAfterCostExhaustion(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_enabled":true}`
+	body := `{"name":"default","seats":[{"model":"codex","persona":"security"},{"model":"codex","persona":"qa"}],"min_successful":1,"chairman":"codex","chairman_fallback":"codex","chairman_enabled":true}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1039,7 +1222,7 @@ func TestNativeRunnerUsesCompleteArtifactsAndOnlyPositiveUIPins(t *testing.T) {
 	withPanel(runner, configuredTestRoundtable(t))
 	proposal := strings.Repeat("proposal 漢字\n", 200_000) + "PROPOSAL_END"
 	proposalArtifact := wfe.Artifact{Type: "proposal", Content: []byte(proposal), Hash: wfe.Hash([]byte(proposal))}
-	planResult, err := runner.author(context.Background(), StepRequest{WorkItem: db1.WorkItem{Repo: "/repo"}, Node: wfe.Node{Params: map[string]any{"roundtable": "default"}}, Proposal: proposal, Inputs: map[string]wfe.Artifact{"proposal": proposalArtifact}}, "plan")
+	planResult, err := runner.author(context.Background(), StepRequest{WorkItem: db1.WorkItem{Repo: "/repo", Worktree: "/wfe-worktree"}, Node: wfe.Node{Params: map[string]any{"roundtable": "default"}}, Proposal: proposal, Inputs: map[string]wfe.Artifact{"proposal": proposalArtifact}}, "plan")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1049,6 +1232,9 @@ func TestNativeRunnerUsesCompleteArtifactsAndOnlyPositiveUIPins(t *testing.T) {
 	plannerPrompt := agents.requests[len(agents.requests)-1].Prompt
 	if len(agents.requests) != 1 || !strings.Contains(plannerPrompt, "ORIGINAL REQUEST:\n"+proposal) || strings.Contains(plannerPrompt, "\n\nPROPOSAL:\n") {
 		t.Fatalf("planner did not frame its source as the original request: %+v", agents.requests)
+	}
+	if agents.requests[0].Workdir != "/wfe-worktree" || !agents.requests[0].Tools {
+		t.Fatalf("planner workdir=%q, want managed workflow worktree", agents.requests[0].Workdir)
 	}
 	customBlock := wfe.BlockDefinition{Name: "custom", Custom: true, Produces: "report", Prompt: "Do the work."}
 	_, err = runner.custom(context.Background(), StepRequest{WorkItem: db1.WorkItem{Repo: "/repo"}, Proposal: proposal}, customBlock)
@@ -1121,10 +1307,11 @@ func TestNativeRunnerSplitAcceptsManagedChangeIntentBinding(t *testing.T) {
 	}
 }
 
-func TestNativeRunnerSplitHonorsExplicitSingleSliceWithoutDelegating(t *testing.T) {
-	plan := "# Plan\n\nAdd the feature-branch trigger and change nothing else."
-	proposal := "# Proposal: run CI on slice sub-PRs\n\n- **State:** pending — single slice.\n\n## Recommendation\n\nAdd `aimee/feat/**` to the existing trigger."
-	runner := &NativeRunner{agents: noRosterAgents{}}
+func TestNativeRunnerSplitClassifiesExplicitSingleSliceUI(t *testing.T) {
+	plan := "# Plan\n\nAdd the frontend settings panel and its keyboard interaction."
+	proposal := "# Proposal: add the browser settings panel\n\n- **State:** pending — single UI slice.\n\n## Recommendation\n\nAdd the visible panel and its interaction states."
+	agents := &recordingAgents{draftResponses: []string{`{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"Add browser settings panel","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["settings panel is visible and interactive"],"implementation_kind":"ui"}]}`}}
+	runner := &NativeRunner{agents: agents}
 	result, err := runner.structured(context.Background(), StepRequest{
 		WorkItem: db1.WorkItem{Repo: "/repo"},
 		Proposal: proposal,
@@ -1138,24 +1325,16 @@ func TestNativeRunnerSplitHonorsExplicitSingleSliceWithoutDelegating(t *testing.
 	if result.Status != StepAdvanced || result.ArtifactType != "plan" {
 		t.Fatalf("result=%+v", result)
 	}
-	var packetPlan struct {
-		Packets []struct {
-			PacketID        string `json:"packet_id"`
-			Summary         string `json:"summary"`
-			OriginalRequest string `json:"original_request"`
-			ApprovedPlan    string `json:"approved_plan"`
-		} `json:"packets"`
+	if len(agents.requests) != 1 || agents.requests[0].Delegate != "fable" {
+		t.Fatalf("split requests=%+v, want one fable request", agents.requests)
 	}
-	if err := json.Unmarshal([]byte(result.Artifact), &packetPlan); err != nil {
-		t.Fatal(err)
+	for _, required := range []string{"schema_version", "implementation_kind", "UI", "general", "mixed work", "model", "delegate", "workflow"} {
+		if !strings.Contains(agents.requests[0].Prompt, required) {
+			t.Fatalf("split prompt omitted %q:\n%s", required, agents.requests[0].Prompt)
+		}
 	}
-	if len(packetPlan.Packets) != 1 {
-		t.Fatalf("single-slice request produced %d packets: %s", len(packetPlan.Packets), result.Artifact)
-	}
-	packet := packetPlan.Packets[0]
-	if packet.PacketID != "p1" || packet.Summary != "Run CI on slice sub-PRs" ||
-		packet.OriginalRequest != proposal || packet.ApprovedPlan != plan {
-		t.Fatalf("single packet lost authoritative scope: %+v", packet)
+	if !strings.Contains(result.Artifact, `"schema_version":2`) {
+		t.Fatalf("split artifact=%s, want provider version-2 output", result.Artifact)
 	}
 }
 
@@ -1185,6 +1364,36 @@ func TestNativeRunnerSplitPromptCarriesOriginalRequestAndRejectsFollowUpPackets(
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("split prompt omitted %q:\n%s", required, prompt)
 		}
+	}
+}
+
+func TestValidateStructuredPacketSchemaVersions(t *testing.T) {
+	validV1 := `{"schema_version":1,"packets":[{"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"]}]}`
+	validV1WithPacketVersion := `{"schema_version":1,"packets":[{"schema_version":1,"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"]}]}`
+	validV2 := `{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"ui","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"ui"}]}`
+	for _, doc := range []string{validV1, validV1WithPacketVersion, validV2} {
+		if err := validateStructured("packets", []byte(doc)); err != nil {
+			t.Fatalf("valid packet plan rejected: %v", err)
+		}
+	}
+	for _, test := range []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{name: "unknown schema", doc: strings.Replace(validV1, `"schema_version":1`, `"schema_version":3`, 1), want: "schema_version"},
+		{name: "unknown root field", doc: strings.Replace(validV1, `"packets":`, `"delegate":"x","packets":`, 1), want: "packet plan field"},
+		{name: "unknown packet field", doc: strings.Replace(validV1, `"summary":"general"`, `"model":"x","summary":"general"`, 1), want: "packet field"},
+		{name: "missing v2 packet schema", doc: strings.Replace(validV2, `"schema_version":2,"packet_id"`, `"packet_id"`, 1), want: "schema_version"},
+		{name: "mismatched v2 packet schema", doc: strings.Replace(validV2, `"schema_version":2,"packet_id"`, `"schema_version":1,"packet_id"`, 1), want: "schema_version"},
+		{name: "missing v2 kind", doc: strings.Replace(validV2, `,"implementation_kind":"ui"`, "", 1), want: "implementation_kind"},
+		{name: "unknown v2 kind", doc: strings.Replace(validV2, `"implementation_kind":"ui"`, `"implementation_kind":"other"`, 1), want: "implementation_kind"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateStructured("packets", []byte(test.doc)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -1432,6 +1641,605 @@ func TestRoundtableSkipsReviewWhenArtifactIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestRoundtableAcceptsUnchangedArtifactWithOnlyAdvisoryFeedback(t *testing.T) {
+	agents := &recordingAgents{}
+	runner := withPanel(&NativeRunner{agents: agents}, configuredTestRoundtable(t))
+	artifact := wfe.Artifact{Type: "frozen_diff", Content: []byte("unchanged reviewed diff")}
+	artifact.Hash = wfe.Hash(artifact.Content)
+	prior := &wfe.ReviewFeedback{SchemaVersion: 1, ArtifactHash: artifact.Hash, Findings: []wfe.Finding{{
+		ID: "polish", Persona: "chairman", Severity: "nit", Summary: "optional wording polish",
+	}}}
+	result, err := runner.roundtable(context.Background(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_advisory", Worktree: "/worktree"},
+		Node:     wfe.Node{ID: "doc_gate", Block: "gate.roundtable", Params: map[string]any{"roundtable": "default"}},
+		Inputs:   map[string]wfe.Artifact{"src": artifact},
+		Feedback: prior,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 0 {
+		t.Fatalf("panel was re-invoked on an unchanged artifact: %d delegate requests", len(agents.requests))
+	}
+	if result.Status != StepAdvanced || result.Feedback == nil || len(result.Feedback.Findings) != 1 {
+		t.Fatalf("result=%+v, want advanced with advisory feedback preserved", result)
+	}
+}
+
+func TestForeachRejectsInvalidImplementationKindBeforeCreatingChildren(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_invalid_packets", Repo: "repo", ProposalPath: "invalid", WorkflowName: "build", StartStage: "slices"}); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte(`{"schema_version":2,"packets":[{"schema_version":2,"packet_id":"p1","summary":"bad","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["bad"]}]}`)
+	runner := &NativeRunner{db: store, artifacts: artifacts}
+	_, err = runner.foreach(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_invalid_packets", Repo: "repo"},
+		Node:     wfe.Node{ID: "slices", Block: "foreach.workflow"},
+		Inputs:   map[string]wfe.Artifact{"packets": {Type: "packets", Content: content, Hash: wfe.Hash(content)}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "implementation_kind") {
+		t.Fatalf("invalid v2 packet error=%v, want implementation_kind rejection", err)
+	}
+	children, childErr := store.Children(t.Context(), "wi_invalid_packets")
+	if childErr != nil {
+		t.Fatal(childErr)
+	}
+	if len(children) != 0 {
+		t.Fatalf("invalid plan created children: %+v", children)
+	}
+}
+
+func TestPacketImplementationKind(t *testing.T) {
+	general := `{"schema_version":2,"packet_id":"p1","summary":"general","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
+	ui := strings.Replace(general, `"implementation_kind":"general"`, `"implementation_kind":"ui"`, 1)
+	for _, test := range []struct {
+		name     string
+		version  int
+		proposal string
+		want     string
+	}{
+		{name: "legacy", version: 0, proposal: "not a packet", want: "general"},
+		{name: "v1", version: 1, proposal: "not a packet", want: "general"},
+		{name: "general", version: 2, proposal: general, want: "general"},
+		{name: "ui", version: 2, proposal: ui, want: "ui"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := packetImplementationKind(db1.WorkItem{PacketSchemaVersion: test.version}, test.proposal)
+			if err != nil || got != test.want {
+				t.Fatalf("delegate=%q err=%v, want %q", got, err, test.want)
+			}
+		})
+	}
+	if _, err := packetImplementationKind(db1.WorkItem{PacketSchemaVersion: 2}, strings.Replace(general, `"implementation_kind":"general"`, `"implementation_kind":"other"`, 1)); err == nil {
+		t.Fatal("unknown version-2 implementation_kind was accepted")
+	}
+}
+
+func TestImplementationKindRoutesBeforeDispatch(t *testing.T) {
+	repo, _ := setupSliceRepo(t)
+	gitRun(t, repo, "remote", "add", "origin", repo)
+	gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+	gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &rejectDelegateAgents{}
+	runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+	for _, test := range []struct {
+		name         string
+		version      int
+		proposal     string
+		wantDelegate string
+		wantPersona  string
+	}{
+		{name: "general", version: 2, proposal: `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`, wantDelegate: "muse", wantPersona: "engineer"},
+		{name: "ui", version: 2, proposal: `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"ui"}`, wantDelegate: "opus-ui", wantPersona: "ui"},
+		{name: "legacy", version: 0, proposal: "not a packet", wantDelegate: "muse", wantPersona: "engineer"},
+		{name: "v1", version: 1, proposal: "not a packet", wantDelegate: "muse", wantPersona: "engineer"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := "wi_route_" + test.name
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
+				ID: id, Repo: repo, ProposalPath: id, WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: test.version,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = runner.mutate(t.Context(), StepRequest{
+				WorkItem: item,
+				Node:     wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal: test.proposal,
+			}, false)
+			if err == nil {
+				t.Fatal("expected recording delegate failure")
+			}
+			if agents.last.Persona != test.wantPersona || agents.last.Delegate != test.wantDelegate {
+				t.Fatalf("dispatch=%+v err=%v, want persona=%q delegate=%q", agents.last, err, test.wantPersona, test.wantDelegate)
+			}
+		})
+	}
+}
+
+type mutateFallbackAgents struct {
+	mu           sync.Mutex
+	requests     []DelegateRequest
+	avail        delegate.AvailabilityClass
+	started      bool
+	costs        []float64
+	unknowns     []bool
+	errs         []error
+	agents       []string
+	participants []string
+}
+
+func TestSameSeatRetryForPreResponseAvailabilityPreservesRequest(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_same_seat_retry", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "analysis"}); err != nil {
+		t.Fatal(err)
+	}
+	agents := &mutateFallbackAgents{
+		avail:  delegate.AvailabilityClassProviderUnavailable,
+		errs:   []error{errors.New("antigravity unavailable before response")},
+		agents: []string{"antigravity", "antigravity"},
+	}
+	runner := &NativeRunner{db: store, agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_same_seat_retry"},
+		Node:     wfe.Node{ID: "analysis"},
+	}, DelegateRequest{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "ok" {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Participant != "seat-qa" || result.Agent != "antigravity" {
+		t.Fatalf("retry identity=%+v, want seat-qa/antigravity", result)
+	}
+	if len(agents.requests) != 2 {
+		t.Fatalf("requests=%d, want one same-seat retry", len(agents.requests))
+	}
+	if agents.requests[0] != agents.requests[1] || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
+		t.Fatalf("retry changed participant/persona/delegate: %+v", agents.requests)
+	}
+}
+
+func TestSameSeatRetryPreservesExplicitRetryIdentity(t *testing.T) {
+	agents := &mutateFallbackAgents{
+		avail:        delegate.AvailabilityClassProviderUnavailable,
+		errs:         []error{errors.New("antigravity unavailable before response")},
+		agents:       []string{"antigravity", "retry-agent"},
+		participants: []string{"", "retry-seat"},
+	}
+	runner := &NativeRunner{agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_same_seat_retry_explicit"},
+		Node:     wfe.Node{ID: "analysis"},
+	}, DelegateRequest{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Participant != "retry-seat" || result.Agent != "retry-agent" {
+		t.Fatalf("retry identity=%+v, want explicit retry-seat/retry-agent", result)
+	}
+}
+
+func TestDelegateGroupSameSeatRetryFillsMissingIdentity(t *testing.T) {
+	agents := &groupRetryIdentityAgents{}
+	runner := &NativeRunner{agents: agents}
+	results := runner.delegateGroup(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_group_retry_identity"},
+		Node:     wfe.Node{ID: "review"},
+	}, []DelegateRequest{{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"}})
+	if len(results) != 1 {
+		t.Fatalf("results=%d, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Fatalf("retry failed: %v", results[0].Err)
+	}
+	if results[0].Response != "ok" || results[0].Participant != "seat-qa" {
+		t.Fatalf("group retry result=%+v, want response ok and participant seat-qa", results[0])
+	}
+	if len(agents.requests) != 2 || agents.requests[1].Participant != "seat-qa" || agents.requests[1].Persona != "qa" || agents.requests[1].Delegate != "antigravity" {
+		t.Fatalf("group retry requests=%+v", agents.requests)
+	}
+}
+
+type groupRetryIdentityAgents struct {
+	requests            []DelegateRequest
+	explicitParticipant string
+}
+
+func (a *groupRetryIdentityAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	a.requests = append(a.requests, requests...)
+	return []DelegateGroupResult{{
+		Participant:       requests[0].Participant,
+		AvailabilityClass: delegate.AvailabilityClassProviderUnavailable,
+		Err:               errors.New("antigravity unavailable before response"),
+	}}
+}
+
+func (a *groupRetryIdentityAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
+	a.requests = append(a.requests, request)
+	return DelegateResult{Response: "ok", Participant: a.explicitParticipant, Agent: "antigravity"}, nil
+}
+
+func TestDelegateGroupSameSeatRetryPreservesExplicitRetryIdentity(t *testing.T) {
+	agents := &groupRetryIdentityAgents{explicitParticipant: "retry-seat"}
+	runner := &NativeRunner{agents: agents}
+	results := runner.delegateGroup(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_group_retry_explicit_identity"},
+		Node:     wfe.Node{ID: "review"},
+	}, []DelegateRequest{{Role: "review", Persona: "qa", Delegate: "antigravity", Participant: "seat-qa", Prompt: "review"}})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("results=%+v", results)
+	}
+	if results[0].Participant != "retry-seat" {
+		t.Fatalf("group retry participant=%q, want explicit retry-seat", results[0].Participant)
+	}
+}
+
+func TestFableDirectFallbackUsesSol(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi_fable_fallback", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	agents := &mutateFallbackAgents{
+		avail:  delegate.AvailabilityClassQuotaRateLimit,
+		costs:  []float64{1.5, 0.5, 2.5},
+		errs:   []error{errors.New("You've hit your session limit"), errors.New("You've hit your session limit")},
+		agents: []string{"fable", "fable", "sol"},
+	}
+	runner := &NativeRunner{db: store, agents: agents}
+	result, err := runner.delegate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{ID: "wi_fable_fallback"},
+		Node:     wfe.Node{ID: "plan"},
+	}, DelegateRequest{Role: "draft", Persona: "planner", Prompt: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "ok" || result.CostUSD != 4.5 || result.CostUnknown {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(agents.requests) != 3 || agents.requests[0].Delegate != "" || agents.requests[1] != agents.requests[0] || agents.requests[2].Delegate != "sol" {
+		t.Fatalf("requests=%+v", agents.requests)
+	}
+	events, err := store.Events(t.Context(), "wi_fable_fallback", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		found = found || event.Kind == "model_fallback" && event.Actor == "fable" && event.Detail == "to=sol reason=quota_rate_limit"
+	}
+	if !found {
+		t.Fatalf("fallback event missing: %+v", events)
+	}
+}
+
+func (a *mutateFallbackAgents) Delegate(_ context.Context, req DelegateRequest) (DelegateResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	idx := len(a.requests)
+	a.requests = append(a.requests, req)
+	cost := 0.0
+	unknown := false
+	var avail delegate.AvailabilityClass
+	started := a.started
+	var err error
+	if idx < len(a.costs) {
+		cost = a.costs[idx]
+	}
+	if idx < len(a.unknowns) {
+		unknown = a.unknowns[idx]
+	}
+	if idx == 0 {
+		avail = a.avail
+	}
+	if idx < len(a.errs) {
+		err = a.errs[idx]
+	}
+	agent := ""
+	if idx < len(a.agents) {
+		agent = a.agents[idx]
+	}
+	participant := ""
+	if idx < len(a.participants) {
+		participant = a.participants[idx]
+	}
+	result := DelegateResult{Agent: agent, Participant: participant, AvailabilityClass: avail, ResponseStarted: started, CostUSD: cost, CostUnknown: unknown}
+	if err != nil {
+		return result, err
+	}
+	return DelegateResult{Response: "ok", Agent: agent, Participant: participant, CostUSD: cost, CostUnknown: unknown}, nil
+}
+
+func TestMuseFallbackRetriesOnAvailabilityClasses(t *testing.T) {
+	classes := []delegate.AvailabilityClass{
+		delegate.AvailabilityClassQuotaRateLimit,
+		delegate.AvailabilityClassCapacity,
+		delegate.AvailabilityClassCapacityDeadline,
+		delegate.AvailabilityClassAuthenticationSession,
+		delegate.AvailabilityClassProviderCLIUnavailable,
+		delegate.AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(string(class), func(t *testing.T) {
+			repo, _ := setupSliceRepo(t)
+			gitRun(t, repo, "remote", "add", "origin", repo)
+			gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+			gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+			store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agents := &mutateFallbackAgents{
+				avail:    class,
+				started:  false,
+				costs:    []float64{1.5, 2.5, 3.5},
+				unknowns: []bool{false, false, false},
+				errs: []error{
+					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable"), CostUSD: 1.5, CostKnown: true, AvailabilityClass: class},
+					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable on same-seat retry"), CostUSD: 2.5, CostKnown: true, AvailabilityClass: class},
+					errors.New("luna also unavailable"),
+				},
+			}
+			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
+				ID: "wi_fallback_" + string(class), Repo: repo, ProposalPath: "p", WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), "wi_fallback_"+string(class))
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
+			_, err = runner.mutate(t.Context(), StepRequest{
+				WorkItem: item,
+				Node:     wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal: proposal,
+			}, false)
+			if err == nil {
+				t.Fatal("expected fallback error")
+			}
+			agents.mu.Lock()
+			reqs := append([]DelegateRequest(nil), agents.requests...)
+			agents.mu.Unlock()
+			if len(reqs) != 3 {
+				t.Fatalf("requests=%d, want 3 for class %q", len(reqs), class)
+			}
+			if reqs[0].Delegate != "muse" || reqs[0].Persona != "engineer" {
+				t.Fatalf("primary dispatch=%+v, want muse/engineer", reqs[0])
+			}
+			if reqs[1].Delegate != "muse" || reqs[1].Persona != "engineer" {
+				t.Fatalf("same-seat retry dispatch=%+v, want muse/engineer", reqs[1])
+			}
+			if reqs[2].Delegate != "luna" || reqs[2].Persona != "engineer" {
+				t.Fatalf("fallback dispatch=%+v, want luna/engineer", reqs[2])
+			}
+			if reqs[0].Prompt != reqs[2].Prompt || reqs[0].Workdir != reqs[2].Workdir || reqs[0].Role != reqs[2].Role || reqs[0].Tools != reqs[2].Tools {
+				t.Fatalf("luna request not identical except delegate: primary=%+v fallback=%+v", reqs[0], reqs[2])
+			}
+			var execErr *delegate.DelegateExecutionError
+			if !errors.As(err, &execErr) {
+				t.Fatalf("fallback error is not DelegateExecutionError: %v", err)
+			}
+			if execErr.CostUSD != 7.5 {
+				t.Fatalf("combined cost=%v, want 7.5 (1.5+2.5+3.5)", execErr.CostUSD)
+			}
+			if execErr.CostKnown == false {
+				t.Fatalf("combined cost should be known when both attempts known")
+			}
+		})
+	}
+}
+
+func TestMuseFallbackNotTriggered(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		avail     delegate.AvailabilityClass
+		started   bool
+		replay    bool
+		wantCalls int
+	}{
+		{name: "unclassified", kind: "general", avail: delegate.AvailabilityClassNone, started: false, replay: false, wantCalls: 1},
+		{name: "response-started", kind: "general", avail: delegate.AvailabilityClassCapacity, started: true, replay: false, wantCalls: 1},
+		{name: "replay-only", kind: "general", avail: delegate.AvailabilityClassCapacity, started: false, replay: true, wantCalls: 1},
+		{name: "ui-opus", kind: "ui", avail: delegate.AvailabilityClassCapacity, started: false, replay: false, wantCalls: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := setupSliceRepo(t)
+			gitRun(t, repo, "remote", "add", "origin", repo)
+			gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+			gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+			store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agents := &mutateFallbackAgents{
+				avail:   tc.avail,
+				started: tc.started,
+				costs:   []float64{1.0},
+				errs:    []error{errors.New("primary failed"), errors.New("same-seat retry failed")},
+			}
+			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+			id := "wi_nofallback_" + tc.name
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{
+				ID: id, Repo: repo, ProposalPath: id, WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"` + tc.kind + `"}`
+			_, err = runner.mutate(t.Context(), StepRequest{
+				WorkItem:   item,
+				Node:       wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}},
+				Proposal:   proposal,
+				ReplayOnly: tc.replay,
+			}, false)
+			if err == nil {
+				t.Fatal("expected primary error")
+			}
+			agents.mu.Lock()
+			calls := len(agents.requests)
+			agents.mu.Unlock()
+			if calls != tc.wantCalls {
+				t.Fatalf("calls=%d, want %d for case %q", calls, tc.wantCalls, tc.name)
+			}
+			if tc.name == "ui-opus" && agents.requests[0].Delegate != "opus-ui" {
+				t.Fatalf("ui dispatch=%+v, want opus-ui", agents.requests[0])
+			}
+			if tc.name != "ui-opus" && tc.name != "unclassified" && agents.requests[0].Delegate != "muse" {
+				t.Fatalf("dispatch=%+v, want muse", agents.requests[0])
+			}
+		})
+	}
+}
+
+func TestMuseFallbackCostUnknownPropagates(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		unknowns    []bool
+		execPrimary bool
+	}{
+		{name: "primary-result-unknown", unknowns: []bool{true, false, false}},
+		{name: "same-seat-result-unknown", unknowns: []bool{false, true, false}},
+		{name: "luna-result-unknown", unknowns: []bool{false, false, true}},
+		{name: "primary-exec-zero-unknown", unknowns: []bool{false, false, false}, execPrimary: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := setupSliceRepo(t)
+			gitRun(t, repo, "remote", "add", "origin", repo)
+			gitRun(t, repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+			gitRun(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+			store, err := db1.Open(filepath.Join(t.TempDir(), "aimee.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			worktrees, err := NewWorktreeManager(store, filepath.Join(t.TempDir(), "trees"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := wfe.NewArtifactStore(filepath.Join(t.TempDir(), "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var errs []error
+			retryErr := &delegate.DelegateExecutionError{Err: errors.New("muse unavailable on same-seat retry"), CostUSD: 2.3, CostKnown: true, AvailabilityClass: delegate.AvailabilityClassCapacity}
+			if tc.execPrimary {
+				errs = []error{
+					&delegate.DelegateExecutionError{Err: errors.New("muse unavailable"), CostUSD: 0, CostKnown: false, AvailabilityClass: delegate.AvailabilityClassCapacity},
+					retryErr,
+					errors.New("luna also unavailable"),
+				}
+			} else {
+				errs = []error{errors.New("muse unavailable"), retryErr, errors.New("luna also unavailable")}
+			}
+			costs := []float64{1.2, 2.3, 3.4}
+			if tc.execPrimary {
+				costs[0] = 0
+			}
+			agents := &mutateFallbackAgents{
+				avail:    delegate.AvailabilityClassCapacity,
+				started:  false,
+				costs:    costs,
+				unknowns: tc.unknowns,
+				errs:     errs,
+			}
+			runner := &NativeRunner{db: store, worktrees: worktrees, agents: agents, artifacts: artifacts}
+			id := "wi_fallback_unknown_" + tc.name
+			if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: id, Repo: repo, ProposalPath: "p", WorkflowName: "slice", StartStage: "impl", PacketSchemaVersion: 2}); err != nil {
+				t.Fatal(err)
+			}
+			item, err := store.WorkItem(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal := `{"schema_version":2,"packet_id":"p1","summary":"work","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["done"],"implementation_kind":"general"}`
+			_, err = runner.mutate(t.Context(), StepRequest{WorkItem: item, Node: wfe.Node{ID: "impl", Params: map[string]any{"delegate": "configured"}}, Proposal: proposal}, false)
+			if err == nil {
+				t.Fatal("expected fallback error")
+			}
+			var execErr *delegate.DelegateExecutionError
+			if !errors.As(err, &execErr) {
+				t.Fatalf("fallback error not DelegateExecutionError: %v", err)
+			}
+			if execErr.CostKnown {
+				t.Fatalf("CostKnown=true for %q, want false when either attempt unknown", tc.name)
+			}
+			if !errors.Is(execErr.Err, errs[len(errs)-1]) {
+				t.Fatalf("fallback Err does not preserve lunaErr for errors.Is: %v", execErr.Err)
+			}
+		})
+	}
+}
+
+func TestMutateRejectsInvalidV2PacketBeforeDispatch(t *testing.T) {
+	runner := &NativeRunner{}
+	_, err := runner.mutate(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{PacketSchemaVersion: 2},
+		Proposal: `{"schema_version":2,"packet_id":"p1","summary":"bad","target_blocks":["implement"],"dependencies":[],"acceptance_criteria":["bad"]}`,
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "implementation_kind") {
+		t.Fatalf("mutate error=%v, want invalid packet rejection before dispatch", err)
+	}
+}
+
 // A refinement loop regenerates byte-identical packets. The fanout generation
 // in the child id makes those children distinct rows, so the packet identity
 // recorded alongside them must be generation-scoped too. Keying it on the
@@ -1471,8 +2279,10 @@ func TestForeachRespawnsIdenticalPacketsInALaterGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &NativeRunner{db: store, artifacts: artifacts, workflows: registry}
-	packets := wfe.Artifact{Type: "packets", Content: []byte(
-		`{"packets":[{"packet_id":"p1","summary":"implement","target_blocks":["implement"]}]}`)}
+	packetBytes := []byte(`{"schema_version":2,"packet_id": "p1", "summary":"implement", "target_blocks":["implement"], "dependencies":[], "acceptance_criteria":["implemented"], "implementation_kind":"general"}`)
+	packetsContent := append([]byte(`{"schema_version":2,"packets":[`), packetBytes...)
+	packetsContent = append(packetsContent, []byte(`]}`)...)
+	packets := wfe.Artifact{Type: "packets", Content: packetsContent}
 	packets.Hash = wfe.Hash(packets.Content)
 	parent, err := store.WorkItem(t.Context(), parentID)
 	if err != nil {
@@ -1494,6 +2304,20 @@ func TestForeachRespawnsIdenticalPacketsInALaterGeneration(t *testing.T) {
 	firstGeneration := childIDs(t, store, parentID)
 	if len(firstGeneration) != 1 {
 		t.Fatalf("first fanout spawned %d children, want 1", len(firstGeneration))
+	}
+	childContent, err := artifacts.Proposal(firstGeneration[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(childContent) != string(packetBytes) {
+		t.Fatalf("child packet bytes changed: %q, want %q", childContent, packetBytes)
+	}
+	childItem, err := store.WorkItem(t.Context(), firstGeneration[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childItem.PacketSchemaVersion != 2 {
+		t.Fatalf("child packet schema version=%d, want 2", childItem.PacketSchemaVersion)
 	}
 
 	// Same generation, identical packets: the id dedup must hold, with no
@@ -1522,6 +2346,10 @@ func TestForeachRespawnsIdenticalPacketsInALaterGeneration(t *testing.T) {
 	if !strings.Contains(secondGeneration[0], ".g0.") || !strings.Contains(secondGeneration[1], ".g1.") {
 		t.Fatalf("children are not generation-scoped: %v", secondGeneration)
 	}
+}
+
+func TestForeachPreservesVersionedPacketBytes(t *testing.T) {
+	TestForeachRespawnsIdenticalPacketsInALaterGeneration(t)
 }
 
 func childIDs(t *testing.T, store *db1.Store, parentID string) []string {
@@ -1762,7 +2590,7 @@ func chairmanTestRoundtable(t *testing.T) *roundtablecfg.Store {
 	t.Helper()
 	dir := t.TempDir()
 	body := `{"name":"default","seats":[{"model":"","persona":"qa"},{"model":"","persona":"reviewer"}],` +
-		`"min_successful":2,"chairman":"$random","chairman_enabled":true}`
+		`"min_successful":2,"chairman":"$random","chairman_fallback":"$random","chairman_enabled":true}`
 	if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

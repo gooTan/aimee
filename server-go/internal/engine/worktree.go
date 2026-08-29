@@ -118,13 +118,16 @@ func (m *WorktreeManager) Ensure(ctx context.Context, item db1.WorkItem, feature
 	path := expected
 	base := "HEAD"
 	if feature {
-		trunk, trunkErr := repoDefaultBranch(ctx, repo)
-		if trunkErr != nil {
-			return "", "", trunkErr
+		integration, integrationErr := repoIntegrationBranch(ctx, repo)
+		if integrationErr != nil {
+			return "", "", integrationErr
 		}
-		base = "origin/" + trunk
-		if _, checkErr := gitText(ctx, repo, "rev-parse", "--verify", base+"^{commit}"); checkErr != nil {
-			base = trunk
+		base = integration
+		remote := "origin/" + integration
+		_, _ = gitText(ctx, repo, "fetch", "--quiet", "origin",
+			"+refs/heads/"+integration+":refs/remotes/"+remote)
+		if _, checkErr := gitText(ctx, repo, "rev-parse", "--verify", remote+"^{commit}"); checkErr == nil {
+			base = remote
 		}
 	} else if item.ParentID != "" {
 		base = "aimee/feat/" + item.ParentID

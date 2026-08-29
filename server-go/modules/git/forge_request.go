@@ -24,6 +24,7 @@ const (
 	OpPRInfo        = "pr_info"
 	OpPREdit        = "pr_edit"
 	OpPRMerge       = "pr_merge"
+	OpRepoFork      = "repo_fork"
 )
 
 const (
@@ -107,8 +108,10 @@ type ForgeResponse struct {
 	// apart here rather than left for a caller to guess: retrying a conflict
 	// reproduces it exactly, and giving up on a lost race abandons a merge that
 	// would have succeeded.
-	Conflict  bool `json:"conflict,omitempty"`
-	Retryable bool `json:"retryable,omitempty"`
+	Conflict     bool   `json:"conflict,omitempty"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	ForkFullName string `json:"fork_full_name,omitempty"`
+	ForkURL      string `json:"fork_url,omitempty"`
 }
 
 // isMergeConflict matches the forge's conflict wording, observed live as "Pull
@@ -401,6 +404,23 @@ func PerformForge(request ForgeRequest) ForgeResponse {
 			return out
 		}
 		return ForgeResponse{Status: status, Error: message}
+
+	case OpRepoFork:
+		status, payload, err := forgeCall(http.MethodPost, repo+"/forks", request.Token, nil)
+		if err != nil {
+			return ForgeResponse{Error: "forge: " + err.Error()}
+		}
+		if status < 200 || status > 299 {
+			return ForgeResponse{Status: status, Error: forgeError(status, payload, "repo fork")}
+		}
+		var decoded struct {
+			FullName string `json:"full_name"`
+			HTMLURL  string `json:"html_url"`
+		}
+		if json.Unmarshal(payload, &decoded) != nil {
+			return ForgeResponse{Status: status, Error: "repo fork: unreadable response"}
+		}
+		return ForgeResponse{Status: status, ForkFullName: decoded.FullName, ForkURL: decoded.HTMLURL}
 	}
 	return ForgeResponse{Error: "forge: unsupported operation " + strings.TrimSpace(request.Op)}
 }

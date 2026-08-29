@@ -161,7 +161,7 @@ func TestSeatFailureCategoriesNameTheTransportCause(t *testing.T) {
 			t.Fatalf("seatFailureCategory(%v) = %q, want %q", tc.err, got, tc.want)
 		}
 	}
-	result := seatResult("", "", 0, false, delegate.ErrDelegateReplayUnavailable)
+	result := seatResult("", "", 0, false, delegate.AvailabilityClassNone, delegate.ErrDelegateReplayUnavailable)
 	if !result.ReplayLost {
 		t.Fatal("a lost replay was not marked, so the caller would park instead of recovering")
 	}
@@ -170,11 +170,63 @@ func TestSeatFailureCategoriesNameTheTransportCause(t *testing.T) {
 	}
 }
 
+func TestSeatBusForwardsAvailabilityClass(t *testing.T) {
+	err := &delegate.DelegateExecutionError{Err: errors.New("provider unavailable"), AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}
+	result := seatResult("", "", 0, false, delegate.AvailabilityClassProviderUnavailable, err)
+	if result.AvailabilityClass != delegate.AvailabilityClassProviderUnavailable || result.ReplayLost {
+		t.Fatalf("availability class was not forwarded independently: %+v", result)
+	}
+}
+
+func TestSeatBusReportsLiveModelEvents(t *testing.T) {
+	var events []ModelEvent
+	seats := seatBus{observer: func(event ModelEvent) { events = append(events, event) }}
+	finish := seats.observe(panel.Run{ID: "wi_panel", Stage: "plan_gate", ExecutionVersion: "turn-9"}, panel.SeatRequest{
+		Role: "review", Persona: "qa", Selector: "sol", Tools: true,
+		DurableSlot: "panel:x:discussion:1:seat:0", FallbackFrom: "fable", FallbackReason: "quota_rate_limit",
+	})
+	finish(panel.SeatResult{Participant: "sol"})
+	if len(events) != 3 || events[0].Kind != "model_fallback" || events[0].Actor != "fable" ||
+		events[1].Kind != "model_dispatch" || events[1].Actor != "sol" || events[2].Kind != "model_complete" ||
+		!strings.Contains(events[1].Detail, "model=sol role=review persona=qa phase=discussion invocation=turn-9") {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
 func TestSeatFailureDetailIsRedacted(t *testing.T) {
 	result := seatResult("", "", 0, false,
+		delegate.AvailabilityClassNone,
 		errorString("launch failed: authorization: bearer sk-live-secret-value"))
 	if strings.Contains(result.FailureDetail, "sk-live-secret-value") {
 		t.Fatalf("credential survived into a durable seat failure: %q", result.FailureDetail)
+	}
+}
+
+func TestSeatBusReportsToolEventsWithPhase(t *testing.T) {
+	var events []ModelEvent
+	bus := seatBus{
+		observer: func(e ModelEvent) { events = append(events, e) },
+	}
+	run := panel.Run{ID: "wi_tool_round", Stage: "gate"}
+	seat := panel.SeatRequest{Role: "review", Persona: "security", Selector: "sol", Tools: true, DurableSlot: "panel:x:discussion:1:seat:0"}
+	bus.emitToolEvents(run, seat, "sol", []delegate.ToolEvent{
+		{ToolName: "Grep", CallID: "call-1", Status: "started"},
+		{ToolName: "Grep", CallID: "call-1", Status: "completed", ElapsedMS: 80},
+	})
+	var foundStart, foundComplete bool
+	for _, ev := range events {
+		if ev.Kind == delegate.ToolEventStart && strings.Contains(ev.Detail, "tool=Grep") && strings.Contains(ev.Detail, "phase=discussion") {
+			foundStart = true
+		}
+		if ev.Kind == delegate.ToolEventComplete && strings.Contains(ev.Detail, "call_id=call-1") && strings.Contains(ev.Detail, "phase=discussion") {
+			foundComplete = true
+		}
+		if strings.Contains(ev.Detail, "supersecret") {
+			t.Fatalf("secret leaked: %+v", ev)
+		}
+	}
+	if !foundStart || !foundComplete {
+		t.Fatalf("tool events not reported with phase: %+v", events)
 	}
 }
 

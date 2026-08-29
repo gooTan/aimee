@@ -53,7 +53,7 @@ def main() -> int:
             classification = "required" if module_id in required else "optional"
             if item.get("classification") != classification:
                 return fail(f"{module_id}: classification mismatch")
-            if item.get("repository") != f"{exporter.REMOTE_ROOT}/aimee-module-{module_id}.git":
+            if item.get("repository") != exporter.module_remote(module_id):
                 return fail(f"{module_id}: unexpected repository")
             if item.get("version") != version or item.get("ref") != f"v{version}":
                 return fail(f"{module_id}: version is not pinned to v{version}")

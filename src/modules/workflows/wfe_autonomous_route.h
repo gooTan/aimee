@@ -2,24 +2,18 @@
  *
  * S4 of primary-as-manager: route the AUTONOMOUS surfaces (/v1/dev/submit with an
  * omitted workflow, and sweep filing) through the same request->workflow router
- * as the interactive surface, instead of silently defaulting to "build" /
- * "manual-review". This is the pure decision policy; the catalog load + the
+ * as the interactive surface. This is the pure decision policy; the catalog load + the
  * wfe_router_decide call + the lifecycle_event logging are integration layers in
  * the server (rh_dev_submit / server_sweep) built ON TOP of this core, kept out
  * of here so the policy is unit-testable with no I/O.
  *
  * Rulings folded from the S4 design roundtable (2026-07-03, non-degraded 6/6):
- *  - Q2: the omitted-workflow floor is `managed-change` (a FULL-SPINE enforced
- *    workflow: review + gate.roundtable + terminal gate.deliver), NOT `build`.
- *    Autonomous submissions get the same manager spine as interactive ones;
- *    `build` preserves the weaker pre-gate.deliver posture and is reachable only
- *    by explicit name.
+ *  - The omitted-workflow floor is the canonical `build` workflow.
  *  - Q5 (the fourth invariant): the autonomous router's selectable set is a
  *    fixed FULL-SPINE allowlist that excludes read-only AND review-bypassing
  *    lanes -- a shaped proposal can at worst pick among spine-carrying lanes,
  *    never bypass review.
- *  - Q3: sweep candidates are UNVETTED; they always hit a human gate
- *    (`manual-review`), never an auto-executing lane.
+ *  - Sweep filing is disabled until a canonical human-review workflow exists.
  */
 #ifndef DEC_WFE_AUTONOMOUS_ROUTE_H
 #define DEC_WFE_AUTONOMOUS_ROUTE_H 1
@@ -27,10 +21,10 @@
 /* The autonomous omitted-workflow floor: a full-spine enforced workflow.
  * Mirrored as AutonomousFloor in server-go/modules/workflows/autonomous.go; both
  * sides assert the value so they cannot drift. */
-#define WFE_AUTONOMOUS_FLOOR "managed-change"
+#define WFE_AUTONOMOUS_FLOOR "build"
 
 /* The sweep human-gate floor, mirrored as SweepWorkflowFloor module-side. */
-#define WFE_SWEEP_WORKFLOW_FLOOR "manual-review"
+#define WFE_SWEEP_WORKFLOW_FLOOR ""
 
 /* Longest workflow id the clamp will hold. A name that does not fit is treated
  * as not selectable rather than truncated into a different lane. */
@@ -50,10 +44,8 @@ int wfe_autonomous_selectable(const char *id, int enforced);
  * set to 1 when the floor was substituted, 0 otherwise. */
 const char *wfe_autonomous_clamp(const char *router_id, int enforced, int *out_clamped);
 
-/* The sweep human-gate floor ("manual-review"). Sweep candidates are UNVETTED
- * heuristic finds; they must ALWAYS hit a human gate, never an auto-executing
- * lane -- so sweep filing is a fixed floor, not a content router (which would
- * only add misroute risk for zero safety benefit). */
+/* The sweep human-gate floor. Empty disables filing rather than routing unvetted
+ * candidates into an auto-executing workflow. */
 const char *wfe_sweep_workflow_floor(void);
 
 #endif /* DEC_WFE_AUTONOMOUS_ROUTE_H */

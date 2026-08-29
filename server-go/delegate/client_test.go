@@ -14,18 +14,20 @@ import (
 )
 
 type recordingCaller struct {
-	request []byte
-	result  InvocationResult
-	reply   []byte
-	err     error
+	request  []byte
+	deadline time.Duration
+	result   InvocationResult
+	reply    []byte
+	err      error
 }
 
 type groupRoutingCaller struct {
-	mu            sync.Mutex
-	plannedModels []string
-	planError     string
-	invokedModels []string
-	plan          GroupPlan
+	mu               sync.Mutex
+	plannedModels    []string
+	planError        string
+	invocationResult InvocationResult
+	invokedModels    []string
+	plan             GroupPlan
 }
 
 func (c *groupRoutingCaller) Call(_ context.Context, _, stage uint32, _ uint64,
@@ -43,16 +45,21 @@ func (c *groupRoutingCaller) Call(_ context.Context, _, stage uint32, _ uint64,
 		return nil, err
 	}
 	c.invokedModels = append(c.invokedModels, invocation.Model)
-	return json.Marshal(InvocationResult{Version: WireVersion, Status: "done",
-		Agent: invocation.Model, Response: "ok"})
+	result := c.invocationResult
+	if result.Status == "" {
+		result = InvocationResult{Version: WireVersion, Status: "done", Response: "ok"}
+	}
+	result.Agent = invocation.Model
+	return json.Marshal(result)
 }
 
 func (c *recordingCaller) Call(_ context.Context, kind, stage uint32, _ uint64,
-	_ time.Duration, request []byte) ([]byte, error) {
+	deadline time.Duration, request []byte) ([]byte, error) {
 	if kind != EventKind || stage != StageInvoke {
 		panic("wrong delegate stage")
 	}
 	c.request = append([]byte(nil), request...)
+	c.deadline = deadline
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -60,6 +67,27 @@ func (c *recordingCaller) Call(_ context.Context, kind, stage uint32, _ uint64,
 		return c.reply, nil
 	}
 	return json.Marshal(c.result)
+}
+
+func TestDelegateIsUnboundedWhenNoDeadlineIsConfigured(t *testing.T) {
+	caller := &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "done", Response: "ok"}}
+	client, err := NewClient(caller, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	if caller.deadline != 0 {
+		t.Fatalf("bus deadline = %s, want unbounded", caller.deadline)
+	}
+	var wire Invocation
+	if err := json.Unmarshal(caller.request, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.ExecutionTimeoutMS != 0 {
+		t.Fatalf("execution timeout = %d, want unbounded", wire.ExecutionTimeoutMS)
+	}
 }
 
 func TestBusWireOmitsCallerLifecycleState(t *testing.T) {
@@ -150,6 +178,116 @@ func TestDispatchBoundaryClassifiesBusAndReplyFailures(t *testing.T) {
 		if !errors.As(err, &execution) || !execution.Dispatched || execution.CostKnown {
 			t.Fatalf("post-dispatch reply %q classified as %#v", postDispatch, err)
 		}
+	}
+	deadlineCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	deadlineClient := &BusClient{caller: &recordingCaller{}, deadline: time.Second}
+	result, err := deadlineClient.Delegate(deadlineCtx, request)
+	if err == nil || result.AvailabilityClass != AvailabilityClassStartDeadline {
+		t.Fatalf("pre-dispatch deadline was not classified: result=%+v err=%v", result, err)
+	}
+	transportDeadline := &BusClient{caller: &recordingCaller{err: bus.ErrModuleCallDeadline}, deadline: time.Second}
+	result, err = transportDeadline.Delegate(t.Context(), request)
+	if err == nil || result.AvailabilityClass != AvailabilityClassNone {
+		t.Fatalf("post-dispatch reply loss was classified as retryable: result=%+v err=%v", result, err)
+	}
+}
+
+func TestClassifyAvailability(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		began bool
+		want  AvailabilityClass
+	}{
+		{name: "quota diagnostic", err: errors.New("provider quota exceeded")},
+		{name: "rate limit diagnostic", err: errors.New("aimee_err=rate_limit"), want: AvailabilityClassQuotaRateLimit},
+		{name: "capacity", err: ErrDelegateCapacity, want: AvailabilityClassCapacity},
+		{name: "capacity deadline diagnostic", err: errors.New("aimee_err=capacity_deadline"), want: AvailabilityClassCapacity},
+		{name: "authentication diagnostic", err: errors.New("authentication failed")},
+		{name: "session outage", err: errors.New("session unavailable")},
+		{name: "provider diagnostic", err: errors.New("provider unavailable")},
+		{name: "missing cli", err: errors.New("no enabled delegate CLI is configured")},
+		{name: "deadline", err: ErrDelegateExecutionDeadline},
+		{name: "response started", err: errors.New("quota exceeded"), began: true},
+		{name: "replay", err: ErrDelegateReplayUnavailable},
+		{name: "terminal", err: ErrDelegateTerminal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyAvailability(tc.err, tc.began); got != tc.want {
+				t.Fatalf("ClassifyAvailability(%v, %v) = %q, want %q", tc.err, tc.began, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClassifyProviderAvailabilityRecognizesClaudeSessionLimit(t *testing.T) {
+	if got := ClassifyProviderAvailability(errors.New("provider quota exceeded: You've hit your session limit · resets 1:20am"), false); got != AvailabilityClassQuotaRateLimit {
+		t.Fatalf("class=%q, want %q", got, AvailabilityClassQuotaRateLimit)
+	}
+}
+
+func TestDelegateCarriesAvailabilityClass(t *testing.T) {
+	client := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
+		Agent: "fable", Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable}}, deadline: time.Second}
+	result, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
+	if err == nil || result.AvailabilityClass != AvailabilityClassProviderUnavailable || result.Agent != "fable" || result.Participant != "fable" {
+		t.Fatalf("single delegate lost availability class: result=%+v err=%v", result, err)
+	}
+
+	group := &BusClient{caller: &groupRoutingCaller{planError: ErrDelegateCapacity.Error()}, deadline: time.Second}
+	results := group.DelegateGroup(t.Context(), []DelegateRequest{{Role: "review", Persona: "qa", Prompt: "review"}})
+	if len(results) != 1 || results[0].AvailabilityClass != AvailabilityClassCapacity {
+		t.Fatalf("group planning lost availability class: %+v", results)
+	}
+
+	partial := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion, Status: "failed",
+		Response: "partial output", Error: "provider unavailable", AvailabilityClass: AvailabilityClassProviderUnavailable, ResponseStarted: true}}, deadline: time.Second}
+	result, err = partial.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
+	if err == nil || result.AvailabilityClass != AvailabilityClassNone || !result.ResponseStarted {
+		t.Fatalf("partial response was classified as unavailable: result=%+v err=%v", result, err)
+	}
+}
+
+func TestDelegateCarriesEveryAvailabilityClass(t *testing.T) {
+	classes := []AvailabilityClass{
+		AvailabilityClassQuotaRateLimit,
+		AvailabilityClassCapacity,
+		AvailabilityClassCapacityDeadline,
+		AvailabilityClassAuthenticationSession,
+		AvailabilityClassProviderCLIUnavailable,
+		AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(class, func(t *testing.T) {
+			client := &BusClient{caller: &recordingCaller{result: InvocationResult{Version: WireVersion,
+				Status: "failed", Error: "transport failure", AvailabilityClass: class}}, deadline: time.Second}
+			result, err := client.Delegate(t.Context(), DelegateRequest{Role: "review", Persona: "qa", Prompt: "review"})
+			if err == nil || result.AvailabilityClass != class || result.ResponseStarted {
+				t.Fatalf("metadata was not preserved: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestDelegateGroupCarriesEveryAvailabilityClass(t *testing.T) {
+	classes := []AvailabilityClass{
+		AvailabilityClassQuotaRateLimit,
+		AvailabilityClassCapacity,
+		AvailabilityClassCapacityDeadline,
+		AvailabilityClassAuthenticationSession,
+		AvailabilityClassProviderCLIUnavailable,
+		AvailabilityClassStartDeadline,
+	}
+	for _, class := range classes {
+		t.Run(class, func(t *testing.T) {
+			client := &BusClient{caller: &groupRoutingCaller{plannedModels: []string{"agent"},
+				invocationResult: InvocationResult{Version: WireVersion, Status: "failed", Error: "transport failure", AvailabilityClass: class}}, deadline: time.Second}
+			results := client.DelegateGroup(t.Context(), []DelegateRequest{{Role: "review", Persona: "qa", Prompt: "review"}})
+			if len(results) != 1 || results[0].AvailabilityClass != class || results[0].ResponseStarted {
+				t.Fatalf("group metadata was not preserved: %+v", results)
+			}
+		})
 	}
 }
 
@@ -253,5 +391,12 @@ func TestSafeDiagnosticPreservesWireClassificationSlugs(t *testing.T) {
 		if got := SafeDiagnostic(err.Error()); got != err.Error() {
 			t.Fatalf("wire classification slug changed: got %q want %q", got, err)
 		}
+	}
+}
+
+func TestSafeDiagnosticSummaryBoundsOutputAndPreservesTail(t *testing.T) {
+	got := SafeDiagnosticSummary(strings.Repeat("startup ", 1_000)+"You've hit your session limit", 256)
+	if len(got) > 256 || !strings.Contains(got, "[truncated]") || !strings.HasSuffix(got, "You've hit your session limit") {
+		t.Fatalf("summary=%q len=%d", got, len(got))
 	}
 }

@@ -10,6 +10,27 @@
 
 #define CLAUDE_ARG_MAX 48
 
+static int claude_legacy_terminal_result(const char *result)
+{
+   static const char *const prefixes[] = {
+       "Login expired",
+       "You have hit your session limit",
+       "You've hit your session limit",
+       "You have hit your usage limit",
+       "You've hit your usage limit",
+       "You have reached your usage limit",
+       "You've reached your usage limit",
+       "Reached your usage limit",
+       "Usage limit for this billing cycle",
+   };
+   if (!result)
+      return 0;
+   for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+      if (strncmp(result, prefixes[i], strlen(prefixes[i])) == 0)
+         return 1;
+   return 0;
+}
+
 /* Build `claude -p` argv into tokens[]. The leading *split_count tokens (the
  * parsed cli_cmd, default "claude") are heap-allocated; the rest are borrowed.
  * The prompt is NOT in argv — it is fed on stdin by the caller. Returns argc or
@@ -84,12 +105,21 @@ static int claude_build_argv(const provider_cli_cfg_t *cfg, char **tokens, int c
     * The binary ships in the server image (Dockerfile.server) and resolves its
     * endpoint + bearer from AIMEE_API_ENDPOINT and AIMEE_HOME's aimee.yaml, both of
     * which the spawn exports (provider_cli_adapter). */
-   CLAUDE_ADD_ARG("--mcp-config");
-   CLAUDE_ADD_ARG(
-       "{\"mcpServers\":{\"aimee\":{\"command\":\"aimee\",\"args\":[\"mcp\",\"serve\"]}}}");
-   CLAUDE_ADD_ARG("--allowedTools");
-   for (size_t ti = 0; ti < cli_claude_allowed_tools_count(); ti++)
-      CLAUDE_ADD_ARG(cli_claude_allowed_tools()[ti]);
+   if (agent && !agent->tools_enabled)
+   {
+      CLAUDE_ADD_ARG("--tools");
+      CLAUDE_ADD_ARG("");
+      CLAUDE_ADD_ARG("--strict-mcp-config");
+   }
+   else
+   {
+      CLAUDE_ADD_ARG("--mcp-config");
+      CLAUDE_ADD_ARG(
+          "{\"mcpServers\":{\"aimee\":{\"command\":\"aimee\",\"args\":[\"mcp\",\"serve\"]}}}");
+      CLAUDE_ADD_ARG("--allowedTools");
+      for (size_t ti = 0; ti < cli_claude_allowed_tools_count(); ti++)
+         CLAUDE_ADD_ARG(cli_claude_allowed_tools()[ti]);
+   }
    CLAUDE_ADD_ARG("--disallowedTools");
    /* Enforce delegate-only: block Claude Code's CLIENT-SIDE subagent tools so the
     * primary must use aimee delegates. `Task` is Claude Code's real sub-agent
@@ -107,6 +137,11 @@ static int claude_build_argv(const provider_cli_cfg_t *cfg, char **tokens, int c
    {
       CLAUDE_ADD_ARG("--model");
       CLAUDE_ADD_ARG(agent->model);
+   }
+   if (agent && agent->reasoning_effort[0])
+   {
+      CLAUDE_ADD_ARG("--effort");
+      CLAUDE_ADD_ARG(agent->reasoning_effort);
    }
 #undef CLAUDE_ADD_ARG
    return argc;
@@ -197,6 +232,13 @@ static int claude_parse_line(const char *line, cli_event_t *event_out)
       return 0;
    memset(event_out, 0, sizeof(*event_out));
 
+   if (claude_legacy_terminal_result(line))
+   {
+      event_out->type = CLI_EVENT_ERROR;
+      snprintf(event_out->text, sizeof(event_out->text), "%s", line);
+      return 1;
+   }
+
    cJSON *obj = cJSON_Parse(line);
    if (!obj || !cJSON_IsObject(obj))
    {
@@ -257,6 +299,20 @@ static int claude_parse_line(const char *line, cli_event_t *event_out)
       const char *result = json_string(obj, "result");
       if (result && result[0])
          snprintf(event_out->text, sizeof(event_out->text), "%s", result);
+
+      cJSON *is_error = cJSON_GetObjectItem(obj, "is_error");
+      cJSON *api_error_status = cJSON_GetObjectItem(obj, "api_error_status");
+      const char *subtype = json_string(obj, "subtype");
+      const char *terminal_reason = json_string(obj, "terminal_reason");
+      if ((is_error && cJSON_IsTrue(is_error)) || (subtype && strncmp(subtype, "error_", 6) == 0) ||
+          (api_error_status && !cJSON_IsNull(api_error_status) &&
+           (!cJSON_IsNumber(api_error_status) || api_error_status->valueint != 0)) ||
+          (terminal_reason && strcmp(terminal_reason, "completed") != 0) ||
+          claude_legacy_terminal_result(result))
+      {
+         event_out->type = CLI_EVENT_ERROR;
+      }
+
       claude_parse_usage(cJSON_GetObjectItem(obj, "usage"), event_out);
       cJSON *duration = cJSON_GetObjectItem(obj, "duration_ms");
       if (duration && cJSON_IsNumber(duration))

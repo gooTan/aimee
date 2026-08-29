@@ -121,14 +121,15 @@ static void agent_normalize_legacy_claude_cli(agent_t *ag)
       return;
    if (strcmp(ag->backend, AGENT_BACKEND_PROVIDER_CLI) != 0 || strcmp(ag->cli_kind, "claude") != 0)
       return;
+   if (strcmp(ag->cli_cmd, "claude-p") != 0)
+      return;
 
    snprintf(ag->backend, sizeof(ag->backend), "%s", AGENT_BACKEND_TMUX_CLI);
    if (!ag->provider[0] || strcmp(ag->provider, "openai") == 0)
       snprintf(ag->provider, sizeof(ag->provider), "%s", "claude");
    if (!ag->auth_type[0] || strcmp(ag->auth_type, "bearer") == 0)
       snprintf(ag->auth_type, sizeof(ag->auth_type), "%s", "none");
-   if (!ag->cli_cmd[0] || strcmp(ag->cli_cmd, "claude-p") == 0)
-      snprintf(ag->cli_cmd, sizeof(ag->cli_cmd), "%s", "claude");
+   snprintf(ag->cli_cmd, sizeof(ag->cli_cmd), "%s", "claude");
    ag->cli_kind[0] = '\0';
 }
 
@@ -1046,16 +1047,7 @@ int agent_load_config(agent_config_t *cfg)
          }
          else
          {
-            /* No operator timeout: give a reasoning-capable model a higher per-call
-             * default so its slow (multi-minute) completions aren't cut off and
-             * retried as spurious read failures. Capability lookup is total +
-             * offline (same guarantees as the tools_enabled derivation below);
-             * an unknown/non-reasoning model keeps the standard default. */
-            model_capability_t tmc;
-            int reasoning = ag->model[0] &&
-                            model_capability_get(agent_catalog_provider(ag), ag->model, &tmc) &&
-                            (tmc.flags & MODEL_CAP_REASONING);
-            ag->timeout_ms = reasoning ? AGENT_REASONING_TIMEOUT_MS : AGENT_DEFAULT_TIMEOUT_MS;
+            ag->timeout_ms = 0; /* absent means unbounded */
          }
 
          /* "enabled" accepts a boolean or a 0/1 number: hand-edited rosters
@@ -1244,6 +1236,9 @@ int agent_load_config(agent_config_t *cfg)
          v = cJSON_GetObjectItem(a, "cli_kind");
          if (v && cJSON_IsString(v))
             snprintf(ag->cli_kind, sizeof(ag->cli_kind), "%s", v->valuestring);
+         v = cJSON_GetObjectItem(a, "reasoning_effort");
+         if (v && cJSON_IsString(v))
+            snprintf(ag->reasoning_effort, sizeof(ag->reasoning_effort), "%s", v->valuestring);
          v = cJSON_GetObjectItem(a, "is_server_hosted");
          if (v && cJSON_IsBool(v))
             ag->is_server_hosted = cJSON_IsTrue(v);
@@ -1664,6 +1659,8 @@ static int agent_save_config_impl(const agent_config_t *cfg, int emptied_by_remo
          cJSON_AddBoolToObject(a, "session_reuse", ag->session_reuse);
       if (ag->cli_kind[0])
          JSON_ADD_STR(a, "cli_kind", ag->cli_kind);
+      if (ag->reasoning_effort[0])
+         JSON_ADD_STR(a, "reasoning_effort", ag->reasoning_effort);
       if (ag->is_server_hosted)
          cJSON_AddBoolToObject(a, "is_server_hosted", 1);
       /* Always written (both true AND false), unlike is_server_hosted: an absent

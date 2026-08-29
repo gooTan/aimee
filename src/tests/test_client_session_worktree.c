@@ -8,6 +8,8 @@
  * invisible to a mocked git.
  */
 #include "client_session_worktree.h"
+#include "session_worktree_key.h"
+#include "aimee_home.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -204,8 +206,9 @@ static void test_ensure_creates_branch_and_worktree(void)
    /* It lands at the agreed path... */
    char key[80];
    client_session_worktree_key(sid, key, sizeof key);
-   char expect[4200];
-   snprintf(expect, sizeof expect, "%s/.aimee/worktrees/%s/main", clone, key);
+   char expect[4200], repo_key[SESSION_WORKTREE_REPO_KEY_MAX];
+   session_worktree_repo_key(clone, repo_key, sizeof repo_key);
+   snprintf(expect, sizeof expect, "%s/.aimee/worktrees/%s/%s/main", aimee_home(), repo_key, key);
    assert(strcmp(wt, expect) == 0);
    struct stat st;
    assert(stat(wt, &st) == 0 && S_ISDIR(st.st_mode));
@@ -259,6 +262,36 @@ static void test_ensure_requires_a_session_id_and_a_repo(void)
 
    assert(chdir(cwd_before) == 0);
    printf("  ensure: no session id / no repo -> not applicable: ok\n");
+}
+
+static void test_ensure_reuses_workflow_worktree(void)
+{
+   char home[512], repo[512], cwd_before[512];
+   snprintf(home, sizeof home, "%s/wfe-home", g_tmp_root);
+   make_repo("wfe-home/wfe-worktrees/wi_child", "slice", repo, sizeof repo);
+   assert(getcwd(cwd_before, sizeof cwd_before));
+   assert(chdir(repo) == 0);
+
+   const char *old_home = getenv("AIMEE_HOME");
+   char old_home_copy[512] = "";
+   if (old_home)
+      snprintf(old_home_copy, sizeof old_home_copy, "%s", old_home);
+   setenv("AIMEE_HOME", home, 1);
+
+   char wt[4200];
+   assert(client_session_worktree_ensure("delegate-session", wt, sizeof wt) == -1);
+   assert(wt[0] == '\0');
+   char nested[1024];
+   snprintf(nested, sizeof nested, "%s/.aimee/worktrees", repo);
+   struct stat st;
+   assert(stat(nested, &st) != 0);
+
+   if (old_home)
+      setenv("AIMEE_HOME", old_home_copy, 1);
+   else
+      unsetenv("AIMEE_HOME");
+   assert(chdir(cwd_before) == 0);
+   printf("  ensure: workflow worktree reused without nesting: ok\n");
 }
 
 /* Reproduce the pre-rekey layout by hand: <root>/.aimee/worktrees/<old_key>/main
@@ -509,6 +542,10 @@ int main(void)
    snprintf(g_tmp_root, sizeof g_tmp_root, "%s/aimee-csw-test-%d", (tmp && tmp[0]) ? tmp : "/tmp",
             (int)getpid());
    shell("rm -rf '%s' && mkdir -p '%s'", g_tmp_root, g_tmp_root);
+   char test_home[512];
+   snprintf(test_home, sizeof test_home, "%s/aimee-home", g_tmp_root);
+   shell("mkdir -p '%s'", test_home);
+   setenv("AIMEE_HOME", test_home, 1);
    /* Keep the harness's own env from steering base resolution. */
    unsetenv("AIMEE_SESSION_WORKTREE_BASE");
 
@@ -519,6 +556,7 @@ int main(void)
    test_base_explicit_ref_override();
    test_ensure_creates_branch_and_worktree();
    test_ensure_requires_a_session_id_and_a_repo();
+   test_ensure_reuses_workflow_worktree();
    test_ensure_reclaims_pre_rekey_worktree();
    test_reclaim_keeps_a_dirty_pre_rekey_worktree();
    test_publish_reaches_the_parent();

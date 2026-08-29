@@ -412,7 +412,7 @@ static int agent_execute_with_tools_internal(const agent_t *agent, const agent_n
                                              user_prompt, out);
       snprintf(out->error, sizeof(out->error),
                "provider-cli: unknown cli_kind '%s' (expected: codex, claude, mistral, "
-               "mistral-plan, vibe-plan)",
+               "mistral-plan, vibe-plan, acp, agy, oracle)",
                agent->cli_kind);
       return -1;
    }
@@ -682,7 +682,7 @@ native_provider_http:
       clock_gettime(CLOCK_MONOTONIC, &now_ts);
       int elapsed_ms = (int)((now_ts.tv_sec - loop_start.tv_sec) * 1000 +
                              (now_ts.tv_nsec - loop_start.tv_nsec) / 1000000);
-      if (elapsed_ms > total_timeout_ms)
+      if (total_timeout_ms > 0 && elapsed_ms > total_timeout_ms)
       {
          if (agent->tool_loop_timeout_ms_cap > 0)
             snprintf(out->error, sizeof(out->error),

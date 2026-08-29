@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,10 +23,11 @@ import (
 )
 
 const maxExecutorOutput = 16 << 20
+const maxExecutorDiagnostic = 1024
 
 const (
 	watchdogArgument = "__aimee_delegate_watchdog"
-	watchdogArgvEnv  = "AIMEE_DELEGATE_WATCHDOG_ARGV"
+	watchdogArgvFD   = 4
 )
 
 type Executor interface {
@@ -44,23 +46,26 @@ func NewDefaultHandler() bus.ModuleHandler {
 }
 
 type agentEntry struct {
-	Name        string   `json:"name"`
-	Model       string   `json:"model"`
-	Backend     string   `json:"backend"`
-	Provider    string   `json:"provider"`
-	CLIKind     string   `json:"cli_kind"`
-	CLICmd      string   `json:"cli_cmd"`
-	Enabled     *bool    `json:"enabled"`
-	PrimaryOnly bool     `json:"primary_only"`
-	Roles       []string `json:"roles"`
-	Personas    []string `json:"personas"`
-	MaxParallel *int     `json:"max_parallel"`
-	Available   *bool    `json:"delegate_available"`
+	Name             string   `json:"name"`
+	Model            string   `json:"model"`
+	Backend          string   `json:"backend"`
+	Provider         string   `json:"provider"`
+	CLIKind          string   `json:"cli_kind"`
+	CLICmd           string   `json:"cli_cmd"`
+	Enabled          *bool    `json:"enabled"`
+	PrimaryOnly      bool     `json:"primary_only"`
+	Roles            []string `json:"roles"`
+	Personas         []string `json:"personas"`
+	MaxParallel      *int     `json:"max_parallel"`
+	Available        *bool    `json:"delegate_available"`
+	ReasoningEffort  string   `json:"reasoning_effort"`
+	CLIIdleTimeoutMS *int64   `json:"cli_idle_timeout_ms"`
 }
 
 type agentRegistry struct {
 	DefaultAgent string       `json:"default_agent"`
 	Agents       []agentEntry `json:"agents"`
+	Models       []agentEntry `json:"models"`
 }
 
 // RegistryExecutor is the Go-owned delegate producer. It selects a configured
@@ -115,12 +120,25 @@ func (r *RegistryExecutor) load() (agentRegistry, error) {
 	if err := json.Unmarshal(body, &registry); err != nil {
 		return agentRegistry{}, fmt.Errorf("decode agent registry: %w", err)
 	}
+	if len(registry.Agents) > 0 && len(registry.Models) > 0 {
+		return agentRegistry{}, fmt.Errorf("decode agent registry: registry must use a single top-level key: both \"agents\" and \"models\" are populated")
+	}
+	if len(registry.Agents) == 0 && len(registry.Models) > 0 {
+		registry.Agents = registry.Models
+	}
+	registry.Models = nil
 	if len(registry.Agents) == 0 {
 		return agentRegistry{}, errors.New("agent registry has no agents")
 	}
 	for _, agent := range registry.Agents {
 		if agent.MaxParallel != nil && *agent.MaxParallel < 0 {
 			return agentRegistry{}, fmt.Errorf("agent %q has negative max_parallel", agent.Name)
+		}
+		if agent.CLIIdleTimeoutMS != nil && (*agent.CLIIdleTimeoutMS < 0 || *agent.CLIIdleTimeoutMS > int64(24*time.Hour/time.Millisecond)) {
+			return agentRegistry{}, fmt.Errorf("agent %q has invalid cli_idle_timeout_ms %d", agent.Name, *agent.CLIIdleTimeoutMS)
+		}
+		if strings.TrimSpace(agent.CLICmd) != "" && strings.TrimSpace(agent.CLIKind) == "" {
+			return agentRegistry{}, fmt.Errorf("agent %q with cli_cmd requires cli_kind", agent.Name)
 		}
 	}
 	r.registry, r.stamp = registry, info.ModTime().UnixNano()
@@ -216,6 +234,27 @@ func selectorUnbound(selector string) bool {
 	return selector == "" || selector == "$random"
 }
 
+func agentMatchesSelector(agent agentEntry, selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	if selector == agent.Name || selector == agent.Model {
+		return true
+	}
+	if strings.TrimSpace(agent.Model) == "" {
+		return false
+	}
+	model := strings.TrimSpace(agent.Model)
+	if cli := strings.TrimSpace(agent.CLIKind); cli != "" && selector == cli+":"+model {
+		return true
+	}
+	if provider := strings.TrimSpace(agent.Provider); provider != "" && selector == provider+":"+model {
+		return true
+	}
+	return false
+}
+
 type groupCandidate struct {
 	agent    agentEntry
 	provider string
@@ -268,6 +307,12 @@ func (r *RegistryExecutor) PlanGroup(ctx context.Context,
 		bySelector[agent.Name] = candidate
 		if strings.TrimSpace(agent.Model) != "" {
 			bySelector[agent.Model] = candidate
+			if cli := strings.TrimSpace(agent.CLIKind); cli != "" {
+				bySelector[cli+":"+strings.TrimSpace(agent.Model)] = candidate
+			}
+			if providerKey := strings.TrimSpace(agent.Provider); providerKey != "" {
+				bySelector[providerKey+":"+strings.TrimSpace(agent.Model)] = candidate
+			}
 		}
 	}
 	models := make([]string, len(seats))
@@ -346,7 +391,7 @@ func selectAgent(registry agentRegistry, model, role, persona string) (agentEntr
 	if name != "" {
 		for _, a := range registry.Agents {
 			if enabled(a) && available(a) && !a.PrimaryOnly && strings.TrimSpace(a.CLICmd) != "" && eligible(a, role, persona) &&
-				(a.Name == name || a.Model == name) {
+				agentMatchesSelector(a, name) {
 				return a, nil
 			}
 		}
@@ -413,7 +458,7 @@ func splitCommand(command string) ([]string, error) {
 	return out, nil
 }
 
-func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]string, error) {
+func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt string) ([]string, error) {
 	argv, err := splitCommand(agent.CLICmd)
 	if err != nil {
 		return nil, err
@@ -421,18 +466,22 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 	kind := strings.ToLower(strings.TrimSpace(agent.CLIKind))
 	switch kind {
 	case "codex":
-		if !request.Tools {
+		if !request.Tools && RoleIsWrite(request.Role) {
 			return nil, errors.New("codex CLI cannot guarantee a tools-disabled invocation")
 		}
 		argv = append(argv, "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never")
+		sandboxMode := "read-only"
 		if RoleIsWrite(request.Role) {
-			argv = append(argv, "--sandbox", "workspace-write")
-		} else {
-			argv = append(argv, "--sandbox", "read-only")
+			sandboxMode = "workspace-write"
 		}
+		approvalPolicy := "on-request"
+		argv = append(argv, "-c", fmt.Sprintf("approval_policy=%q", approvalPolicy))
+		argv = append(argv, "-c", `approvals_reviewer="auto_review"`)
+		argv = append(argv, "-c", fmt.Sprintf("sandbox_mode=%q", sandboxMode))
 		if agent.Model != "" {
 			argv = append(argv, "--model", agent.Model)
 		}
+		argv = append(argv, "-c", `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`)
 		argv = append(argv, "-")
 	case "claude", "claude-code":
 		argv = append(argv, "-p", "--output-format", "stream-json", "--verbose")
@@ -440,11 +489,29 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation) ([]stri
 			argv = append(argv, "--model", agent.Model)
 		}
 		if !request.Tools {
-			// Claude documents an empty --tools value as the explicit mechanism
-			// for disabling every built-in tool; preserve the empty argv element.
-			argv = append(argv, "--tools", "")
-		} else if !RoleIsWrite(request.Role) {
-			argv = append(argv, "--allowedTools", "Read", "Glob", "Grep")
+			// --tools "" disables built-ins; strict MCP also ignores user/project
+			// MCP settings, which otherwise remain callable in a tools-off turn.
+			argv = append(argv, "--tools", "", "--strict-mcp-config")
+		} else {
+			argv = append(argv, "--mcp-config",
+				`{"mcpServers":{"aimee":{"command":"aimee","args":["mcp-serve"]}}}`)
+			if RoleIsWrite(request.Role) {
+				argv = append(argv, "--allowedTools", "mcp__aimee")
+			} else {
+				argv = append(argv, "--allowedTools", "Read", "Glob", "Grep", "mcp__aimee")
+			}
+		}
+	case "acp":
+		return argv, nil
+	case "agy":
+		if !request.Tools {
+			return nil, errors.New("agy CLI cannot guarantee a tools-disabled invocation")
+		}
+		argv = append(argv, "--input-format", "stream-json", "--output-format", "stream-json",
+			"--disable-slash-commands", "--mode", "plan", "--sandbox",
+			"--dangerously-skip-permissions")
+		if agent.Model != "" {
+			argv = append(argv, "--model", agent.Model)
 		}
 	case "", "generic":
 		// A generic adapter consumes the prompt on stdin and writes its final
@@ -483,6 +550,33 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	_, _ = b.Buffer.Write(p)
 	b.remaining -= len(p)
 	return n, nil
+}
+
+func (b *limitedBuffer) ReadFrom(r io.Reader) (int64, error) {
+	var total int64
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			b.mu.Lock()
+			toWrite := n
+			if toWrite > b.remaining {
+				toWrite = b.remaining
+			}
+			if toWrite > 0 {
+				_, _ = b.Buffer.Write(buf[:toWrite])
+				b.remaining -= toWrite
+			}
+			b.mu.Unlock()
+			total += int64(n)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+	}
 }
 
 func (b *limitedBuffer) String() string {
@@ -573,6 +667,118 @@ func (m *turnMonitor) Exceeded() bool {
 	return m.exceeded
 }
 
+func preResponseFailureDetail(kind string, output []byte, err error) string {
+	if final := finalOutput(kind, output); strings.TrimSpace(final) != "" {
+		return final
+	}
+	if detail := streamErrorDetail(kind, output); detail != "" {
+		return detail
+	}
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return detail
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func streamErrorDetail(kind string, output []byte) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
+	var detail string
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		if kind == "agy" && item["event"] == "error" {
+			if value, ok := item["message"].(string); ok {
+				detail = value
+			}
+		}
+	}
+	return strings.TrimSpace(detail)
+}
+
+func streamFailureDetail(kind string, output []byte) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind != "claude" && kind != "claude-code" && kind != "agy" {
+		return ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		if kind == "agy" {
+			if item["event"] != "result" {
+				continue
+			}
+			nested, _ := item["result"].(map[string]any)
+			status, _ := nested["status"].(string)
+			if strings.EqualFold(strings.TrimSpace(status), "SUCCESS") {
+				continue
+			}
+			if detail, _ := nested["error"].(string); strings.TrimSpace(detail) != "" {
+				return detail
+			}
+			if status == "" {
+				status = "unknown"
+			}
+			return "agy result status " + status
+		}
+		if item["type"] != "result" {
+			continue
+		}
+		result, _ := item["result"].(string)
+		failed, _ := item["is_error"].(bool)
+		if subtype, _ := item["subtype"].(string); strings.HasPrefix(subtype, "error_") {
+			failed = true
+		}
+		if status, ok := item["api_error_status"]; ok && status != nil {
+			value, numeric := status.(float64)
+			failed = failed || !numeric || value != 0
+		}
+		if reason, _ := item["terminal_reason"].(string); reason != "" && reason != "completed" {
+			failed = true
+		}
+		if claudeLegacyTerminalResult(result) {
+			failed = true
+		}
+		if failed {
+			if strings.TrimSpace(result) != "" {
+				return result
+			}
+			return "Claude CLI returned a terminal error"
+		}
+	}
+	return ""
+}
+
+func claudeLegacyTerminalResult(result string) bool {
+	result = strings.ToLower(strings.TrimSpace(result))
+	for _, prefix := range []string{
+		"login expired",
+		"you have hit your session limit",
+		"you've hit your session limit",
+		"you have hit your usage limit",
+		"you've hit your usage limit",
+		"you have reached your usage limit",
+		"you've reached your usage limit",
+		"reached your usage limit",
+		"usage limit for this billing cycle",
+	} {
+		if strings.HasPrefix(result, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func finalOutput(kind string, output []byte) string {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	if kind == "" || kind == "generic" {
@@ -581,6 +787,7 @@ func finalOutput(kind string, output []byte) string {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
 	var final string
+	var agyStepResponse string
 	for scanner.Scan() {
 		var item map[string]any
 		if json.Unmarshal(scanner.Bytes(), &item) != nil {
@@ -601,8 +808,73 @@ func finalOutput(kind string, output []byte) string {
 				}
 			}
 		}
+		if kind == "agy" {
+			if item["event"] == "step_update" {
+				nested, _ := item["step_update"].(map[string]any)
+				if nested["step_type"] == "agent_response" {
+					if value, ok := nested["text_delta"].(string); ok && strings.TrimSpace(value) != "" {
+						agyStepResponse += value
+					}
+				}
+			}
+			if item["event"] == "result" {
+				if nested, ok := item["result"].(map[string]any); ok {
+					if value, ok := nested["response"].(string); ok && strings.TrimSpace(value) != "" {
+						final = value
+					}
+				}
+			}
+		}
+	}
+	if kind == "agy" && strings.TrimSpace(final) == "" {
+		final = agyStepResponse
 	}
 	return strings.TrimSpace(final)
+}
+
+func outputResponseStarted(kind string, output []byte) bool {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind == "" || kind == "generic" {
+		return strings.TrimSpace(string(output)) != ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		switch kind {
+		case "claude", "claude-code":
+			if item["type"] == "assistant" && item["is_api_error_message"] != true {
+				return true
+			}
+		case "codex":
+			if item["type"] == "item.completed" {
+				nested, _ := item["item"].(map[string]any)
+				if nested["type"] == "agent_message" {
+					return true
+				}
+			}
+		case "agy":
+			if item["event"] == "step_update" {
+				nested, _ := item["step_update"].(map[string]any)
+				if nested["step_type"] == "agent_response" {
+					if value, ok := nested["text_delta"].(string); ok && strings.TrimSpace(value) != "" {
+						return true
+					}
+				}
+			}
+			if item["event"] == "result" {
+				if nested, ok := item["result"].(map[string]any); ok {
+					if value, ok := nested["response"].(string); ok && strings.TrimSpace(value) != "" {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // RunWatchdog handles the private re-exec mode used by executorCommand. Every
@@ -611,8 +883,13 @@ func RunWatchdog(args []string) (bool, int) {
 	if len(args) != 2 || args[1] != watchdogArgument {
 		return false, 0
 	}
+	arguments := os.NewFile(watchdogArgvFD, "delegate-watchdog-argv")
+	if arguments == nil {
+		return true, 125
+	}
+	defer arguments.Close()
 	var argv []string
-	if json.Unmarshal([]byte(os.Getenv(watchdogArgvEnv)), &argv) != nil || len(argv) == 0 {
+	if json.NewDecoder(arguments).Decode(&argv) != nil || len(argv) == 0 {
 		return true, 125
 	}
 	control := os.NewFile(3, "delegate-producer-lifecycle")
@@ -651,7 +928,7 @@ func runWatchdog(control io.Reader, argv []string, stdin io.Reader,
 	select {
 	case err := <-done:
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		reapWatchdogChildren()
+		terminateWatchdogChildren()
 		if err == nil {
 			return 0
 		}
@@ -663,15 +940,25 @@ func runWatchdog(control io.Reader, argv []string, stdin io.Reader,
 	case <-producerGone:
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-done
-		reapWatchdogChildren()
+		terminateWatchdogChildren()
 		return 125
 	}
 }
 
-func reapWatchdogChildren() {
+func terminateWatchdogChildren() {
+	childrenPath := fmt.Sprintf("/proc/%d/task/%d/children", os.Getpid(), os.Getpid())
 	for {
+		children, err := os.ReadFile(childrenPath)
+		if err != nil || len(strings.Fields(string(children))) == 0 {
+			return
+		}
+		for _, field := range strings.Fields(string(children)) {
+			if pid, parseErr := strconv.Atoi(field); parseErr == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
 		var status syscall.WaitStatus
-		if _, err := syscall.Wait4(-1, &status, 0, nil); errors.Is(err, syscall.ECHILD) {
+		if _, err = syscall.Wait4(-1, &status, 0, nil); errors.Is(err, syscall.ECHILD) {
 			return
 		} else if err != nil && !errors.Is(err, syscall.EINTR) {
 			return
@@ -684,22 +971,40 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 	if err != nil {
 		return nil, nil, err
 	}
-	encoded, err := json.Marshal(argv)
-	if err != nil {
-		return nil, nil, err
-	}
 	controlRead, controlWrite, err := os.Pipe()
 	if err != nil {
 		return nil, nil, err
 	}
+	arguments, err := os.CreateTemp("", "aimee-delegate-argv-")
+	if err != nil {
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		return nil, nil, err
+	}
+	argumentPath := arguments.Name()
+	if err := json.NewEncoder(arguments).Encode(argv); err != nil {
+		_ = arguments.Close()
+		_ = os.Remove(argumentPath)
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		return nil, nil, err
+	}
+	if _, err := arguments.Seek(0, io.SeekStart); err != nil {
+		_ = arguments.Close()
+		_ = os.Remove(argumentPath)
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		return nil, nil, err
+	}
+	_ = os.Remove(argumentPath)
 	cmd := exec.CommandContext(ctx, executable, watchdogArgument)
-	cmd.Env = append(os.Environ(), watchdogArgvEnv+"="+string(encoded))
-	cmd.ExtraFiles = []*os.File{controlRead}
+	cmd.ExtraFiles = []*os.File{controlRead, arguments}
 	var closeOnce sync.Once
 	closeControl := func() {
 		closeOnce.Do(func() {
 			_ = controlWrite.Close()
 			_ = controlRead.Close()
+			_ = arguments.Close()
 		})
 	}
 	cmd.Cancel = func() error {
@@ -710,95 +1015,263 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 	return cmd, closeControl, nil
 }
 
+func prepareReadOnlyCodexHome(registryHome string) (string, error) {
+	source := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if source == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		source = filepath.Join(userHome, ".codex")
+	}
+	base := filepath.Join(registryHome, "runtime", "codex-homes")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	scratch, err := os.MkdirTemp(base, "read-only-")
+	if err != nil {
+		return "", err
+	}
+	fail := func(err error) (string, error) {
+		_ = os.RemoveAll(scratch)
+		return "", err
+	}
+	for _, name := range []string{"auth.json", "config.toml"} {
+		body, err := os.ReadFile(filepath.Join(source, name))
+		if err != nil {
+			return fail(fmt.Errorf("prepare Codex sandbox %s: %w", name, err))
+		}
+		if err := os.WriteFile(filepath.Join(scratch, name), body, 0o600); err != nil {
+			return fail(err)
+		}
+	}
+	if body, err := os.ReadFile(filepath.Join(source, "hooks.json")); err == nil {
+		if err := os.WriteFile(filepath.Join(scratch, "hooks.json"), body, 0o600); err != nil {
+			return fail(err)
+		}
+	}
+	for _, name := range []string{"plugins", "skills"} {
+		if _, err := os.Stat(filepath.Join(source, name)); err == nil {
+			if err := os.Symlink(filepath.Join(source, name), filepath.Join(scratch, name)); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	for _, name := range []string{"cache", "sessions", "shell_snapshots", "tmp", "log"} {
+		if err := os.Mkdir(filepath.Join(scratch, name), 0o700); err != nil {
+			return fail(err)
+		}
+	}
+	return scratch, nil
+}
+
+func executorReadOnlyCodexCommand(ctx context.Context, argv []string, registryHome, workdir string) (*exec.Cmd, func(), error) {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		return nil, nil, fmt.Errorf("read-only Codex isolation requires bwrap: %w", err)
+	}
+	scratch, err := prepareReadOnlyCodexHome(registryHome)
+	if err != nil {
+		return nil, nil, err
+	}
+	wrapped := []string{bwrap, "--die-with-parent", "--new-session", "--ro-bind", "/", "/",
+		"--dev-bind", "/dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+		"--bind", scratch, scratch, "--setenv", "CODEX_HOME", scratch, "--chdir", workdir, "--"}
+	wrapped = append(wrapped, argv...)
+	cmd, closeCommand, err := executorCommand(ctx, wrapped)
+	if err != nil {
+		_ = os.RemoveAll(scratch)
+		return nil, nil, err
+	}
+	var closeOnce sync.Once
+	return cmd, func() {
+		closeOnce.Do(func() {
+			closeCommand()
+			_ = os.RemoveAll(scratch)
+		})
+	}, nil
+}
+
 func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
 	result := delegatecontract.InvocationResult{Version: delegatecontract.WireVersion, Status: "failed"}
+	fail := func(err error, detail string) delegatecontract.InvocationResult {
+		result.Error = detail
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(err, false)
+		return result
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	registry, err := r.load()
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	agent, err := selectAgent(registry, request.Model, request.Role, request.Persona)
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	result.Agent = agent.Name
 	release, err := r.limiter(agent).acquire(ctx)
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	defer release()
 	if RoleIsWrite(request.Role) && strings.TrimSpace(request.Workdir) == "" {
-		result.Error = "write-capable delegate requires an isolated worktree"
-		return result
+		return fail(errors.New("write-capable delegate requires an isolated worktree"), "write-capable delegate requires an isolated worktree")
+	}
+	readOnlyCodex := strings.EqualFold(strings.TrimSpace(agent.CLIKind), "codex") && !RoleIsWrite(request.Role)
+	if readOnlyCodex && strings.TrimSpace(request.Workdir) == "" {
+		return fail(errors.New("read-only codex delegate requires an isolated checkout"), "read-only codex delegate requires an isolated checkout")
 	}
 	if request.Workdir != "" {
 		if !filepath.IsAbs(request.Workdir) {
-			result.Error = "delegate workdir must be absolute"
-			return result
+			return fail(errors.New("delegate workdir must be absolute"), "delegate workdir must be absolute")
 		}
-		if _, err := os.Lstat(filepath.Join(request.Workdir, ".git")); err != nil {
-			result.Error = "delegate workdir is not a git checkout"
-			return result
+		root, err := gitCheckoutRoot(request.Workdir)
+		if err != nil {
+			return fail(err, "delegate workdir is not a git checkout")
 		}
-	}
-	argv, err := executorArgv(agent, request)
-	if err != nil {
-		result.Error = err.Error()
-		return result
+		request.Workdir = root
 	}
 	prompt := request.Prompt
 	if persona := strings.TrimSpace(request.Persona); persona != "" {
 		prompt = "You are acting as " + persona + ".\n\n" + prompt
 	}
+	argv, err := executorArgv(agent, request, prompt)
+	if err != nil {
+		return fail(err, err.Error())
+	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
-	cmd, closeCommand, err := executorCommand(runCtx, argv)
+	var cmd *exec.Cmd
+	var closeCommand func()
+	if readOnlyCodex {
+		cmd, closeCommand, err = executorReadOnlyCodexCommand(runCtx, argv, filepath.Dir(r.path), request.Workdir)
+	} else {
+		cmd, closeCommand, err = executorCommand(runCtx, argv)
+	}
 	if err != nil {
-		result.Error = err.Error()
-		return result
+		return fail(err, err.Error())
 	}
 	defer closeCommand()
 	if request.Workdir != "" {
 		cmd.Dir = request.Workdir
 	}
-	cmd.Stdin = strings.NewReader(prompt)
+	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "acp") {
+		return r.executeACP(ctx, runCancel, closeCommand, cmd, agent, request, prompt)
+	}
+	if strings.EqualFold(strings.TrimSpace(agent.CLIKind), "agy") {
+		input, _ := json.Marshal(map[string]any{
+			"event": "user", "message": map[string]string{"content": prompt},
+		})
+		cmd.Stdin = bytes.NewReader(append(input, '\n'))
+	} else {
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 	output := &limitedBuffer{remaining: maxExecutorOutput}
 	monitor := newTurnMonitor(agent.CLIKind, request.MaxTurns, runCancel, output)
-	cmd.Stdout, cmd.Stderr = output, output
-	if request.MaxTurns > 0 {
-		cmd.Stdout = monitor
+	// Tool-call observability reuses the existing structured stream signal.
+	// For provider-CLI adapters the stream itself is the tool-call signal:
+	//   claude:  assistant tool_use blocks (started only — no completion)
+	//   codex:   item.completed tool items (completed only)
+	//   agy:     tool_call/tool_result events when present, else item.completed
+	//   acp:     session/update tool_call / tool_call_update (both phases)
+	// Raw arguments/results are never stored; only name/call_id/status/elapsed.
+	// If the protocol lacks a phase, the honest normalized behavior is a single
+	// event for the phase that is exposed, documented here and in tests.
+	col := newToolCollector()
+	col.setWorkflow(request.Workflow)
+	col.setContext(runCtx)
+	defer col.close()
+	kindLower := strings.ToLower(strings.TrimSpace(agent.CLIKind))
+	var stdoutWriter io.Writer = output
+	// Build the stacked writer: tool collector sees the raw NDJSON before the
+	// turn monitor counts it, so neither parser misses a line.
+	if kindLower == "claude" || kindLower == "claude-code" || kindLower == "codex" || kindLower == "agy" {
+		tw := &toolEventStreamWriter{kind: kindLower, col: col, underlying: output}
+		if request.MaxTurns > 0 {
+			// monitor wraps output; tool writer wraps monitor so both see the stream.
+			tw.underlying = monitor
+			stdoutWriter = tw
+		} else {
+			stdoutWriter = tw
+		}
+	} else if request.MaxTurns > 0 {
+		stdoutWriter = monitor
 	}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
+		result.ResponseStarted = outputResponseStarted(agent.CLIKind, output.BytesCopy())
+		result.ToolEvents = col.result()
 		if monitor.Exceeded() {
-			result.Error = fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
+			detail := fmt.Sprintf("delegate maximum turn count exceeded (%d)", request.MaxTurns)
+			result.Error = detail
+			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
 			return result
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Error = delegatecontract.ErrDelegateExecutionDeadline.Error()
 			if detail := strings.TrimSpace(output.String()); detail != "" {
-				result.Error += ": " + delegatecontract.SafeDiagnostic(detail)
+				result.Error += ": " + delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
 			}
+			result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(delegatecontract.ErrDelegateExecutionDeadline, result.ResponseStarted)
 			return result
 		}
-		detail := strings.TrimSpace(output.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		result.Error = delegatecontract.SafeDiagnostic(detail)
+		detail := preResponseFailureDetail(agent.CLIKind, output.BytesCopy(), err)
+		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
 		return result
 	}
-	response := finalOutput(agent.CLIKind, output.BytesCopy())
+	outputBytes := output.BytesCopy()
+	if detail := streamFailureDetail(agent.CLIKind, outputBytes); detail != "" {
+		result.ResponseStarted = outputResponseStarted(agent.CLIKind, outputBytes)
+		result.ToolEvents = col.result()
+		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
+		return result
+	}
+	response := finalOutput(agent.CLIKind, outputBytes)
 	if response == "" {
-		result.Error = "delegate CLI returned no final response"
+		result.ResponseStarted = outputResponseStarted(agent.CLIKind, outputBytes)
+		result.ToolEvents = col.result()
+		detail := preResponseFailureDetail(agent.CLIKind, outputBytes, errors.New("delegate CLI returned no final response"))
+		if detail == "" {
+			detail = "delegate CLI returned no final response"
+		} else {
+			detail = "delegate CLI returned no final response: " + detail
+		}
+		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
 		return result
 	}
 	result.Status, result.Response = "done", response
+	result.ResponseStarted = true
+	result.ToolEvents = col.result()
 	return result
+}
+
+func gitCheckoutRoot(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(current); err != nil || !info.IsDir() {
+		if err != nil {
+			return "", err
+		}
+		return "", errors.New("delegate workdir is not a directory")
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", errors.New("no git checkout contains delegate workdir")
+		}
+		current = parent
+	}
 }
 
 // cancelledContext bridges the bus runtime's cancellation bit into os/exec.

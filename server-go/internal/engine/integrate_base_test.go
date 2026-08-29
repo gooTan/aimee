@@ -184,6 +184,105 @@ func TestFreezeUsesMergedRemoteFeatureTip(t *testing.T) {
 	if !strings.Contains(result.Artifact, "child.txt") {
 		t.Fatalf("freeze omitted this slice's change:\n%s", result.Artifact)
 	}
+
+	// During a long run the integration branch can advance past the feature tip.
+	// If the child also contains that newer tip, freeze must not attribute those
+	// already-landed integration changes to the child.
+	gitRun(t, repo, "fetch", "origin", feature)
+	gitRun(t, repo, "merge", "--ff-only", "origin/"+feature)
+	if err := os.WriteFile(filepath.Join(repo, "integration.txt"), []byte("already landed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "integration.txt")
+	gitRun(t, repo, "commit", "-m", "integration fix")
+	gitRun(t, repo, "push", "origin", "trunk")
+	gitRun(t, workdir, "fetch", "origin", "trunk")
+	gitRun(t, workdir, "merge", "--no-edit", "origin/trunk")
+	result, err = runner.freeze(ctx, StepRequest{WorkItem: child})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Artifact, "integration.txt") {
+		t.Fatalf("freeze leaked work already present on integration base:\n%s", result.Artifact)
+	}
+	if !strings.Contains(result.Artifact, "child.txt") {
+		t.Fatalf("freeze omitted child delta:\n%s", result.Artifact)
+	}
+}
+
+// A root freeze must review the same delta that the final PR will present.
+// When the target branch independently lands patch-equivalent work during a
+// long run, a stale merge base makes three-dot review report that shared work
+// as proposal scope drift even though merging the PR would not change it.
+func TestRootFreezeRefreshesRemoteBaseBeforeReview(t *testing.T) {
+	t.Setenv("AIMEE_GIT_AUTHOR_NAME", "Workflow Test")
+	t.Setenv("AIMEE_GIT_AUTHOR_EMAIL", "workflow@example.test")
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	repo := filepath.Join(root, "repo")
+	updater := filepath.Join(root, "updater")
+	gitRun(t, root, "init", "--bare", "-b", "trunk", origin)
+	gitRun(t, root, "clone", origin, repo)
+	if err := os.WriteFile(filepath.Join(repo, "shared.txt"), []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "shared.txt")
+	gitRun(t, repo, "commit", "-m", "initial")
+	gitRun(t, repo, "push", "-u", "origin", "trunk")
+
+	store, err := db1.Open(filepath.Join(root, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, db1.CreateWorkItem{ID: "wi_root_refresh", Repo: repo,
+		ProposalPath: "p", WorkflowName: "build", StartStage: "freeze"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewWorktreeManager(store, filepath.Join(root, "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.WorkItem(ctx, "wi_root_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir, _, err := manager.Ensure(ctx, item, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "shared.txt"), []byte("current\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "proposal.txt"), []byte("proposal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, workdir, "add", "shared.txt", "proposal.txt")
+	gitRun(t, workdir, "commit", "-m", "proposal and shared fix")
+
+	gitRun(t, root, "clone", origin, updater)
+	if err := os.WriteFile(filepath.Join(updater, "shared.txt"), []byte("current\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, updater, "add", "shared.txt")
+	gitRun(t, updater, "commit", "-m", "land shared fix independently")
+	gitRun(t, updater, "push", "origin", "trunk")
+
+	runner := &NativeRunner{db: store, worktrees: manager}
+	result, err := runner.freeze(ctx, StepRequest{WorkItem: item})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StepAdvanced {
+		t.Fatalf("freeze status=%q detail=%q", result.Status, result.Detail)
+	}
+	if strings.Contains(result.Artifact, "shared.txt") {
+		t.Fatalf("freeze reviewed work already present on remote base:\n%s", result.Artifact)
+	}
+	if !strings.Contains(result.Artifact, "proposal.txt") {
+		t.Fatalf("freeze omitted proposal delta:\n%s", result.Artifact)
+	}
 }
 
 func TestIntegrateFeatureBaseNoopWhenAlreadyCurrent(t *testing.T) {
@@ -247,6 +346,16 @@ func (partialNoCommitAgents) Delegate(_ context.Context, _ DelegateRequest) (Del
 		Response: "named file 'docs/runbooks/x.md' was not created by delegate; the task remains unimplemented",
 		Partial:  true,
 	}, nil
+}
+
+type completedNoCommitAgents struct{}
+
+func (completedNoCommitAgents) Delegate(_ context.Context, _ DelegateRequest) (DelegateResult, error) {
+	return DelegateResult{Response: "Implementation complete."}, nil
+}
+
+func (completedNoCommitAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
+	return make([]DelegateGroupResult, len(requests))
 }
 
 type documentedNoopAgents struct{}
@@ -506,6 +615,20 @@ func TestPartialImplementWithNoCommitDoesNotAdvance(t *testing.T) {
 		t.Fatalf("delegate's own diagnosis must survive into the step detail: %q", out.Detail)
 	}
 
+	completedVerifier := &recordingVerifier{}
+	completedRunner := &NativeRunner{agents: completedNoCommitAgents{}, worktrees: manager, db: store,
+		verifier: completedVerifier}
+	out, err = completedRunner.mutate(ctx, StepRequest{WorkItem: child, Node: wfe.Node{ID: "impl"}}, false)
+	if err != nil {
+		t.Fatalf("completed no-commit mutate: %v", err)
+	}
+	if out.Status != StepChanges {
+		t.Fatalf("completed delegate with no branch work status=%q detail=%q, want changes", out.Status, out.Detail)
+	}
+	if completedVerifier.calls != 0 {
+		t.Fatalf("completed delegate with no branch work verifier calls=%d, want 0", completedVerifier.calls)
+	}
+
 	// The write-role guard also reports a legitimate sibling-satisfied no-op as
 	// partial. The implementation prompt requires the delegate to state that the
 	// task is already complete; accept only that explicit report, and still run
@@ -519,6 +642,9 @@ func TestPartialImplementWithNoCommitDoesNotAdvance(t *testing.T) {
 	}
 	if out.Status != StepAdvanced {
 		t.Fatalf("explicit completed no-op status=%q detail=%q, want advanced", out.Status, out.Detail)
+	}
+	if out.Detail != "satisfied/no_delta" {
+		t.Fatalf("explicit completed no-op detail=%q, want satisfied/no_delta", out.Detail)
 	}
 	if verifier.calls != 1 {
 		t.Fatalf("explicit completed no-op verifier calls=%d, want 1", verifier.calls)

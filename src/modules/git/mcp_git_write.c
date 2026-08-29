@@ -9,6 +9,7 @@
 #include "branch_ownership.h"
 #include "agent_config.h" /* agent_get_request_vault_principal */
 #include "git_forge_vault.h"
+#include "modules/git/git_pr_api.h"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <stdio.h>
@@ -297,6 +298,110 @@ cJSON *handle_git_commit(cJSON *args)
    return mcp_text(result);
 }
 
+int mcp_git_build_explicit_push_command(char *out, size_t out_cap, const char *canonical_url,
+                                        const char *branch, int force, int tags)
+{
+   if (!out || out_cap == 0 || !canonical_url || !canonical_url[0] || !branch || !branch[0])
+      return -1;
+   char *esc_url = shell_escape(canonical_url);
+   char *esc_branch = shell_escape(branch);
+   if (!esc_url || !esc_branch)
+   {
+      free(esc_url);
+      free(esc_branch);
+      return -1;
+   }
+   char *esc_tag = NULL;
+   if (force && tags)
+   {
+      esc_tag = shell_escape("+refs/tags/*:refs/tags/*");
+      if (!esc_tag)
+      {
+         free(esc_url);
+         free(esc_branch);
+         return -1;
+      }
+   }
+   int pos = snprintf(out, out_cap, "git push");
+   if (pos < 0 || (size_t)pos >= out_cap)
+   {
+      free(esc_url);
+      free(esc_branch);
+      free(esc_tag);
+      return -1;
+   }
+   if (force && tags)
+   {
+      char lease_raw[1024];
+      snprintf(lease_raw, sizeof(lease_raw), "--force-with-lease=refs/heads/%s", branch);
+      char *esc_lease = shell_escape(lease_raw);
+      if (!esc_lease)
+      {
+         free(esc_url);
+         free(esc_branch);
+         free(esc_tag);
+         return -1;
+      }
+      int n = snprintf(out + pos, out_cap - (size_t)pos, " '%s'", esc_lease);
+      free(esc_lease);
+      if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
+      {
+         free(esc_url);
+         free(esc_branch);
+         free(esc_tag);
+         return -1;
+      }
+      pos += n;
+   }
+   else if (force)
+   {
+      int n = snprintf(out + pos, out_cap - (size_t)pos, " --force-with-lease");
+      if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
+      {
+         free(esc_url);
+         free(esc_branch);
+         free(esc_tag);
+         return -1;
+      }
+      pos += n;
+   }
+   if (tags && !(force && tags))
+   {
+      int n = snprintf(out + pos, out_cap - (size_t)pos, " --tags");
+      if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
+      {
+         free(esc_url);
+         free(esc_branch);
+         free(esc_tag);
+         return -1;
+      }
+      pos += n;
+   }
+   int n;
+   if (force && tags)
+   {
+      n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' '%s' 2>&1", esc_url, esc_branch,
+                   esc_branch, esc_tag);
+   }
+   else
+   {
+      n = snprintf(out + pos, out_cap - (size_t)pos, " '%s' '%s:%s' 2>&1", esc_url, esc_branch,
+                   esc_branch);
+   }
+   if (n < 0 || (size_t)n >= out_cap - (size_t)pos)
+   {
+      free(esc_url);
+      free(esc_branch);
+      free(esc_tag);
+      return -1;
+   }
+   pos += n;
+   free(esc_url);
+   free(esc_branch);
+   free(esc_tag);
+   return 0;
+}
+
 /* --- git_push --- */
 
 cJSON *handle_git_push(cJSON *args)
@@ -333,10 +438,23 @@ cJSON *handle_git_push(cJSON *args)
    cJSON *jforce = cJSON_GetObjectItemCaseSensitive(args, "force");
    int force = (jforce && cJSON_IsTrue(jforce)) ? 1 : 0;
 
+   cJSON *jremote_url = cJSON_GetObjectItemCaseSensitive(args, "remote_url");
+   int has_remote_url = cJSON_IsString(jremote_url) && jremote_url->valuestring[0];
+   cJSON *jtags = cJSON_GetObjectItemCaseSensitive(args, "tags");
+   int tags = (jtags && cJSON_IsTrue(jtags)) ? 1 : 0;
+   if (jremote_url && !cJSON_IsString(jremote_url))
+      return mcp_text("error: 'remote_url' must be a string");
+   if (jremote_url && cJSON_IsString(jremote_url) && !jremote_url->valuestring[0])
+      return mcp_text("error: 'remote_url' must be a non-empty string");
+   if (jtags && !cJSON_IsBool(jtags))
+      return mcp_text("error: 'tags' must be a boolean");
+
    /* Mirror push: replaces all remote refs with local refs */
    cJSON *jmirror = cJSON_GetObjectItemCaseSensitive(args, "mirror");
    if (jmirror && cJSON_IsTrue(jmirror))
    {
+      if (has_remote_url || tags)
+         return mcp_text("error: 'mirror' cannot be combined with 'remote_url' or 'tags'");
       int rc;
       char *out = mcp_git_run("git push origin --mirror 2>&1", &rc);
       if (rc != 0)
@@ -350,6 +468,19 @@ cJSON *handle_git_push(cJSON *args)
                "mirror push complete — remote now matches local refs exactly.\n%s", out ? out : "");
       free(out);
       return mcp_text(result);
+   }
+
+   char canonical_url[512] = "";
+   if (has_remote_url)
+   {
+      char cerr[256];
+      if (git_pr_canonical_github_url(jremote_url->valuestring, canonical_url,
+                                      sizeof(canonical_url), cerr, sizeof(cerr)) != 0)
+      {
+         char buf[512];
+         snprintf(buf, sizeof(buf), "error: %s", cerr[0] ? cerr : "invalid remote_url");
+         return mcp_text(buf);
+      }
    }
 
    /* Determine which branch to push.
@@ -395,12 +526,25 @@ cJSON *handle_git_push(cJSON *args)
 
    /* Build push command.
     * In worktree mode, always push by explicit refspec since HEAD != the target branch. */
-   char cmd[512];
-   if (mcp_git_get_worktree())
+   char cmd[2048];
+   int has_explicit = has_remote_url;
+
+   if (has_explicit)
+   {
+      if (mcp_git_build_explicit_push_command(cmd, sizeof(cmd), canonical_url, branch, force,
+                                              tags) != 0)
+         return mcp_text("error: cannot build explicit push command");
+   }
+   else if (mcp_git_get_worktree())
    {
       /* Push the owned branch to origin with explicit refspec */
-      if (force)
+      if (force && tags)
+         snprintf(cmd, sizeof(cmd), "git push --force-with-lease --tags -u origin '%s' 2>&1",
+                  branch);
+      else if (force)
          snprintf(cmd, sizeof(cmd), "git push --force-with-lease -u origin '%s' 2>&1", branch);
+      else if (tags)
+         snprintf(cmd, sizeof(cmd), "git push --tags -u origin '%s' 2>&1", branch);
       else
          snprintf(cmd, sizeof(cmd), "git push -u origin '%s' 2>&1", branch);
    }
@@ -413,7 +557,7 @@ cJSON *handle_git_push(cJSON *args)
       if (has_upstream && upstream)
       {
          char *slash = strchr(upstream, '/');
-         const char *upstream_branch = slash ? slash + 1 : upstream;
+         char *upstream_branch = slash ? slash + 1 : upstream;
          char *up_nl = strchr(upstream_branch, '\n');
          if (up_nl)
             *up_nl = '\0';
@@ -423,14 +567,26 @@ cJSON *handle_git_push(cJSON *args)
 
       if (has_upstream && upstream_matches)
       {
-         if (force)
+         if (force && tags)
+            snprintf(cmd, sizeof(cmd), "git push --force-with-lease --tags 2>&1");
+         else if (force)
             snprintf(cmd, sizeof(cmd), "git push --force-with-lease 2>&1");
+         else if (tags)
+            snprintf(cmd, sizeof(cmd), "git push --tags 2>&1");
          else
             snprintf(cmd, sizeof(cmd), "git push 2>&1");
       }
       else
       {
-         snprintf(cmd, sizeof(cmd), "git push -u origin '%s' 2>&1", branch);
+         if (force && tags)
+            snprintf(cmd, sizeof(cmd), "git push --force-with-lease --tags -u origin '%s' 2>&1",
+                     branch);
+         else if (force)
+            snprintf(cmd, sizeof(cmd), "git push --force-with-lease -u origin '%s' 2>&1", branch);
+         else if (tags)
+            snprintf(cmd, sizeof(cmd), "git push --tags -u origin '%s' 2>&1", branch);
+         else
+            snprintf(cmd, sizeof(cmd), "git push -u origin '%s' 2>&1", branch);
       }
    }
 
@@ -455,9 +611,33 @@ cJSON *handle_git_push(cJSON *args)
       free(hash_out);
    }
 
-   char result[512];
-   snprintf(result, sizeof(result), "pushed: %s -> origin/%s (%s)%s", branch, branch, hash,
-            force ? " (force-with-lease)" : "");
+   char result[1024];
+   if (has_explicit)
+   {
+      const char *dest = canonical_url;
+      if (tags && force)
+         snprintf(result, sizeof(result), "pushed: %s -> %s (%s) (force-with-lease) (tags)", branch,
+                  dest, hash);
+      else if (force)
+         snprintf(result, sizeof(result), "pushed: %s -> %s (%s) (force-with-lease)", branch, dest,
+                  hash);
+      else if (tags)
+         snprintf(result, sizeof(result), "pushed: %s -> %s (%s) (tags)", branch, dest, hash);
+      else
+         snprintf(result, sizeof(result), "pushed: %s -> %s (%s)", branch, dest, hash);
+   }
+   else
+   {
+      if (tags && force)
+         snprintf(result, sizeof(result), "pushed: %s -> origin/%s (%s) (force-with-lease) (tags)",
+                  branch, branch, hash);
+      else if (tags)
+         snprintf(result, sizeof(result), "pushed: %s -> origin/%s (%s) (tags)", branch, branch,
+                  hash);
+      else
+         snprintf(result, sizeof(result), "pushed: %s -> origin/%s (%s)%s", branch, branch, hash,
+                  force ? " (force-with-lease)" : "");
+   }
    return mcp_text(result);
 }
 

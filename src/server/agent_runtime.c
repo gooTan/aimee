@@ -309,9 +309,27 @@ int agent_dispatch_one(const agent_t *ag, const agent_network_t *net, const char
    int durable_job_id = agent_get_durable_job_id();
    if (durable_job_id > 0)
       db1_agent_job_set_agent(durable_job_id, ag->name);
-   int rc = use_tools ? agent_execute_with_tools_for_role(ag, net, role, system_prompt, user_prompt,
-                                                          max_tokens, temperature, out)
-                      : agent_execute(ag, system_prompt, user_prompt, max_tokens, temperature, out);
+   int rc;
+   if (!use_tools && agent_uses_provider_cli(ag))
+   {
+      if (strcmp(ag->cli_kind, "claude") != 0 && strcmp(ag->cli_kind, "claude-code") != 0)
+      {
+         snprintf(out->error, sizeof(out->error),
+                  "provider CLI '%s' cannot guarantee a tools-disabled invocation", ag->cli_kind);
+         rc = -1;
+      }
+      else
+      {
+         agent_t no_tools = *ag;
+         no_tools.tools_enabled = 0;
+         rc = agent_execute_with_tools_for_role(&no_tools, net, role, system_prompt, user_prompt,
+                                                max_tokens, temperature, out);
+      }
+   }
+   else
+      rc = use_tools ? agent_execute_with_tools_for_role(ag, net, role, system_prompt, user_prompt,
+                                                         max_tokens, temperature, out)
+                     : agent_execute(ag, system_prompt, user_prompt, max_tokens, temperature, out);
    agent_admission_release(admit_slot);
    if (rc == 0)
       provider_catalog_record_success(ag->name);

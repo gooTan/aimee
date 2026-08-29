@@ -6,12 +6,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	delegateapi "github.com/JBailes/aimee/server-go/delegate"
 	appconfig "github.com/JBailes/aimee/server-go/internal/config"
 	"github.com/JBailes/aimee/server-go/internal/db1"
 	"github.com/JBailes/aimee/server-go/internal/wfe"
@@ -51,6 +54,7 @@ func New(db *db1.Store, artifacts *wfe.ArtifactStore, workflowDir ...string) (*S
 	s.mux.HandleFunc("GET /v1/workflow/items/all", s.items)
 	s.mux.HandleFunc("GET /v1/workflow/items/{id}", s.item)
 	s.mux.HandleFunc("GET /v1/workflow/items/{id}/events", s.events)
+	s.mux.HandleFunc("POST /internal/model-events", s.recordModelEvent)
 	s.mux.HandleFunc("GET /v1/workflow/items/{id}/proposal", s.proposal)
 	s.mux.HandleFunc("POST /v1/workflow/items/{id}/pause", s.workflowPause)
 	s.mux.HandleFunc("POST /v1/workflow/items/{id}/resume", s.workflowResume)
@@ -255,7 +259,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 200 {
 		limit = 200
 	}
-	events, err := s.db.Events(r.Context(), r.PathValue("id"), after, limit)
+	events, err := s.db.EventsTree(r.Context(), r.PathValue("id"), after, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -268,6 +272,84 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		events = []db1.Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "next_after": next})
+}
+
+func (s *Server) recordModelEvent(w http.ResponseWriter, r *http.Request) {
+	var event struct {
+		WorkItemID string `json:"work_item_id"`
+		Stage      string `json:"stage"`
+		Kind       string `json:"kind"`
+		Actor      string `json:"actor"`
+		Detail     string `json:"detail"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+		return
+	}
+	allowed := event.Kind == "model_dispatch" || event.Kind == "model_heartbeat" || event.Kind == "model_progress" || event.Kind == "model_complete" || event.Kind == "model_error" || event.Kind == "model_fallback" ||
+		event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error"
+	if !allowed || event.WorkItemID == "" || event.Stage == "" || event.Actor == "" || len(event.Detail) > 4096 {
+		writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+		return
+	}
+	if event.Kind == delegateapi.ToolEventStart || event.Kind == delegateapi.ToolEventComplete || event.Kind == delegateapi.ToolEventError {
+		var ok bool
+		event.Detail, ok = delegateapi.ValidateToolEventDetail(event.Kind, event.Detail)
+		if !ok {
+			writeError(w, http.StatusBadRequest, errors.New("invalid model event"))
+			return
+		}
+	}
+	if event.Kind == "model_heartbeat" && !strings.Contains(event.Detail, " last_activity=") {
+		event.Detail = s.enrichModelHeartbeat(r.Context(), event.WorkItemID, event.Stage, event.Actor, event.Detail)
+	}
+	// Deduplicate tool events by their stable database identity. The insert is
+	// atomic so live and batch posts cannot race or miss events beyond a page.
+	if event.Kind == "model_tool_start" || event.Kind == "model_tool_complete" || event.Kind == "model_tool_error" {
+		if _, err := s.db.RecordToolEventIfAbsent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := s.db.RecordEvent(r.Context(), event.WorkItemID, event.Stage, event.Kind, event.Actor, event.Detail); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) enrichModelHeartbeat(ctx context.Context, workItemID, stage, actor, detail string) string {
+	identity, _, ok := strings.Cut(detail, " tools=")
+	if !ok {
+		return detail
+	}
+	activity := "model_dispatch"
+	activityAge := detailDuration(detail, "elapsed")
+	if event, found, err := s.db.LatestModelActivity(ctx, workItemID, stage, actor, identity); err == nil && found {
+		activity = event.Kind
+		if at, parseErr := time.ParseInLocation("2006-01-02 15:04:05", event.CreatedAt, time.UTC); parseErr == nil {
+			activityAge = max(time.Since(at), 0)
+		}
+	}
+	status := "running"
+	if activityAge >= delegateapi.ModelActivityStaleAfter {
+		status = "possibly_stalled"
+	}
+	detail = strings.Replace(detail, "status=running", "status="+status, 1)
+	return fmt.Sprintf("%s last_activity=%s activity=%s", detail, activityAge.Round(time.Second), activity)
+}
+
+func detailDuration(detail, key string) time.Duration {
+	for _, field := range strings.Fields(detail) {
+		if value, ok := strings.CutPrefix(field, key+"="); ok {
+			duration, _ := time.ParseDuration(value)
+			return duration
+		}
+	}
+	return 0
 }
 
 func (s *Server) proposal(w http.ResponseWriter, r *http.Request) {

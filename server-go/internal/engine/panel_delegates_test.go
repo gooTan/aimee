@@ -3,27 +3,31 @@ package engine
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/JBailes/aimee/server-go/delegate"
+	"github.com/JBailes/aimee/server-go/internal/db1"
 	roundtablecfg "github.com/JBailes/aimee/server-go/modules/roundtable/panel"
 )
 
 type recordingPlaneAgents struct {
-	requests []DelegateRequest
-	err      error
+	requests     []DelegateRequest
+	err          error
+	availability delegate.AvailabilityClass
 }
 
 func (a *recordingPlaneAgents) Delegate(_ context.Context, request DelegateRequest) (DelegateResult, error) {
 	a.requests = append(a.requests, request)
-	return DelegateResult{Response: "ok", Participant: "p"}, a.err
+	return DelegateResult{Response: "ok", Participant: "p", AvailabilityClass: a.availability}, a.err
 }
 
 func (a *recordingPlaneAgents) DelegateGroup(_ context.Context, requests []DelegateRequest) []DelegateGroupResult {
 	a.requests = append(a.requests, requests...)
 	out := make([]DelegateGroupResult, len(requests))
 	for i := range out {
-		out[i] = DelegateGroupResult{Response: "ok", Participant: "p", Err: a.err}
+		out[i] = DelegateGroupResult{Response: "ok", Participant: "p", AvailabilityClass: a.availability, Err: a.err}
 	}
 	return out
 }
@@ -85,6 +89,39 @@ func TestPanelDelegatesClassifyAndRedactTheirFailures(t *testing.T) {
 	}
 	if result.FailureDetail == "" {
 		t.Fatal("failure reached the panel with no detail to report")
+	}
+}
+
+func TestPanelDelegatesForwardAvailabilityClass(t *testing.T) {
+	err := &delegate.DelegateExecutionError{Err: errors.New("provider unavailable"), AvailabilityClass: delegate.AvailabilityClassProviderUnavailable}
+	agents := &recordingPlaneAgents{err: err, availability: delegate.AvailabilityClassProviderUnavailable}
+	plane := panelDelegates{runner: &NativeRunner{agents: agents}}
+	if got := plane.Group(context.Background(), testSeatRun(), []roundtablecfg.SeatRequest{{Persona: "qa"}})[0].AvailabilityClass; got != delegate.AvailabilityClassProviderUnavailable {
+		t.Fatalf("group lost availability class: %q", got)
+	}
+	if got := plane.One(context.Background(), testSeatRun(), roundtablecfg.SeatRequest{Persona: "qa"}).AvailabilityClass; got != delegate.AvailabilityClassProviderUnavailable {
+		t.Fatalf("single lost availability class: %q", got)
+	}
+}
+
+func TestPanelDelegatesRecordChairmanFallback(t *testing.T) {
+	store, err := db1.Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.CreateWorkItem(t.Context(), db1.CreateWorkItem{ID: "wi", Repo: "repo", ProposalPath: "p", WorkflowName: "build", StartStage: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	agents := &recordingPlaneAgents{}
+	plane := panelDelegates{runner: &NativeRunner{agents: agents, db: store}}
+	plane.One(t.Context(), testSeatRun(), roundtablecfg.SeatRequest{Selector: "sol", Persona: "chairman", FallbackFrom: "fable", FallbackReason: "quota_rate_limit"})
+	events, err := store.Events(t.Context(), "wi", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[1].Kind != "model_fallback" || events[1].Actor != "fable" || events[1].Detail != "to=sol reason=quota_rate_limit" {
+		t.Fatalf("fallback event=%+v", events)
 	}
 }
 

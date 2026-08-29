@@ -22,6 +22,25 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestRecordEventAppendsOperationalEvent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_observe", Repo: "repo", ProposalPath: "observe", WorkflowName: "build", StartStage: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(ctx, "wi_observe", "plan", "model_dispatch", "fable", "role=draft status=running"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.Events(ctx, "wi_observe", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := events[len(events)-1]
+	if got.Kind != "model_dispatch" || got.Actor != "fable" || got.Detail != "role=draft status=running" {
+		t.Fatalf("operational event=%+v", got)
+	}
+}
+
 func TestOpenMigratesPreGoWorkflowSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -47,6 +66,49 @@ func TestOpenMigratesPreGoWorkflowSchema(t *testing.T) {
 	}
 	if item.SourcePath == "" {
 		t.Fatal("source_path migration missing")
+	}
+	var packetSchemaVersion int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT packet_schema_version FROM lifecycle_work_item WHERE work_item_id=?`, "wi_migrated").Scan(&packetSchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	if packetSchemaVersion != 0 {
+		t.Fatalf("legacy packet_schema_version=%d, want 0", packetSchemaVersion)
+	}
+}
+
+func TestWorkItemPacketSchemaVersionRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_packet_root", Repo: "repo", ProposalPath: "root", WorkflowName: "build", StartStage: "start", PacketSchemaVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "wi_packet_child", Repo: "repo", ProposalPath: "child", WorkflowName: "slice", StartStage: "impl", ParentID: "wi_packet_root", PacketSchemaVersion: 2}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.WorkItem(ctx, "wi_packet_root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.PacketSchemaVersion != 1 {
+		t.Fatalf("WorkItem packet schema version=%d, want 1", item.PacketSchemaVersion)
+	}
+	items, err := store.WorkItems(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[string]int, len(items))
+	for _, item := range items {
+		versions[item.ID] = item.PacketSchemaVersion
+	}
+	if versions["wi_packet_root"] != 1 || versions["wi_packet_child"] != 2 {
+		t.Fatalf("WorkItems packet schema versions=%v", versions)
+	}
+	children, err := store.Children(ctx, "wi_packet_root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 || children[0].PacketSchemaVersion != 2 {
+		t.Fatalf("Children=%+v, want one child with schema version 2", children)
 	}
 }
 
@@ -331,6 +393,33 @@ func TestRetryLimitResumeStartsFreshBudgetAndKeepsDiagnostic(t *testing.T) {
 	}
 }
 
+func TestConvergenceResumeStartsFreshReviewBudget(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	createTestItem(t, store, "wi_convergence_resume")
+	for i := 0; i < 3; i++ {
+		out, err := store.RecordRequestedChanges(ctx, "wi_convergence_resume", "doc_gate", "document",
+			"same-doc", "same-feedback", "", 24, 3, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 2 && out.PauseReason != "convergence_no_progress" {
+			t.Fatalf("pause reason=%q, want convergence_no_progress", out.PauseReason)
+		}
+	}
+	if err := store.Resume(ctx, "wi_convergence_resume"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := store.RecordRequestedChanges(ctx, "wi_convergence_resume", "doc_gate", "document",
+		"same-doc", "same-feedback", "", 24, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Parked || out.Attempts != 1 || out.IdenticalRepeats != 1 {
+		t.Fatalf("first review after resume=%+v, want fresh budget", out)
+	}
+}
+
 func TestWorkflowBudgetHeartbeatExtendsReplayReservations(t *testing.T) {
 	for _, state := range []string{"actual", "unresolved"} {
 		t.Run(state, func(t *testing.T) {
@@ -440,6 +529,21 @@ func TestReplayUnrecoverableCanBeResumedByOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	item, err := store.WorkItem(context.Background(), "wi_replay_operator")
+	if err != nil || item.PauseReason != "" || item.State != "active" {
+		t.Fatalf("item=%+v err=%v", item, err)
+	}
+}
+
+func TestPremiumWriteRefusalCanBeRetriedAfterPolicyRepair(t *testing.T) {
+	store := newTestStore(t)
+	createTestItem(t, store, "wi_premium_policy")
+	if err := store.Park(context.Background(), "wi_premium_policy", "plan_gate", "premium_write_refused", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Resume(context.Background(), "wi_premium_policy"); err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.WorkItem(context.Background(), "wi_premium_policy")
 	if err != nil || item.PauseReason != "" || item.State != "active" {
 		t.Fatalf("item=%+v err=%v", item, err)
 	}
@@ -1107,5 +1211,29 @@ func TestGateIterationCapSurvivesTheAuthorsReentry(t *testing.T) {
 	}
 	if parkedAt != 2 {
 		t.Fatalf("gate parked at loop %d, want 2 (cap of 3); the author's re-entry reset the counter", parkedAt)
+	}
+}
+
+func TestEventsTreeIncludesDescendantsInGlobalOrder(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "root", Repo: "r", ProposalPath: "p", WorkflowName: "build", StartStage: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkItem(ctx, CreateWorkItem{ID: "child", ParentID: "root", Repo: "r", ProposalPath: "p-child", WorkflowName: "slice", StartStage: "impl"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(ctx, "child", "impl", "model_dispatch", "muse", "status=running"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEvent(ctx, "root", "plan", "model_complete", "fable", "status=complete"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.EventsTree(ctx, "root", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 || events[2].WorkItemID != "child" || events[2].Actor != "muse" || events[3].WorkItemID != "root" || events[3].Actor != "fable" {
+		t.Fatalf("events=%+v", events)
 	}
 }

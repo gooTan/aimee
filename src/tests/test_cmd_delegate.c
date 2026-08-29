@@ -939,6 +939,7 @@ static void test_via_override_rejects_role_mismatch(void)
    assert(delegate_apply_route_overrides(&cfg, "review", "coder", -1, NULL, NULL, errbuf,
                                          sizeof(errbuf)) == -1);
    assert(strstr(errbuf, "cannot handle role 'review'") != NULL);
+   assert(strstr(errbuf, "compatible seats: reviewer") != NULL);
    assert(cfg.agents[0].enabled == 1);
    assert(cfg.agents[1].enabled == 1);
 

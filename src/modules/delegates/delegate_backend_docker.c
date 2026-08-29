@@ -728,11 +728,35 @@ static void docker_pkg_forwarder_strip(const char *container)
    (void)run_docker(rm_argv);
 }
 
+static const char *docker_pkg_forwarder_path(char *buf, size_t cap)
+{
+#ifdef __linux__
+   ssize_t n = readlink("/proc/self/exe", buf, cap - 1);
+   if (n > 0 && (size_t)n < cap)
+   {
+      buf[n] = '\0';
+      char *slash = strrchr(buf, '/');
+      if (slash && (size_t)(slash - buf) + sizeof("/aimee-forwarder") <= cap)
+      {
+         strcpy(slash, "/aimee-forwarder");
+         if (access(buf, X_OK) == 0)
+            return buf;
+      }
+   }
+#else
+   (void)buf;
+   (void)cap;
+#endif
+   return "/usr/local/bin/aimee-forwarder";
+}
+
 static void docker_pkg_forwarder_setup(const char *container)
 {
-   /* Fixed, canonical ship path — never operator/env-overridable, so nothing can
-    * point the copy at an attacker-controlled binary. */
-   static const char *const bin = "/usr/local/bin/aimee-forwarder";
+   /* Trust only the server's installed directory, then the image's canonical
+    * path. Environment/PATH lookup would let an untrusted binary cross into the
+    * sandbox. */
+   char bin_buf[MAX_PATH_LEN];
+   const char *bin = docker_pkg_forwarder_path(bin_buf, sizeof(bin_buf));
    struct stat bst;
    if (stat(bin, &bst) != 0)
    {

@@ -15,6 +15,7 @@
 #include "server/obs_bus_adapter.h"
 #include <aimee/workspace/workspace.h>
 #include "session_worktree_key.h"
+#include "aimee_home.h"
 #include "modules/workspace/workspace_turn.h" /* workspace_turn_set_container_bound_for_test */
 #include "platform_test_util.h"
 #include "modules/git/git_verify.h"
@@ -462,20 +463,24 @@ static void test_worktree_sibling_path(void)
     * without re-pinning the key algorithm a second time — that has its own
     * dedicated test. */
    const char *sid = "fadc648f-1234-5678";
-   char key[SESSION_WORKTREE_KEY_MAX], expect[MAX_PATH_LEN];
+   char key[SESSION_WORKTREE_KEY_MAX], repo_key[SESSION_WORKTREE_REPO_KEY_MAX];
+   char expect[MAX_PATH_LEN];
    session_worktree_key(sid, key, sizeof(key));
+   session_worktree_repo_key("/root/dev/aimee", repo_key, sizeof(repo_key));
    assert(key[0]);
+   assert(repo_key[0]);
 
    /* Without work_name: session-level worktree. */
    int rc = worktree_sibling_path("/root/dev/aimee", sid, NULL, buf, sizeof(buf));
    assert(rc == 0);
-   snprintf(expect, sizeof(expect), "/root/dev/aimee/.aimee/worktrees/%s/main", key);
+   snprintf(expect, sizeof(expect), "%s/.aimee/worktrees/%s/%s/main", aimee_home(), repo_key, key);
    assert(strcmp(buf, expect) == 0);
 
    /* With work_name: per-delegate worktree, a sibling of the session one. */
    rc = worktree_sibling_path("/root/dev/aimee", sid, "task01", buf, sizeof(buf));
    assert(rc == 0);
-   snprintf(expect, sizeof(expect), "/root/dev/aimee/.aimee/worktrees/%s/task01", key);
+   snprintf(expect, sizeof(expect), "%s/.aimee/worktrees/%s/%s/task01", aimee_home(), repo_key,
+            key);
    assert(strcmp(buf, expect) == 0);
 
    /* Two ids that differ only past the OLD 16-char window must resolve to
@@ -485,7 +490,7 @@ static void test_worktree_sibling_path(void)
    rc =
        worktree_sibling_path("/root/dev/aimee", "fadc648f-1234-5678-b", NULL, other, sizeof(other));
    assert(rc == 0);
-   snprintf(expect, sizeof(expect), "/root/dev/aimee/.aimee/worktrees/%s/main", key);
+   snprintf(expect, sizeof(expect), "%s/.aimee/worktrees/%s/%s/main", aimee_home(), repo_key, key);
    assert(strcmp(other, expect) != 0);
 }
 
@@ -845,9 +850,8 @@ static void test_session_isolation_creates_and_returns_worktree(void)
    int rc = session_isolation_target(repo, "fadc648f-1234-5678", target, sizeof(target), 1);
    assert(rc == 1);
 
-   char skey[SESSION_WORKTREE_KEY_MAX], expected[MAX_PATH_LEN];
-   session_worktree_key("fadc648f-1234-5678", skey, sizeof(skey));
-   snprintf(expected, sizeof(expected), "%s/aimee/.aimee/worktrees/%s/main", tmpdir, skey);
+   char expected[MAX_PATH_LEN];
+   assert(worktree_sibling_path(repo, "fadc648f-1234-5678", NULL, expected, sizeof(expected)) == 0);
    assert(strcmp(target, expected) == 0);
 
    /* Worktree must exist on disk after create_if_missing */
@@ -872,8 +876,9 @@ static void test_session_isolation_sanitizes_malicious_sid(void)
    char target[MAX_PATH_LEN];
    int rc = session_isolation_target(repo, "../../../../etc/x", target, sizeof(target), 1);
    assert(rc == 1);
-   char prefix[MAX_PATH_LEN];
-   snprintf(prefix, sizeof(prefix), "%s/aimee/.aimee/worktrees/", tmpdir);
+   char prefix[MAX_PATH_LEN], repo_key[SESSION_WORKTREE_REPO_KEY_MAX];
+   session_worktree_repo_key(repo, repo_key, sizeof(repo_key));
+   snprintf(prefix, sizeof(prefix), "%s/.aimee/worktrees/%s/", aimee_home(), repo_key);
    assert(strncmp(target, prefix, strlen(prefix)) == 0); /* stays under worktrees/ */
    assert(strstr(target, "..") == NULL);                 /* no traversal component */
    struct stat st;
@@ -925,9 +930,8 @@ static void test_session_isolation_creates_new_worktree_from_existing_worktree(v
    assert(rc == 1);
    assert(strcmp(first, second) != 0);
 
-   char skey2[SESSION_WORKTREE_KEY_MAX], expected[MAX_PATH_LEN];
-   session_worktree_key("ccccdddd-1234-5678", skey2, sizeof(skey2));
-   snprintf(expected, sizeof(expected), "%s/aimee/.aimee/worktrees/%s/main", tmpdir, skey2);
+   char expected[MAX_PATH_LEN];
+   assert(worktree_sibling_path(repo, "ccccdddd-1234-5678", NULL, expected, sizeof(expected)) == 0);
    assert(strcmp(second, expected) == 0);
 
    struct stat st;
@@ -1809,7 +1813,7 @@ static void test_external_default_checkout_blocks_writes(void)
    /* Auto-redirect now fires before the hard block: the write is transparently
     * re-targeted at the per-session worktree (rc=3) rather than blocked (rc=2). */
    assert(rc == 3);
-   assert(strstr(msg, tmpdir) != NULL);
+   assert(strstr(msg, "/.aimee/worktrees/") != NULL);
 
    guardrails_close_test_sqlite();
 
@@ -3767,8 +3771,9 @@ int main(void)
 
    /* Session_state tests round-trip through DB1. Open a throwaway sqlite
     * file for the test run; db1_init applies the schema on first open. */
-   char db_path[128];
-   snprintf(db_path, sizeof(db_path), "/tmp/test-guardrails-db1-%d.sqlite", (int)getpid());
+   char db_path[512];
+   snprintf(db_path, sizeof(db_path), "%s/test-guardrails-db1-%d.sqlite", platform_tmpdir(),
+            (int)getpid());
    unlink(db_path);
    assert(db1_init(db_path) == 0);
    assert(server_obs_bus_configure() == 0);

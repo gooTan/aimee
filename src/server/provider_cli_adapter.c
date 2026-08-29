@@ -918,7 +918,16 @@ static int provider_cli_parse_output(const provider_cli_adapter_t *adapter, char
          turns++;
       }
       else if (event.type == CLI_EVENT_ERROR && !event_error[0])
-         snprintf(event_error, sizeof(event_error), "%s", event.text);
+         snprintf(event_error, sizeof(event_error), "%s",
+                  event.text[0] ? event.text : "provider CLI error");
+   }
+
+   if (event_error[0])
+   {
+      free(parsed.text);
+      free(raw.text);
+      snprintf(out->error, sizeof(out->error), "%s", event_error);
+      return -1;
    }
 
    if (parsed.len > 0)
@@ -941,11 +950,7 @@ static int provider_cli_parse_output(const provider_cli_adapter_t *adapter, char
    }
    free(raw.text);
 
-   if (event_error[0])
-      snprintf(out->error, sizeof(out->error), "%s", event_error);
-   else
-      snprintf(out->error, sizeof(out->error), "%s returned no assistant text",
-               adapter->display_name);
+   snprintf(out->error, sizeof(out->error), "%s returned no assistant text", adapter->display_name);
    return -1;
 }
 

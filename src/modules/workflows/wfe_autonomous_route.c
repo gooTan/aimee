@@ -23,10 +23,8 @@
 #include <string.h>
 
 /* Two short identifiers in, three small fields out. */
-#define WFE_AUTONOMOUS_MAX_BODY (8u * 1024u)
-/* On the routing path, so the deadline is short: a slow module clamps to the
- * floor rather than holding a submission open. */
-#define WFE_AUTONOMOUS_TIMEOUT_MS 3000
+#define WFE_AUTONOMOUS_MAX_BODY   (8u * 1024u)
+#define WFE_AUTONOMOUS_TIMEOUT_MS 0
 
 /* One round trip. Fills `out` with the module's chosen workflow (bounded by
  * out_len) and returns 1 when the id was selectable, 0 otherwise. Any failure

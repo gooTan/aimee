@@ -26,27 +26,25 @@ int main(void)
 {
    printf("wfe-autonomous-route: ");
 
-   /* The floor is a full-spine enforced workflow, not the weaker "build", and
-    * the sweep floor is the human gate. Both are mirrored module-side. */
-   assert(strcmp(WFE_AUTONOMOUS_FLOOR, "managed-change") == 0);
-   assert(strcmp(wfe_sweep_workflow_floor(), "manual-review") == 0);
+   assert(strcmp(WFE_AUTONOMOUS_FLOOR, "build") == 0);
+   assert(strcmp(wfe_sweep_workflow_floor(), "") == 0);
 
    /* --- a selectable answer passes through --- */
-   module_bus_stub_reply("{\"selectable\":true,\"workflow\":\"hotfix\",\"clamped\":false}");
-   assert(wfe_autonomous_selectable("hotfix", 1) == 1);
+   module_bus_stub_reply("{\"selectable\":true,\"workflow\":\"build\",\"clamped\":false}");
+   assert(wfe_autonomous_selectable("build", 1) == 1);
    assert(module_bus_stub_last_event() == AIMEE_WORKFLOWS_EVENT_AUTONOMOUS_ROUTE);
    assert(module_bus_stub_last_stage() == AIMEE_WORKFLOWS_STAGE_AUTONOMOUS_ROUTE);
 
    int clamped = -1;
-   const char *r = wfe_autonomous_clamp("hotfix", 1, &clamped);
-   assert(strcmp(r, "hotfix") == 0 && clamped == 0);
+   const char *r = wfe_autonomous_clamp("build", 1, &clamped);
+   assert(strcmp(r, "build") == 0 && clamped == 0);
    /* The contract is that a selectable id passes through UNCHANGED: callers may
     * compare the result against what they passed in. */
-   const char *requested = "hotfix";
+   const char *requested = "build";
    assert(wfe_autonomous_clamp(requested, 1, NULL) == requested);
 
    /* --- a refusal clamps to the floor --- */
-   module_bus_stub_reply("{\"selectable\":false,\"workflow\":\"managed-change\",\"clamped\":true}");
+   module_bus_stub_reply("{\"selectable\":false,\"workflow\":\"build\",\"clamped\":true}");
    assert(wfe_autonomous_selectable("research", 1) == 0);
    clamped = -1;
    r = wfe_autonomous_clamp("research", 1, &clamped);
@@ -66,19 +64,19 @@ int main(void)
    {
       module_bus_stub_reply(bad[i]);
       clamped = -1;
-      r = wfe_autonomous_clamp("hotfix", 1, &clamped);
+      r = wfe_autonomous_clamp("build", 1, &clamped);
       assert(strcmp(r, WFE_AUTONOMOUS_FLOOR) == 0 && clamped == 1);
-      assert(wfe_autonomous_selectable("hotfix", 1) == 0);
+      assert(wfe_autonomous_selectable("build", 1) == 0);
    }
 
    module_bus_stub_absent(); /* module not attached */
    clamped = -1;
-   r = wfe_autonomous_clamp("hotfix", 1, &clamped);
+   r = wfe_autonomous_clamp("build", 1, &clamped);
    assert(strcmp(r, WFE_AUTONOMOUS_FLOOR) == 0 && clamped == 1);
 
-   module_bus_stub_fail(AIMEE_MODULE_CALL_DEADLINE_EXCEEDED); /* module too slow */
+   module_bus_stub_fail(AIMEE_MODULE_CALL_DEADLINE_EXCEEDED);
    clamped = -1;
-   r = wfe_autonomous_clamp("hotfix", 1, &clamped);
+   r = wfe_autonomous_clamp("build", 1, &clamped);
    assert(strcmp(r, WFE_AUTONOMOUS_FLOOR) == 0 && clamped == 1);
 
    /* A name longer than the clamp can hold must be treated as not selectable
@@ -91,7 +89,7 @@ int main(void)
                sizeof(huge) - (size_t)n - WFE_AUTONOMOUS_ID_MAX - 8, "\"}");
       module_bus_stub_reply(huge);
       clamped = -1;
-      r = wfe_autonomous_clamp("hotfix", 1, &clamped);
+      r = wfe_autonomous_clamp("build", 1, &clamped);
       assert(strcmp(r, WFE_AUTONOMOUS_FLOOR) == 0 && clamped == 1);
    }
 

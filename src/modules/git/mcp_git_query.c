@@ -355,6 +355,33 @@ static void mcp_git_add_candidate(char candidates[][MAX_PATH_LEN], int *count, i
    (*count)++;
 }
 
+static int mcp_git_worktree_owner(const char *path, char *out, size_t out_len)
+{
+   char *esc = shell_escape(path);
+   char cmd[MAX_PATH_LEN + 96];
+   snprintf(cmd, sizeof(cmd),
+            "git -C %s rev-parse --path-format=absolute --git-common-dir 2>/dev/null", esc);
+   free(esc);
+   int rc = -1;
+   char *common = mcp_git_run(cmd, &rc);
+   if (rc != 0 || !common)
+   {
+      free(common);
+      return -1;
+   }
+   trim_trailing_newline(common);
+   size_t len = strlen(common);
+   if (len <= 5 || strcmp(common + len - 5, "/.git") != 0 || len - 5 >= out_len)
+   {
+      free(common);
+      return -1;
+   }
+   memcpy(out, common, len - 5);
+   out[len - 5] = '\0';
+   free(common);
+   return 0;
+}
+
 static int mcp_git_replace_stale_delegate_cwd(const char *tracked, char *out, size_t out_len)
 {
    if (!tracked || !tracked[0] || !out || out_len == 0)
@@ -363,7 +390,10 @@ static int mcp_git_replace_stale_delegate_cwd(const char *tracked, char *out, si
    if (!marker || marker == tracked)
       return 0;
    const char *slot = marker + strlen("/.aimee/worktrees/");
-   if (strncmp(slot, "deleg-", 6) != 0)
+   const char *leaf = strrchr(slot, '/');
+   /* Session worktrees end in /main. Every other managed leaf is a transient
+    * delegate worktree, in both the legacy and externalized layouts. */
+   if (!leaf || strcmp(leaf + 1, "main") == 0)
       return 0;
 
    const char *sid = session_id();
@@ -372,12 +402,18 @@ static int mcp_git_replace_stale_delegate_cwd(const char *tracked, char *out, si
 
    /* Delegate worktrees are transient; a stale git-cwd entry should not anchor
     * later MCP calls when the owning session main worktree is still present. */
-   size_t root_len = (size_t)(marker - tracked);
-   if (root_len == 0 || root_len >= out_len)
-      return 0;
    char root[MAX_PATH_LEN];
-   memcpy(root, tracked, root_len);
-   root[root_len] = '\0';
+   if (strncmp(slot, "deleg-", 6) == 0)
+   {
+      /* Compatibility with legacy standalone test/launcher worktrees. */
+      size_t root_len = (size_t)(marker - tracked);
+      if (root_len == 0 || root_len >= sizeof(root))
+         return 0;
+      memcpy(root, tracked, root_len);
+      root[root_len] = '\0';
+   }
+   else if (mcp_git_worktree_owner(tracked, root, sizeof(root)) != 0)
+      return 0;
 
    char candidate[MAX_PATH_LEN];
    if (worktree_sibling_path(root, sid, NULL, candidate, sizeof(candidate)) != 0)

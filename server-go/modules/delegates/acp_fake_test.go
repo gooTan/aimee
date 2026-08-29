@@ -238,6 +238,28 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 	}
 	switch scenario {
+	case "refuse-initialize":
+		p1 := readRequest(1, "initialize")
+		validateInit(p1)
+		reply(1, nil, "unsupported protocol")
+		waitShort()
+		os.Exit(0)
+	case "refuse-session":
+		p1 := readRequest(1, "initialize")
+		validateInit(p1)
+		reply(1, map[string]interface{}{}, "")
+		readRequest(2, "session/new")
+		reply(2, nil, "session refused")
+		waitShort()
+		os.Exit(0)
+	case "missing-session-id":
+		p1 := readRequest(1, "initialize")
+		validateInit(p1)
+		reply(1, map[string]interface{}{}, "")
+		readRequest(2, "session/new")
+		reply(2, map[string]interface{}{}, "")
+		waitShort()
+		os.Exit(0)
 	case "large-message":
 		acceptInitAndNew()
 		acceptModel()

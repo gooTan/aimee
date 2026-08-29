@@ -470,14 +470,18 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 			return nil, errors.New("codex CLI cannot guarantee a tools-disabled invocation")
 		}
 		argv = append(argv, "exec", "--ephemeral", "--json", "--skip-git-repo-check", "--color", "never")
+		sandboxMode := "read-only"
 		if RoleIsWrite(request.Role) {
-			argv = append(argv, "--sandbox", "workspace-write")
-		} else {
-			argv = append(argv, "--sandbox", "read-only")
+			sandboxMode = "workspace-write"
 		}
+		approvalPolicy := "on-request"
+		argv = append(argv, "-c", fmt.Sprintf("approval_policy=%q", approvalPolicy))
+		argv = append(argv, "-c", `approvals_reviewer="auto_review"`)
+		argv = append(argv, "-c", fmt.Sprintf("sandbox_mode=%q", sandboxMode))
 		if agent.Model != "" {
 			argv = append(argv, "--model", agent.Model)
 		}
+		argv = append(argv, "-c", `plugins."aimee@local".mcp_servers.aimee.default_tools_approval_mode="approve"`)
 		argv = append(argv, "-")
 	case "claude", "claude-code":
 		argv = append(argv, "-p", "--output-format", "stream-json", "--verbose")
@@ -485,9 +489,9 @@ func executorArgv(agent agentEntry, request delegatecontract.Invocation, prompt 
 			argv = append(argv, "--model", agent.Model)
 		}
 		if !request.Tools {
-			// Claude documents an empty --tools value as the explicit mechanism
-			// for disabling every built-in tool; preserve the empty argv element.
-			argv = append(argv, "--tools", "")
+			// --tools "" disables built-ins; strict MCP also ignores user/project
+			// MCP settings, which otherwise remain callable in a tools-off turn.
+			argv = append(argv, "--tools", "", "--strict-mcp-config")
 		} else {
 			argv = append(argv, "--mcp-config",
 				`{"mcpServers":{"aimee":{"command":"aimee","args":["mcp-serve"]}}}`)
@@ -697,6 +701,62 @@ func streamErrorDetail(kind string, output []byte) string {
 	return strings.TrimSpace(detail)
 }
 
+func streamFailureDetail(kind string, output []byte) string {
+	if kind = strings.ToLower(strings.TrimSpace(kind)); kind != "claude" && kind != "claude-code" {
+		return ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), maxExecutorOutput)
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil || item["type"] != "result" {
+			continue
+		}
+		result, _ := item["result"].(string)
+		failed, _ := item["is_error"].(bool)
+		if subtype, _ := item["subtype"].(string); strings.HasPrefix(subtype, "error_") {
+			failed = true
+		}
+		if status, ok := item["api_error_status"]; ok && status != nil {
+			value, numeric := status.(float64)
+			failed = failed || !numeric || value != 0
+		}
+		if reason, _ := item["terminal_reason"].(string); reason != "" && reason != "completed" {
+			failed = true
+		}
+		if claudeLegacyTerminalResult(result) {
+			failed = true
+		}
+		if failed {
+			if strings.TrimSpace(result) != "" {
+				return result
+			}
+			return "Claude CLI returned a terminal error"
+		}
+	}
+	return ""
+}
+
+func claudeLegacyTerminalResult(result string) bool {
+	result = strings.ToLower(strings.TrimSpace(result))
+	for _, prefix := range []string{
+		"login expired",
+		"you have hit your session limit",
+		"you've hit your session limit",
+		"you have hit your usage limit",
+		"you've hit your usage limit",
+		"you have reached your usage limit",
+		"you've reached your usage limit",
+		"reached your usage limit",
+		"usage limit for this billing cycle",
+	} {
+		if strings.HasPrefix(result, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func finalOutput(kind string, output []byte) string {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	if kind == "" || kind == "generic" {
@@ -862,12 +922,14 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 	if err != nil {
 		return nil, nil, err
 	}
-	encoded, err := json.Marshal(argv)
+	controlRead, controlWrite, err := os.Pipe()
 	if err != nil {
 		return nil, nil, err
 	}
-	controlRead, controlWrite, err := os.Pipe()
+	encoded, err := json.Marshal(argv)
 	if err != nil {
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
 		return nil, nil, err
 	}
 	cmd := exec.CommandContext(ctx, executable, watchdogArgument)
@@ -886,6 +948,83 @@ func executorCommand(ctx context.Context, argv []string) (*exec.Cmd, func(), err
 	}
 	cmd.WaitDelay = 5 * time.Second
 	return cmd, closeControl, nil
+}
+
+func prepareReadOnlyCodexHome(registryHome string) (string, error) {
+	source := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if source == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		source = filepath.Join(userHome, ".codex")
+	}
+	base := filepath.Join(registryHome, "runtime", "codex-homes")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	scratch, err := os.MkdirTemp(base, "read-only-")
+	if err != nil {
+		return "", err
+	}
+	fail := func(err error) (string, error) {
+		_ = os.RemoveAll(scratch)
+		return "", err
+	}
+	for _, name := range []string{"auth.json", "config.toml"} {
+		body, err := os.ReadFile(filepath.Join(source, name))
+		if err != nil {
+			return fail(fmt.Errorf("prepare Codex sandbox %s: %w", name, err))
+		}
+		if err := os.WriteFile(filepath.Join(scratch, name), body, 0o600); err != nil {
+			return fail(err)
+		}
+	}
+	if body, err := os.ReadFile(filepath.Join(source, "hooks.json")); err == nil {
+		if err := os.WriteFile(filepath.Join(scratch, "hooks.json"), body, 0o600); err != nil {
+			return fail(err)
+		}
+	}
+	for _, name := range []string{"plugins", "skills"} {
+		if _, err := os.Stat(filepath.Join(source, name)); err == nil {
+			if err := os.Symlink(filepath.Join(source, name), filepath.Join(scratch, name)); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	for _, name := range []string{"cache", "sessions", "shell_snapshots", "tmp", "log"} {
+		if err := os.Mkdir(filepath.Join(scratch, name), 0o700); err != nil {
+			return fail(err)
+		}
+	}
+	return scratch, nil
+}
+
+func executorReadOnlyCodexCommand(ctx context.Context, argv []string, registryHome, workdir string) (*exec.Cmd, func(), error) {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		return nil, nil, fmt.Errorf("read-only Codex isolation requires bwrap: %w", err)
+	}
+	scratch, err := prepareReadOnlyCodexHome(registryHome)
+	if err != nil {
+		return nil, nil, err
+	}
+	wrapped := []string{bwrap, "--die-with-parent", "--new-session", "--ro-bind", "/", "/",
+		"--dev-bind", "/dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+		"--bind", scratch, scratch, "--setenv", "CODEX_HOME", scratch, "--chdir", workdir, "--"}
+	wrapped = append(wrapped, argv...)
+	cmd, closeCommand, err := executorCommand(ctx, wrapped)
+	if err != nil {
+		_ = os.RemoveAll(scratch)
+		return nil, nil, err
+	}
+	var closeOnce sync.Once
+	return cmd, func() {
+		closeOnce.Do(func() {
+			closeCommand()
+			_ = os.RemoveAll(scratch)
+		})
+	}, nil
 }
 
 func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract.Invocation) delegatecontract.InvocationResult {
@@ -915,13 +1054,19 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	if RoleIsWrite(request.Role) && strings.TrimSpace(request.Workdir) == "" {
 		return fail(errors.New("write-capable delegate requires an isolated worktree"), "write-capable delegate requires an isolated worktree")
 	}
+	readOnlyCodex := strings.EqualFold(strings.TrimSpace(agent.CLIKind), "codex") && !RoleIsWrite(request.Role)
+	if readOnlyCodex && strings.TrimSpace(request.Workdir) == "" {
+		return fail(errors.New("read-only codex delegate requires an isolated checkout"), "read-only codex delegate requires an isolated checkout")
+	}
 	if request.Workdir != "" {
 		if !filepath.IsAbs(request.Workdir) {
 			return fail(errors.New("delegate workdir must be absolute"), "delegate workdir must be absolute")
 		}
-		if _, err := os.Lstat(filepath.Join(request.Workdir, ".git")); err != nil {
+		root, err := gitCheckoutRoot(request.Workdir)
+		if err != nil {
 			return fail(err, "delegate workdir is not a git checkout")
 		}
+		request.Workdir = root
 	}
 	prompt := request.Prompt
 	if persona := strings.TrimSpace(request.Persona); persona != "" {
@@ -933,7 +1078,13 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
-	cmd, closeCommand, err := executorCommand(runCtx, argv)
+	var cmd *exec.Cmd
+	var closeCommand func()
+	if readOnlyCodex {
+		cmd, closeCommand, err = executorReadOnlyCodexCommand(runCtx, argv, filepath.Dir(r.path), request.Workdir)
+	} else {
+		cmd, closeCommand, err = executorCommand(runCtx, argv)
+	}
 	if err != nil {
 		return fail(err, err.Error())
 	}
@@ -1003,6 +1154,13 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 		return result
 	}
 	outputBytes := output.BytesCopy()
+	if detail := streamFailureDetail(agent.CLIKind, outputBytes); detail != "" {
+		result.ResponseStarted = outputResponseStarted(agent.CLIKind, outputBytes)
+		result.ToolEvents = col.result()
+		result.Error = delegatecontract.SafeDiagnosticSummary(detail, maxExecutorDiagnostic)
+		result.AvailabilityClass = delegatecontract.ClassifyProviderAvailability(errors.New(detail), result.ResponseStarted)
+		return result
+	}
 	response := finalOutput(agent.CLIKind, outputBytes)
 	if response == "" {
 		result.ResponseStarted = outputResponseStarted(agent.CLIKind, outputBytes)
@@ -1021,6 +1179,29 @@ func (r *RegistryExecutor) Execute(ctx context.Context, request delegatecontract
 	result.ResponseStarted = true
 	result.ToolEvents = col.result()
 	return result
+}
+
+func gitCheckoutRoot(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(current); err != nil || !info.IsDir() {
+		if err != nil {
+			return "", err
+		}
+		return "", errors.New("delegate workdir is not a directory")
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", errors.New("no git checkout contains delegate workdir")
+		}
+		current = parent
+	}
 }
 
 // cancelledContext bridges the bus runtime's cancellation bit into os/exec.

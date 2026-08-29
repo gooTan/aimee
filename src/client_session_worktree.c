@@ -8,6 +8,7 @@
 #include "client_session_worktree.h"
 #include "cli_attention_guard.h" /* attn_require_session_worktree, attn_session_isolation_blocked */
 #include "session_worktree_key.h"
+#include "aimee_home.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -418,7 +419,12 @@ int client_session_worktree_ensure(const char *sid, char *out, size_t cap)
       return -1; /* not a git repo -> nothing to prepare */
 
    char wt[4200];
-   if (snprintf(wt, sizeof wt, "%s/.aimee/worktrees/%s/main", git_root, key) >= (int)sizeof wt)
+   char repo_key[SESSION_WORKTREE_REPO_KEY_MAX];
+   session_worktree_repo_key(git_root, repo_key, sizeof repo_key);
+   const char *home = aimee_home();
+   if (!repo_key[0] || !home || !home[0] ||
+       snprintf(wt, sizeof wt, "%s/.aimee/worktrees/%s/%s/main", home, repo_key, key) >=
+           (int)sizeof wt)
       return -2;
    char branch[128];
    if (snprintf(branch, sizeof branch, "aimee/session/%s", key) >= (int)sizeof branch)

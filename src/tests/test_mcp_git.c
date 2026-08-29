@@ -281,12 +281,10 @@ static void test_mcp_chdir_repairs_stale_delegate_tracked_cwd(void)
 
    char session_main[MAX_PATH_LEN];
    char stale_delegate[MAX_PATH_LEN];
-   /* Derive the key rather than hard-coding it. The session key is a hash of the
-    * full id now, not its first 16 characters — a literal path here silently
-    * stopped matching what the resolver computes. */
-   char skey[SESSION_WORKTREE_KEY_MAX];
-   session_worktree_key("102ee97d-session", skey, sizeof(skey));
-   snprintf(session_main, sizeof(session_main), "%s/.aimee/worktrees/%s/main", g_tmpdir, skey);
+   /* Resolve through the shared layout helper so this seam follows externalized
+    * session worktrees as well as the former in-repo layout. */
+   assert(worktree_sibling_path(g_tmpdir, "102ee97d-session", NULL, session_main,
+                                sizeof(session_main)) == 0);
    snprintf(stale_delegate, sizeof(stale_delegate), "%s/.aimee/worktrees/deleg-24/37368447",
             g_tmpdir);
 
@@ -314,6 +312,52 @@ static void test_mcp_chdir_repairs_stale_delegate_tracked_cwd(void)
    cJSON_Delete(args);
    unlink(cwd_path);
    session_id_clear_override();
+   char cleanup[MAX_PATH_LEN + 32];
+   snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", session_main);
+   assert(system(cleanup) == 0);
+   teardown_git_repo();
+}
+
+static void test_mcp_chdir_repairs_externalized_delegate_tracked_cwd(void)
+{
+   setup_git_repo();
+
+   char session_main[MAX_PATH_LEN];
+   char stale_delegate[MAX_PATH_LEN];
+   assert(worktree_sibling_path(g_tmpdir, "102ee97d-session", NULL, session_main,
+                                sizeof(session_main)) == 0);
+   assert(worktree_sibling_path(g_tmpdir, "deleg-stale", "work", stale_delegate,
+                                sizeof(stale_delegate)) == 0);
+
+   char cmd[MAX_PATH_LEN * 3];
+   snprintf(cmd, sizeof(cmd),
+            "mkdir -p '%s' '%s' && git -C '%s' worktree add -q -b session-main-%d '%s' HEAD && "
+            "git -C '%s' worktree add -q -b delegate-stale-%d '%s' HEAD",
+            session_main, stale_delegate, g_tmpdir, (int)getpid(), session_main, g_tmpdir,
+            (int)getpid(), stale_delegate);
+   assert(system(cmd) == 0);
+
+   session_id_set_override("102ee97d-session");
+   char cwd_path[MAX_PATH_LEN];
+   snprintf(cwd_path, sizeof(cwd_path), "%s/git-cwd-%s", config_output_dir(), session_id());
+   FILE *fp = fopen(cwd_path, "w");
+   assert(fp != NULL);
+   fputs(stale_delegate, fp);
+   fclose(fp);
+
+   assert(chdir("/tmp") == 0);
+   cJSON *args = cJSON_CreateObject();
+   assert(mcp_chdir_git_root(NULL, 0, args, NULL) == 1);
+   assert(strcmp(run_cmd_get_cwd(), session_main) == 0);
+
+   run_cmd_set_cwd(NULL);
+   cJSON_Delete(args);
+   unlink(cwd_path);
+   session_id_clear_override();
+   snprintf(cmd, sizeof(cmd),
+            "git -C '%s' worktree remove --force '%s' && git -C '%s' worktree remove --force '%s'",
+            g_tmpdir, stale_delegate, g_tmpdir, session_main);
+   assert(system(cmd) == 0);
    teardown_git_repo();
 }
 
@@ -4039,6 +4083,7 @@ int main(void)
    test_mcp_chdir_session_cwd_precedes_proxy_cwd();
    test_explicit_path_is_authoritative_and_live();
    test_mcp_chdir_repairs_stale_delegate_tracked_cwd();
+   test_mcp_chdir_repairs_externalized_delegate_tracked_cwd();
    test_mcp_chdir_keeps_stale_delegate_cwd_when_repair_missing();
    test_mcp_chdir_does_not_repair_delegate_session_cwd();
    test_mcp_chdir_keeps_explicit_managed_worktree_despite_stale_session_state();

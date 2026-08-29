@@ -8,14 +8,14 @@ import "testing"
 
 func TestAutonomousFloorIsFullSpine(t *testing.T) {
 	// The floor is a full-spine enforced workflow, not the weaker "build".
-	if AutonomousFloor != "managed-change" {
-		t.Fatalf("floor = %q, want managed-change", AutonomousFloor)
+	if AutonomousFloor != "build" {
+		t.Fatalf("floor = %q, want build", AutonomousFloor)
 	}
 	// Sweep is pinned to the human gate, and that gate is itself never an
 	// auto-selectable lane: unvetted candidates can never reach an auto-executing
 	// workflow.
-	if SweepWorkflowFloor != "manual-review" {
-		t.Fatalf("sweep floor = %q, want manual-review", SweepWorkflowFloor)
+	if SweepWorkflowFloor != "" {
+		t.Fatalf("sweep floor = %q, want disabled", SweepWorkflowFloor)
 	}
 	if AutonomousSelectable(SweepWorkflowFloor, false) {
 		t.Fatal("the sweep floor must not be auto-selectable")

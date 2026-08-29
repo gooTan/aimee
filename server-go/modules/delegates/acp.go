@@ -311,6 +311,7 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 		return fail(err, err.Error(), false)
 	}
 	defer transport.close()
+	postModelProgressLive(ctx, request.Workflow, "acp_started")
 	// id1 initialize
 	initParams := map[string]any{
 		"protocolVersion": 1,
@@ -324,9 +325,14 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 	if err := transport.send(1, "initialize", initParams); err != nil {
 		return fail(err, err.Error(), false)
 	}
-	if _, err := transport.waitResponse(1, 5*time.Second); err != nil {
+	resp1, err := transport.waitResponse(1, 0)
+	if err != nil {
 		return fail(err, err.Error(), false)
 	}
+	if err := acpResponseError(resp1); err != nil {
+		return fail(err, "initialize: "+err.Error(), false)
+	}
+	postModelProgressLive(ctx, request.Workflow, "acp_initialized")
 	// id2 session/new
 	cwd := strings.TrimSpace(request.Workdir)
 	if cwd == "" {
@@ -342,19 +348,28 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 	if err := transport.send(2, "session/new", newParams); err != nil {
 		return fail(err, err.Error(), false)
 	}
-	resp2, err := transport.waitResponse(2, 10*time.Second)
+	resp2, err := transport.waitResponse(2, 0)
 	if err != nil {
 		return fail(err, err.Error(), false)
 	}
+	if err := acpResponseError(resp2); err != nil {
+		return fail(err, "session/new: "+err.Error(), false)
+	}
 	sessionID := ""
-	if resp2.Error == nil && len(resp2.Result) > 0 && string(resp2.Result) != "null" {
+	if len(resp2.Result) > 0 && string(resp2.Result) != "null" {
 		var parsed struct {
 			SessionID *string `json:"sessionId"`
 		}
-		if e := json.Unmarshal(resp2.Result, &parsed); e == nil && parsed.SessionID != nil {
+		if e := json.Unmarshal(resp2.Result, &parsed); e != nil {
+			return fail(e, "session/new returned invalid result", false)
+		} else if parsed.SessionID != nil {
 			sessionID = *parsed.SessionID
 		}
 	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fail(errors.New("session/new returned no session id"), "session/new returned no session id", false)
+	}
+	postModelProgressLive(ctx, request.Workflow, "acp_session_created")
 	// id4 session/set_model
 	if model := strings.TrimSpace(agent.Model); model != "" {
 		params := map[string]any{
@@ -364,13 +379,14 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 		if err := transport.send(4, "session/set_model", params); err != nil {
 			return fail(err, fmt.Sprintf("agent did not accept pinned model '%s' (session/set_model): %v", model, err), false)
 		}
-		resp4, err := transport.waitResponse(4, 10*time.Second)
+		resp4, err := transport.waitResponse(4, 0)
 		if err != nil {
 			return fail(err, fmt.Sprintf("agent did not accept pinned model '%s' (session/set_model): %v", model, err), false)
 		}
 		if acpResponseError(resp4) != nil || len(resp4.Result) == 0 {
 			return fail(acpResponseError(resp4), fmt.Sprintf("agent did not accept pinned model '%s' (session/set_model)", model), false)
 		}
+		postModelProgressLive(ctx, request.Workflow, "acp_model_selected")
 	}
 	// id5 session/set_config_option
 	if effort := strings.TrimSpace(agent.ReasoningEffort); effort != "" {
@@ -382,13 +398,14 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 		if err := transport.send(5, "session/set_config_option", params); err != nil {
 			return fail(err, fmt.Sprintf("agent did not accept reasoning effort '%s' (session/set_config_option): %v", effort, err), false)
 		}
-		resp5, err := transport.waitResponse(5, 10*time.Second)
+		resp5, err := transport.waitResponse(5, 0)
 		if err != nil {
 			return fail(err, fmt.Sprintf("agent did not accept reasoning effort '%s' (session/set_config_option): %v", effort, err), false)
 		}
 		if acpResponseError(resp5) != nil || len(resp5.Result) == 0 {
 			return fail(acpResponseError(resp5), fmt.Sprintf("agent did not accept reasoning effort '%s' (session/set_config_option)", effort), false)
 		}
+		postModelProgressLive(ctx, request.Workflow, "acp_effort_selected")
 	}
 	// id3 session/prompt
 	promptParams := map[string]any{
@@ -400,6 +417,7 @@ func (r *RegistryExecutor) executeACP(ctx context.Context, runCancel context.Can
 	if err := transport.send(3, "session/prompt", promptParams); err != nil {
 		return fail(err, err.Error(), false)
 	}
+	postModelProgressLive(ctx, request.Workflow, "acp_prompt_sent")
 	state := acpTurnState{promptID: 3}
 	for {
 		line, err := transport.nextLine(0)

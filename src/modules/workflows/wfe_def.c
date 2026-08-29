@@ -44,7 +44,7 @@ static const struct
      WFE_ART_PLAN,
      1,
      {WFE_ART_PROPOSAL, WFE_ART_INTENT, WFE_ART_NONE}},
-    /* implement also accepts an INTENT directly (S0): a single-packet `hotfix`
+    /* implement also accepts an INTENT directly (S0): a single-packet workflow
      * feeds understand -> implement without a split step. */
     {WFE_BLK_IMPLEMENT,
      "implement",

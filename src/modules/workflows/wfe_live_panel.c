@@ -45,9 +45,9 @@
 
 /* How long an unseatable/failed panel QUEUES for review agents before the gate
  * degrades. The review roster is small and shared with implement delegates:
- * under a parallel fleet, "no eligible review agent right now" is usually
- * transient — waiting out the contention converts an instant panel_degraded
- * park into a completed panel. 0 disables queueing (instant-degrade). */
+ * under a parallel fleet, "no eligible review agent right now" can be
+ * transient. The default is still instant-degrade: wall time is not a failure
+ * signal, and operators can see exact model activity in workflow events. */
 static long wfe_panel_seat_wait_secs(void)
 {
    const char *v = getenv("AIMEE_PANEL_SEAT_WAIT_SECS");
@@ -58,7 +58,7 @@ static long wfe_panel_seat_wait_secs(void)
       if (end && *end == '\0' && s >= 0 && s <= 3600)
          return s;
    }
-   return 300;
+   return 0;
 }
 
 #define WFE_PANEL_SEAT_POLL_SECS 15

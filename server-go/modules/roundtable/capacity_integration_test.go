@@ -67,6 +67,10 @@ func (b *moduleStageBridge) Call(ctx context.Context, _ uint32, stage uint32, _ 
 
 func TestTenOverlappingPanelsCrossGoProducerAdmissionWithoutUnreachable(t *testing.T) {
 	const campaigns = 10
+	workdir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	home := t.TempDir()
 	script := filepath.Join(home, "slow-reviewer")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 2\nprintf done\n"), 0o700); err != nil {
@@ -103,6 +107,7 @@ func TestTenOverlappingPanelsCrossGoProducerAdmissionWithoutUnreachable(t *testi
 		go func(i int) {
 			defer wg.Done()
 			run := panel.Run{ID: "live-capacity-" + string(rune('a'+i)),
+				Workdir:         workdir,
 				OriginalRequest: "review the implementation under overlapping delegate load",
 				Reviewed:        panel.Artifact{Stage: "frozen_diff", Content: content, Hash: panel.Hash([]byte(content))}}
 			result, err := panel.Convene(t.Context(), delegates, run, reviewPanel, "")

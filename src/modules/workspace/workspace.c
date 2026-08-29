@@ -8,6 +8,7 @@
 #include "kb_client.h"
 #include "headers/branch_ownership.h"
 #include "config.h"
+#include "aimee_home.h"
 #include "headers/platform_path.h"
 #include "headers/util.h"
 #include "report_enrichment.h" /* report_subject_from_project_root — canonical repo identity */
@@ -781,11 +782,10 @@ static void worktree_session_key_old(const char *sid, char *out, size_t cap)
 }
 
 /* Compute the expected aimee-managed worktree path for a git repo and session.
- * For git_root="/root/dev/aimee" and session "abc123...", produces
- * "/root/dev/aimee/.aimee/worktrees/<key>/main" where <key> is the session
- * key (see worktree_session_key).
+ * Worktrees live under Aimee's state directory, never inside the product tree,
+ * so repository scanners cannot discover nested configurations.
  * If work_name is non-NULL (e.g. "task01"), produces
- * "/root/dev/aimee/.aimee/worktrees/<key>/task01" to avoid collisions
+ * "$AIMEE_HOME/.aimee/worktrees/<repo-key>/<key>/task01" to avoid collisions
  * when multiple delegates run in the same session. */
 int worktree_sibling_path(const char *git_root, const char *sid, const char *work_name,
                           char *wt_buf, size_t wt_len)
@@ -794,12 +794,22 @@ int worktree_sibling_path(const char *git_root, const char *sid, const char *wor
       return -1;
 
    char short_id[WORKTREE_SID_KEY_LEN + 1];
+   char repo_key[SESSION_WORKTREE_REPO_KEY_MAX];
    worktree_session_key(sid, short_id, sizeof(short_id));
+   session_worktree_repo_key(git_root, repo_key, sizeof(repo_key));
+   const char *home = aimee_home();
+   if (!short_id[0] || !repo_key[0] || !home || !home[0])
+      return -1;
 
-   if (work_name && work_name[0])
-      snprintf(wt_buf, wt_len, "%s/.aimee/worktrees/%s/%s", git_root, short_id, work_name);
-   else
-      snprintf(wt_buf, wt_len, "%s/.aimee/worktrees/%s/main", git_root, short_id);
+   int n = work_name && work_name[0] ? snprintf(wt_buf, wt_len, "%s/.aimee/worktrees/%s/%s/%s",
+                                                home, repo_key, short_id, work_name)
+                                     : snprintf(wt_buf, wt_len, "%s/.aimee/worktrees/%s/%s/main",
+                                                home, repo_key, short_id);
+   if (n < 0 || (size_t)n >= wt_len)
+   {
+      wt_buf[0] = '\0';
+      return -1;
+   }
    return 0;
 }
 
@@ -852,15 +862,47 @@ int worktree_managed_git_root(const char *path, char *out, size_t out_len)
    if (!path || !out || out_len == 0)
       return -1;
    out[0] = '\0';
-   const char *marker = strstr(path, "/.aimee/worktrees/");
-   if (!marker || marker == path)
-      return -1;
-   size_t n = (size_t)(marker - path);
-   if (n >= out_len)
-      return -1;
-   memcpy(out, path, n);
-   out[n] = '\0';
-   return out[0] ? 0 : -1;
+   char cursor[MAX_PATH_LEN];
+   snprintf(cursor, sizeof(cursor), "%s", path);
+   struct stat st;
+   if (stat(cursor, &st) == 0 && !S_ISDIR(st.st_mode))
+   {
+      char *slash = strrchr(cursor, '/');
+      if (slash)
+         *slash = '\0';
+   }
+   for (;;)
+   {
+      char dotgit[MAX_PATH_LEN];
+      snprintf(dotgit, sizeof(dotgit), "%s/.git", cursor);
+      FILE *f = fopen(dotgit, "r");
+      if (f)
+      {
+         char line[MAX_PATH_LEN] = "";
+         (void)fgets(line, sizeof(line), f);
+         fclose(f);
+         char *gitdir = strstr(line, "gitdir:");
+         char *root = gitdir ? gitdir + strlen("gitdir:") : NULL;
+         while (root && (*root == ' ' || *root == '\t'))
+            root++;
+         char *worktrees = root ? strstr(root, "/.git/worktrees/") : NULL;
+         if (worktrees)
+         {
+            size_t n = (size_t)(worktrees - root);
+            if (n > 0 && n < out_len)
+            {
+               memcpy(out, root, n);
+               out[n] = '\0';
+               return 0;
+            }
+         }
+         return -1;
+      }
+      char *slash = strrchr(cursor, '/');
+      if (!slash || slash == cursor)
+         return -1;
+      *slash = '\0';
+   }
 }
 
 /* Count active aimee worktrees for a given git_root. */
@@ -872,7 +914,18 @@ int count_active_worktrees_for_root(const char *git_root)
    int count = 0;
 
    char managed_root[MAX_PATH_LEN];
-   snprintf(managed_root, sizeof(managed_root), "%s/.aimee/worktrees", git_root);
+   char probe[MAX_PATH_LEN];
+   if (worktree_sibling_path(git_root, "count", NULL, probe, sizeof(probe)) != 0)
+      return 0;
+   snprintf(managed_root, sizeof(managed_root), "%s", probe);
+   char *session = strrchr(managed_root, '/');
+   if (!session)
+      return 0;
+   *session = '\0';
+   session = strrchr(managed_root, '/');
+   if (!session)
+      return 0;
+   *session = '\0';
    DIR *managed = opendir(managed_root);
    if (managed)
    {
@@ -935,7 +988,21 @@ static void worktree_registry_paths(const char *git_root, char *repo_path, size_
                                     char *global_path, size_t global_len)
 {
    if (repo_path && repo_len > 0)
-      snprintf(repo_path, repo_len, "%s/.aimee/worktrees/registry.tsv", git_root);
+   {
+      char probe[MAX_PATH_LEN];
+      if (worktree_sibling_path(git_root, "registry", NULL, probe, sizeof(probe)) == 0)
+      {
+         char *session = strrchr(probe, '/');
+         if (session)
+            *session = '\0';
+         session = strrchr(probe, '/');
+         if (session)
+            *session = '\0';
+         snprintf(repo_path, repo_len, "%s/registry.tsv", probe);
+      }
+      else
+         repo_path[0] = '\0';
+   }
    if (global_path && global_len > 0)
       snprintf(global_path, global_len, "%s/worktrees.tsv", config_output_dir());
 }

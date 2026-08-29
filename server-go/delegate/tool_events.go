@@ -101,7 +101,7 @@ func sanitizeValue(v string) string {
 // ToolEventKind returns the lifecycle kind for a tool event status.
 func ToolEventKind(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "error", "failed":
+	case "error", "failed", "cancelled", "canceled":
 		return ToolEventError
 	case "completed", "complete", "done":
 		return ToolEventComplete

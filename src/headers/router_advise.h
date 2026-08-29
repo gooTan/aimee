@@ -28,8 +28,7 @@ void router_advise_turn(const char *session_id, const char *message);
 /* S4 autonomous parity: pick the workflow for an autonomous submission whose
  * `workflow` was omitted. Routes `text` through the request->workflow router (no
  * LLM: intake stays deterministic and `text` is untrusted), clamped to the
- * full-spine autonomous set (floor = managed-change). Always yields a usable
- * full-spine workflow -- on a catalog fault it falls to the floor. Fills:
+ * autonomous set (floor = build). On a catalog fault it falls to the floor. Fills:
  *   out_wf   (>=1)  the chosen workflow id;
  *   out_src  (opt)  decision source: "prefilter"/"classifier"/"default"/"cat-error";
  *   out_raw  (opt)  the pre-clamp router id (for audit);

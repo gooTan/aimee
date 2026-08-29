@@ -56,6 +56,8 @@ nodes:
       plan: plan.out
     next: slices
     on_fail: split
+    params:
+      delegate: fable
   - id: slices
     block: foreach.workflow
     in:
@@ -105,6 +107,8 @@ nodes:
     block: document
     in:
       branch: slices.out
+    params:
+      delegate: muse
     next: doc_freeze
     on_fail: document
   - id: doc_freeze

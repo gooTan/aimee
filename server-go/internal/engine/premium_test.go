@@ -59,6 +59,15 @@ func TestNormalizeEscalationAcceptsOnlyDecisionClasses(t *testing.T) {
 	}
 }
 
+func TestContextBriefRetryPromptIncludesPriorBlockedReason(t *testing.T) {
+	prompt := contextBriefPromptWithRetry("proposal key=abc", "memory unavailable: approval denied")
+	for _, want := range []string{"proposal key=abc", "PREVIOUS BLOCKED REASON TO ADDRESS", "memory unavailable: approval denied"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestValidateContextBrief(t *testing.T) {
 	valid := `{"schema_version":2,"status":"ready","summary":"do the thing","files":["a.go"],"acceptance_criteria":["it works"],"mandatory_preconditions":[{"id":"routing-e2e-20260824-l1","status":"satisfied"}]}`
 	if err := validateContextBrief([]byte(valid)); err != nil {

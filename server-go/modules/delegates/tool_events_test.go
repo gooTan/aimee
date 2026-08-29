@@ -69,6 +69,21 @@ func TestParseCodexToolCompleteEmitsCompletedOnly(t *testing.T) {
 	}
 }
 
+func TestParseCodexToolCompleteSurfacesFailedAndCancelledMCP(t *testing.T) {
+	col := newToolCollector()
+	parseCodexToolComplete(`{"type":"item.completed","item":{"type":"mcp_tool_call","name":"search_memory","id":"mcp-1","status":"failed","result":"secret raw result"}}`, col)
+	parseCodexToolComplete(`{"type":"item.completed","item":{"type":"mcp_tool_call","name":"search_memory","id":"mcp-2","status":"cancelled","error":"raw cancellation detail"}}`, col)
+	evs := col.result()
+	if len(evs) != 2 || evs[0].Status != "failed" || evs[1].Status != "cancelled" {
+		t.Fatalf("codex mcp statuses = %+v", evs)
+	}
+	for _, ev := range evs {
+		if strings.Contains(ev.ToolName, "secret raw result") || strings.Contains(ev.CallID, "raw cancellation") {
+			t.Fatalf("raw MCP payload leaked into event: %+v", ev)
+		}
+	}
+}
+
 func TestParseACPToolEventsStartAndComplete(t *testing.T) {
 	col := newToolCollector()
 	// Simulate tool_call start.
@@ -88,6 +103,16 @@ func TestParseACPToolEventsStartAndComplete(t *testing.T) {
 	// Elapsed should be measured between start and complete.
 	if evs[1].ElapsedMS < 0 {
 		t.Fatalf("elapsed negative: %+v", evs[1])
+	}
+}
+
+func TestParseACPToolEventsPreserveFailedAndCancelled(t *testing.T) {
+	col := newToolCollector()
+	parseACPToolEvent("tool_call_update", "Read", "call-f", "failed", col)
+	parseACPToolEvent("tool_call_update", "Read", "call-c", "cancelled", col)
+	evs := col.result()
+	if len(evs) != 2 || evs[0].Status != "failed" || evs[1].Status != "cancelled" {
+		t.Fatalf("status = %+v", evs)
 	}
 }
 

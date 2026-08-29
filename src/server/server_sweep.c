@@ -3,9 +3,8 @@
  * Reuses the roundtable's in-process machinery (config + agent fan-out) and the
  * shipped pure sweep logic (sweep.h). It proposes seams per area, mechanically
  * re-grounds each against the live code index (kb_client), and returns a JSON
- * report. Default analysis-only; with {"file":true} it files STRONG candidates as
- * vertical-slice work items onto the manual-review workflow (a human gate — NEVER
- * "build"), after a lexical + realpath-under-root path check. It never edits source.
+ * report. Filing is disabled until a canonical human-review workflow is configured;
+ * it never routes unvetted candidates into build and never edits source.
  */
 #include "server.h"
 
@@ -169,8 +168,7 @@ static char *build_area_prompt(const char *root, const char (*paths)[MAX_PATH_LE
    return dstr_steal(&s);
 }
 
-/* Filing context: when do_file, STRONG candidates are filed as work items on the
- * manual-review workflow (never "build" — a human must promote). */
+/* Filing context for STRONG candidates. */
 typedef struct
 {
    int do_file;
@@ -180,8 +178,8 @@ typedef struct
    int file_rejected; /* skipped: unsafe / out-of-root path */
 } sweep_file_ctx_t;
 
-/* Build a vertical-slice proposal for a STRONG seam, validate the seam path, and
- * file it onto manual-review. Untrusted candidate strings: sweep_path_safe (lexical)
+/* Build a vertical-slice proposal for a STRONG seam and validate the seam path.
+ * Untrusted candidate strings: sweep_path_safe (lexical)
  * THEN realpath under root before anything is written or filed. */
 static void file_candidate(sweep_file_ctx_t *fc, const char *key, const sweep_candidate_t *cand,
                            const sweep_edges_t *edges)
@@ -257,14 +255,17 @@ static void file_candidate(sweep_file_ctx_t *fc, const char *key, const sweep_ca
    dstr_free(&md);
 
    char id[80] = "", err[256] = "";
-   /* S4 autonomous parity (roundtable 2026-07-03, Q3 option a): sweep candidates
-    * are UNVETTED heuristic finds, so they always file onto the human-gate floor
-    * (`manual-review`), NEVER an auto-executing lane. This is a fixed floor, not a
-    * content router -- routing unvetted input could only misroute toward
-    * auto-execute for zero safety benefit. wfe_sweep_workflow_floor() is the
-    * named, test-locked invariant (see wfe_autonomous_route.h). */
-   int rc = wfe_work_item_create(wfe_sweep_workflow_floor(), fc->repo ? fc->repo : "", ppath,
-                                 "sweep", id, err, sizeof(err));
+   /* Sweep candidates are unvetted. An empty floor disables filing rather than
+    * routing them into an auto-executing lane. */
+   const char *workflow = wfe_sweep_workflow_floor();
+   if (!workflow || !workflow[0])
+   {
+      fc->file_rejected++;
+      aimee_log(LOG_WARN, "sweep", "filing '%s' skipped: no human-review workflow configured", key);
+      return;
+   }
+   int rc = wfe_work_item_create(workflow, fc->repo ? fc->repo : "", ppath, "sweep", id, err,
+                                 sizeof(err));
    if (rc != 0 || !id[0])
    {
       fc->file_rejected++;
@@ -460,15 +461,14 @@ int handle_dev_sweep(server_ctx_t *ctx, server_conn_t *conn, cJSON *req)
    cJSON_AddNumberToObject(resp, "filed", fc.filed);
    cJSON_AddNumberToObject(resp, "file_rejected", fc.file_rejected);
    /* v1: shared-state (blast radius) is not yet wired, so over-coupling is not
-    * demoted — STRONG here means count+distribution+independence only. STRONG
-    * candidates are filed onto the manual-review workflow (human gate) only when
-    * file=true; never auto-built. */
+    * demoted — STRONG here means count+distribution+independence only. */
    cJSON_AddStringToObject(resp, "note",
                            do_file
-                               ? "filed STRONG candidates to manual-review (human gate, not "
-                                 "build); shared-state conservative (v1)"
+                               ? "filing disabled: no human-review workflow is configured; "
+                                 "shared-state conservative (v1)"
                                : "analysis-only (pass {\"file\":true} to file STRONG candidates "
-                                 "to manual-review); shared-state conservative (v1)");
+                                 "after configuring a human-review workflow); shared-state "
+                                 "conservative (v1)");
 
    for (int i = 0; i < settled_n; i++)
       free(settled_arr[i]);

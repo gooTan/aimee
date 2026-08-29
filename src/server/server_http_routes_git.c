@@ -563,11 +563,9 @@ static int wfe_managed_repo(const char *workdir_in, const char *head, char *work
    return 0;
 }
 
-/* A final WFE PR targets the branch on which the admitted repository was
- * checked out (for example `testing`), not necessarily GitHub's repository
- * default (`main`). Binding the base to this trusted checkout prevents an item
- * from selecting an arbitrary remote branch while preserving non-default
- * integration lanes. */
+/* A final WFE PR may target either the admitted integration branch or the
+ * repository's advertised default branch (`base: trunk`). Both values come
+ * from the trusted checkout, so an item still cannot select an arbitrary ref. */
 static int wfe_managed_base(const char *repo, const char *base, char *err, size_t errlen)
 {
    char branch[256];
@@ -578,7 +576,14 @@ static int wfe_managed_base(const char *repo, const char *base, char *err, size_
       snprintf(err, errlen, "cannot resolve managed integration branch");
       return -1;
    }
-   return strcmp(branch, base) == 0;
+   if (strcmp(branch, base) == 0)
+      return 1;
+   const char *default_argv[] = {
+       "git", "-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", NULL};
+   if (wfe_git_capture(repo, default_argv, branch, sizeof(branch)) != 0)
+      return 0;
+   const char *default_branch = strncmp(branch, "origin/", 7) == 0 ? branch + 7 : branch;
+   return strcmp(default_branch, base) == 0;
 }
 
 static int wfe_forge_body_fields_valid(const cJSON *body)

@@ -266,6 +266,17 @@ int main(void)
    assert(git_pr_info_via_api_slug(NULL, SLUG, 7, &info, err, sizeof(err)) == -1);
    assert(strstr(err, "could not be reached") != NULL);
 
+   /* --- pr_mark_ready -------------------------------------------------- */
+
+   module_bus_stub_reply("{\"status\":200}");
+   assert(git_pr_mark_ready_via_api_slug(NULL, SLUG, 71, err, sizeof(err)) == 0);
+   module_bus_stub_reply("{\"status\":422,\"error\":\"pr ready: already ready\"}");
+   assert(git_pr_mark_ready_via_api_slug(NULL, SLUG, 71, err, sizeof(err)) == -1);
+   assert(strstr(err, "already ready") != NULL);
+   before = module_bus_stub_calls();
+   assert(git_pr_mark_ready_via_api_slug(NULL, SLUG, 0, err, sizeof(err)) == -1);
+   assert(module_bus_stub_calls() == before);
+
    /* --- pr_find_open ---------------------------------------------------- */
 
    int number = 0;

@@ -23,6 +23,7 @@ const (
 	OpPRListOpen    = "pr_list_open"
 	OpPRInfo        = "pr_info"
 	OpPREdit        = "pr_edit"
+	OpPRMarkReady   = "pr_mark_ready"
 	OpPRMerge       = "pr_merge"
 	OpRepoFork      = "repo_fork"
 )
@@ -356,6 +357,65 @@ func PerformForge(request ForgeRequest) ForgeResponse {
 			return ForgeResponse{Status: status, Error: forgeError(status, payload, "pr edit")}
 		}
 		return ForgeResponse{Status: status, Pull: summarize(payload)}
+
+	case OpPRMarkReady:
+		if request.Number <= 0 {
+			return ForgeResponse{Error: "pr ready: a positive number is required"}
+		}
+		status, payload, err := forgeCall(http.MethodGet,
+			fmt.Sprintf("%s/pulls/%d", repo, request.Number), request.Token, nil)
+		if err != nil {
+			return ForgeResponse{Error: "forge: " + err.Error()}
+		}
+		if status < 200 || status > 299 {
+			return ForgeResponse{Status: status, Error: forgeError(status, payload, "pr ready")}
+		}
+		var pull struct {
+			NodeID string `json:"node_id"`
+			Draft  bool   `json:"draft"`
+		}
+		if json.Unmarshal(payload, &pull) != nil || pull.NodeID == "" {
+			return ForgeResponse{Status: status, Error: "pr ready: unreadable response"}
+		}
+		if !pull.Draft {
+			return ForgeResponse{Status: status}
+		}
+		body := map[string]any{
+			"query":     "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}",
+			"variables": map[string]string{"id": pull.NodeID},
+		}
+		status, payload, err = forgeCall(http.MethodPost, "/graphql", request.Token, body)
+		if err != nil {
+			return ForgeResponse{Error: "forge: " + err.Error()}
+		}
+		var result struct {
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+			Data struct {
+				Mark struct {
+					Pull *struct {
+						Draft bool `json:"isDraft"`
+					} `json:"pullRequest"`
+				} `json:"markPullRequestReadyForReview"`
+			} `json:"data"`
+		}
+		if status < 200 || status > 299 {
+			return ForgeResponse{Status: status, Error: forgeError(status, payload, "pr ready")}
+		}
+		if json.Unmarshal(payload, &result) != nil {
+			return ForgeResponse{Status: status, Error: "pr ready: unreadable response"}
+		}
+		if len(result.Errors) > 0 {
+			return ForgeResponse{Status: status, Error: "pr ready: " + result.Errors[0].Message}
+		}
+		if result.Data.Mark.Pull == nil {
+			return ForgeResponse{Status: status, Error: "pr ready: unreadable response"}
+		}
+		if result.Data.Mark.Pull.Draft {
+			return ForgeResponse{Status: status, Error: "pr ready: forge left the pull request as draft"}
+		}
+		return ForgeResponse{Status: status}
 
 	case OpPRMerge:
 		if request.Number <= 0 {

@@ -194,6 +194,22 @@ func TestRequiredCodeReviewSkillEnablesReviewTools(t *testing.T) {
 	}
 }
 
+func TestReviewToolsCanBeEnabledWithoutARequiredSkill(t *testing.T) {
+	agents := &recordingAgents{}
+	runner := &NativeRunner{agents: agents}
+	_, err := runner.review(t.Context(), StepRequest{
+		WorkItem: db1.WorkItem{Worktree: t.TempDir()},
+		Node:     wfe.Node{Params: map[string]any{"tools": true}},
+		Inputs:   map[string]wfe.Artifact{"src": {Content: []byte("diff"), Hash: "hash"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 1 || !agents.requests[0].Tools {
+		t.Fatalf("review request = %+v, want tools enabled", agents.requests)
+	}
+}
+
 func TestDelegateDeadlineCapLeavesWriteVerificationReserve(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()

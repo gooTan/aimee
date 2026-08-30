@@ -298,7 +298,7 @@ func TestCanonicalBuildWorkflowBindings(t *testing.T) {
 		t.Fatalf("sol_review binding=%+v", solReview)
 	}
 	fableJudgment, ok := find("fable_judgment")
-	if !ok || mustParamString(fableJudgment, "delegate") != "fable" || mustParamString(fableJudgment, "persona") != "chairman" || fableJudgment.Next != "document" {
+	if !ok || mustParamString(fableJudgment, "delegate") != "fable" || mustParamString(fableJudgment, "persona") != "chairman" || !mustParamBool(fableJudgment, "tools") || fableJudgment.Next != "document" {
 		t.Fatalf("fable_judgment binding=%+v", fableJudgment)
 	}
 

@@ -100,6 +100,7 @@ nodes:
     params:
       delegate: fable
       persona: chairman
+      tools: true
       task: Make the final acceptance judgment after the Gemini and Sol code-review-skill passes. Confirm the requested behavior is complete and reject any surviving blocker before documentation and pull-request handoff.
     next: document
     on_fail: split

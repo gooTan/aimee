@@ -1403,7 +1403,7 @@ func (r *NativeRunner) review(ctx context.Context, req StepRequest) (StepResult,
 	costUnknown := false
 	for attempt := 0; attempt < 2; attempt++ {
 		next, delegateErr := r.delegate(ctx, req, DelegateRequest{Role: "review", Persona: persona, Delegate: paramString(req.Node, "delegate", ""), Prompt: prompt, Workdir: workdir,
-			Tools: paramBool(req.Node, "require_code_review_skill")})
+			Tools: paramBool(req.Node, "tools") || paramBool(req.Node, "require_code_review_skill")})
 		if delegateErr != nil {
 			return StepResult{}, delegateErr
 		}

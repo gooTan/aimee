@@ -97,6 +97,11 @@ int git_pr_update_via_api_slug(const char *principal, const char *slug, int numb
 int git_pr_edit_via_api_slug(const char *principal, const char *slug, int number, const char *title,
                              const char *body, const char *base, char *err, size_t errlen);
 
+/* Mark an existing draft PR ready for review. This is distinct from the
+ * no-number `pr ready` convenience action that publishes the current branch. */
+int git_pr_mark_ready_via_api_slug(const char *principal, const char *slug, int number, char *err,
+                                   size_t errlen);
+
 /* One CI check for a PR's head commit, in the shape `gh pr checks` printed it.
  * The field values and their spelling were derived from gh's actual output rather
  * than from its source: 85 rows across three PRs matched field-for-field.

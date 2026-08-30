@@ -48,6 +48,17 @@ int git_pr_edit_via_api_slug(const char *principal, const char *slug, int number
    return -1;
 }
 
+int git_pr_mark_ready_via_api_slug(const char *principal, const char *slug, int number, char *err,
+                                   size_t errlen)
+{
+   (void)principal;
+   (void)slug;
+   (void)number;
+   if (err && errlen)
+      snprintf(err, errlen, "pr api unavailable (stub)");
+   return -1;
+}
+
 /* The update_branch action's forge call. Refuses like the ops above: these
  * binaries assert on routing and validation, never on a real branch update. */
 int git_pr_update_branch_via_api_slug(const char *principal, const char *slug, int number,

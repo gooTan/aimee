@@ -1174,7 +1174,8 @@ static cJSON *mcp_build_tools_list_ex(int collapse)
           {"title", "string", "pr: title (create/edit)."},
           {"body", "string", "pr: body (create/edit)."},
           {"number", "integer",
-           "pr: PR number (view/edit/checks/watch/merge_status/update_branch/wait)."},
+           "pr: PR number (view/edit/checks/watch/merge_status/update_branch/wait; ready marks "
+           "that draft ready for review)."},
           {"wait", "boolean",
            "Deprecated for pr checks: blocking waits are rejected; poll snapshots instead."},
           {"auto", "boolean",
@@ -1252,8 +1253,9 @@ static cJSON *mcp_build_tools_list_ex(int collapse)
               "branch's commits when you omit them. Remaining "
               "params apply per command (see each description); branch/pr/stash/tag/issue/"
               "verify also take an 'action' sub-selector. Use command=pr action=view to "
-              "check a PR's merge state before pushing. command=pr action=ready is the whole \"put "
-              "this up for review\" errand: sync, lease-protected push, and open the PR (deriving "
+              "check a PR's merge state before pushing. command=pr action=ready with a PR number "
+              "marks that draft ready for review. Without a number it is the whole \"put this up "
+              "for review\" errand: sync, lease-protected push, and open the PR (deriving "
               "title and body), stopping at the first real failure with that step's own "
               "explanation. PASS 'path' WHENEVER YOU MEAN A "
               "SPECIFIC CHECKOUT: without it the repository is inferred from session state, "

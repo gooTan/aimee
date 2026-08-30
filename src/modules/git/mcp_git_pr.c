@@ -1088,7 +1088,25 @@ cJSON *handle_git_pr(cJSON *args)
    }
 
    if (strcmp(action, "ready") == 0)
+   {
+      cJSON *jnum = cJSON_GetObjectItemCaseSensitive(args, "number");
+      if (jnum)
+      {
+         if (!cJSON_IsNumber(jnum) || jnum->valueint <= 0)
+            return mcp_text("error: 'number' must be a positive PR number");
+         char slug[264], err[512];
+         if (get_origin_repo_slug(slug, sizeof(slug)) != 0)
+            return mcp_text("error: cannot resolve a github.com origin for this checkout");
+         err[0] = '\0';
+         if (git_pr_mark_ready_via_api_slug(agent_get_request_vault_principal(), slug,
+                                            jnum->valueint, err, sizeof(err)) != 0)
+            return mcp_error("error: pr ready failed: %s", err[0] ? err : "unknown");
+         char result[96];
+         snprintf(result, sizeof(result), "marked PR #%d ready for review", jnum->valueint);
+         return mcp_text(result);
+      }
       return pr_ready(args);
+   }
 
    return mcp_text("error: unknown action. Use "
                    "create/view/list/edit/checks/watch/merge_status/merge/wait/ready");

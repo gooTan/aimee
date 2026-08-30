@@ -3526,6 +3526,33 @@ static void test_pr_ready_runs_sync_then_push(void)
    teardown_git_repo();
 }
 
+/* A numbered ready targets that PR; it must never enter the current-branch
+ * sync/push/create convenience workflow. The fixture has no GitHub origin, so
+ * the safe numbered path stops at repository resolution. The old path instead
+ * reached sync and reported its conflicting file. */
+static void test_pr_ready_number_never_publishes_current_branch(void)
+{
+   setup_conflicting_branches();
+   setup_ownership_db();
+   session_id_set_override("session-A");
+
+   cJSON *args = cJSON_CreateObject();
+   cJSON_AddStringToObject(args, "action", "ready");
+   cJSON_AddNumberToObject(args, "number", 71);
+   cJSON_AddStringToObject(args, "base", "side");
+   cJSON *resp = handle_git_pr(args);
+   char *text = get_mcp_text(resp);
+   assert(text != NULL);
+   assert(strstr(text, "cannot resolve a github.com origin") != NULL);
+   assert(strstr(text, "file.txt") == NULL);
+   cJSON_Delete(resp);
+   cJSON_Delete(args);
+
+   session_id_clear_override();
+   teardown_ownership_db();
+   teardown_git_repo();
+}
+
 static void test_pr_unknown_action_lists_ready(void)
 {
    setup_git_repo();
@@ -4199,6 +4226,7 @@ int main(void)
    test_pr_create_with_no_commits_says_so();
    test_pr_ready_stops_at_the_failing_step();
    test_pr_ready_runs_sync_then_push();
+   test_pr_ready_number_never_publishes_current_branch();
    test_pr_unknown_action_lists_ready();
 
    /* Fork and explicit push (canonicalization spy tests) */

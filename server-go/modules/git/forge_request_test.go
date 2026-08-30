@@ -2,6 +2,7 @@ package git
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,6 +103,38 @@ func TestPRCreateSendsTheFieldsAndReadsTheNumber(t *testing.T) {
 	}
 	if out.Pull.Number != 42 || out.Pull.Head != "feat" || out.Pull.Base != "testing" {
 		t.Fatalf("summary = %+v", out.Pull)
+	}
+}
+
+func TestPRMarkReadyUsesTheNumberedPullRequest(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if r.URL.Path == "/repos/o/r/pulls/71" {
+			_, _ = w.Write([]byte(`{"node_id":"PR_node","draft":true}`))
+			return
+		}
+		if r.URL.Path == "/graphql" {
+			buf, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(buf), `"id":"PR_node"`) {
+				t.Fatalf("mutation body = %s", buf)
+			}
+			_, _ = w.Write([]byte(`{"data":{"markPullRequestReadyForReview":{"pullRequest":{"isDraft":false}}}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	previous := forgeBaseURL
+	forgeBaseURL = server.URL
+	t.Cleanup(func() { forgeBaseURL = previous; server.Close() })
+
+	out := PerformForge(ForgeRequest{Op: OpPRMarkReady, Owner: "o", Repo: "r", Token: "t", Number: 71})
+	if out.Error != "" {
+		t.Fatalf("unexpected error: %s", out.Error)
+	}
+	want := []string{"GET /repos/o/r/pulls/71", "POST /graphql"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }
 

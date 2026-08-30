@@ -815,6 +815,45 @@ int git_pr_edit_via_api_slug(const char *principal, const char *slug, int number
    return 0;
 }
 
+int git_pr_mark_ready_via_api_slug(const char *principal, const char *slug, int number, char *err,
+                                   size_t errlen)
+{
+   if (err && errlen)
+      err[0] = '\0';
+   if (number <= 0)
+   {
+      snprintf(err, errlen, "invalid PR number");
+      return -1;
+   }
+   gh_ctx_t cx;
+   if (gh_ctx_resolve_slug(principal, slug, &cx, err, errlen) != 0)
+      return -1;
+   cJSON *extra = cJSON_CreateObject();
+   if (!extra)
+   {
+      gh_ctx_done(&cx);
+      snprintf(err, errlen, "internal error");
+      return -1;
+   }
+   cJSON_AddNumberToObject(extra, "number", number);
+   cJSON *reply = forge_stage(&cx, "pr_mark_ready", extra);
+   gh_ctx_done(&cx);
+   if (!reply)
+   {
+      snprintf(err, errlen, "pr ready: the git module could not be reached");
+      return -1;
+   }
+   const cJSON *message = cJSON_GetObjectItemCaseSensitive(reply, "error");
+   if (cJSON_IsString(message) && message->valuestring)
+   {
+      snprintf(err, errlen, "%s", message->valuestring);
+      cJSON_Delete(reply);
+      return -1;
+   }
+   cJSON_Delete(reply);
+   return 0;
+}
+
 /* Seconds since the epoch for "YYYY-MM-DDTHH:MM:SSZ", or -1 if it does not parse.
  *
  * Done by arithmetic rather than strptime/timegm: neither is available on every
